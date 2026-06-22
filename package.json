@@ -27,6 +27,7 @@
     "export:main": "node scripts/export_dashboard_snapshot.js --db data/ews-main.sqlite --endpoint main --cohort global_business_jet",
     "export:military": "node scripts/export_dashboard_snapshot.js --db data/ews-military.sqlite --endpoint military --cohort global_military_aircraft",
     "export:untracked": "node scripts/export_dashboard_snapshot.js --db data/ews-untracked.sqlite --endpoint untracked --cohort non_icao_untracked",
+    "import:archive": "node scripts/import_dashboard_archive.js",
     "refresh:all": "node scripts/refresh_all_snapshots.js",
     "rss:update": "node scripts/update_rss_feed.js",
     "telegram:alert": "node scripts/send_telegram_alert.js"
