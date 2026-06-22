@@ -11,6 +11,8 @@ const PUBLISHED_DIR = path.join(DATA_DIR, 'published');
 const MAIN_DB = path.join(DATA_DIR, 'ews-main.sqlite');
 const MILITARY_DB = path.join(DATA_DIR, 'ews-military.sqlite');
 const UNTRACKED_DB = path.join(DATA_DIR, 'ews-untracked.sqlite');
+const VENV_PYTHON = path.join(ROOT_DIR, '.venv', 'bin', 'python');
+const PYTHON_BIN = process.env.EWS_PYTHON || (fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : 'python3');
 
 const args = new Set(process.argv.slice(2));
 const refreshImports = args.has('--refresh-imports');
@@ -53,8 +55,8 @@ function ensureMainCohort() {
     return;
   }
 
-  run('python3', ['scripts/import_faa_cohort.py', '--db', MAIN_DB]);
-  run('python3', ['scripts/import_global_cohort.py', '--db', MAIN_DB, ...(refreshImports ? ['--refresh'] : [])]);
+  run(PYTHON_BIN, ['scripts/import_faa_cohort.py', '--db', MAIN_DB]);
+  run(PYTHON_BIN, ['scripts/import_global_cohort.py', '--db', MAIN_DB, ...(refreshImports ? ['--refresh'] : [])]);
 }
 
 function ensureMilitaryCohort() {
@@ -62,7 +64,7 @@ function ensureMilitaryCohort() {
     return;
   }
 
-  run('python3', [
+  run(PYTHON_BIN, [
     'scripts/import_global_cohort.py',
     '--db',
     MILITARY_DB,
@@ -75,9 +77,9 @@ function ensureMilitaryCohort() {
 }
 
 function refreshLiveData() {
-  run('python3', ['scripts/update_latest_heatmap.py', '--db', MAIN_DB]);
-  run('python3', ['scripts/update_latest_heatmap.py', '--db', MILITARY_DB]);
-  run('python3', [
+  run(PYTHON_BIN, ['scripts/update_latest_heatmap.py', '--db', MAIN_DB]);
+  run(PYTHON_BIN, ['scripts/update_latest_heatmap.py', '--db', MILITARY_DB]);
+  run(PYTHON_BIN, [
     'scripts/track_non_icao_hex.py',
     '--db',
     UNTRACKED_DB,
