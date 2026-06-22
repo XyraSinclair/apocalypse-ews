@@ -50,6 +50,19 @@ function trackedAircraftCount(dbPath) {
   }
 }
 
+function purgeDemoTrackedAircraft(dbPath) {
+  if (!fs.existsSync(dbPath)) {
+    return;
+  }
+
+  const db = new Database(dbPath);
+  try {
+    db.prepare("DELETE FROM tracked_aircraft WHERE source = 'demo'").run();
+  } finally {
+    db.close();
+  }
+}
+
 function ensureMainCohort() {
   if (!refreshImports && trackedAircraftCount(MAIN_DB) > 0) {
     return;
@@ -77,6 +90,9 @@ function ensureMilitaryCohort() {
 }
 
 function refreshLiveData() {
+  purgeDemoTrackedAircraft(MAIN_DB);
+  purgeDemoTrackedAircraft(MILITARY_DB);
+  purgeDemoTrackedAircraft(UNTRACKED_DB);
   run(PYTHON_BIN, ['scripts/update_latest_heatmap.py', '--db', MAIN_DB]);
   run(PYTHON_BIN, ['scripts/update_latest_heatmap.py', '--db', MILITARY_DB]);
   run(PYTHON_BIN, [
