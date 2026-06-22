@@ -20,6 +20,7 @@ loadEnvFile();
 
 const app = express();
 const PORT = Number(process.env.PORT || 3030);
+const HOST = process.env.HOST || "127.0.0.1";
 const DASHBOARD_SNAPSHOT_META_KEY = "dashboard_snapshot_v1";
 const PUBLISHED_DASHBOARD_FILES = new Map([
   ["/dashboard.json", "dashboard.json"],
@@ -223,8 +224,8 @@ async function start() {
   const hadPersistedSnapshot = dashboardSnapshotManager.hasSnapshot();
   await dashboardSnapshotManager.ensureReady();
 
-  app.listen(PORT, () => {
-    console.log(`EWS server listening on http://localhost:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`EWS server listening on http://${HOST}:${PORT}`);
   });
 
   heatmapRefresher.start();
