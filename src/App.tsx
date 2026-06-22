@@ -1,9 +1,9 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 
 const DASHBOARD_URLS = {
-  business: 'https://pub-49bb6a6f314c47be9b481c25e5f6ca9e.r2.dev/dashboard.json',
-  military: 'https://pub-49bb6a6f314c47be9b481c25e5f6ca9e.r2.dev/military-dashboard.json',
-  untracked: 'https://pub-49bb6a6f314c47be9b481c25e5f6ca9e.r2.dev/untracked-dashboard.json',
+  business: import.meta.env.VITE_DASHBOARD_URL || '/dashboard.json',
+  military: import.meta.env.VITE_MILITARY_DASHBOARD_URL || '/military-dashboard.json',
+  untracked: import.meta.env.VITE_UNTRACKED_DASHBOARD_URL || '/untracked-dashboard.json',
 } as const;
 
 const CATEGORY_LABELS: Record<CohortKind, string> = {

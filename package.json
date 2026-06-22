@@ -1,23 +1,50 @@
 {
   "name": "apocalypse-ews",
   "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "description": "Independent client-side recreation of the Apocalypse Early Warning System dashboard behavior.",
+  "version": "0.2.0",
+  "type": "commonjs",
+  "description": "Private backend-capable recreation of the Apocalypse Early Warning System.",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
+    "dev": "concurrently -k -n server,client -c blue,magenta \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "node --watch server/index.js",
+    "dev:client": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "start": "node server/index.js",
+    "seed:demo": "python3 scripts/seed_demo_data.py",
+    "import:faa": "python3 scripts/import_faa_cohort.py",
+    "import:global": "python3 scripts/import_global_cohort.py",
+    "backfill": "python3 scripts/backfill_history.py",
+    "track:non-icao": "python3 scripts/track_non_icao_hex.py",
+    "audit:recent": "python3 scripts/audit_recent_history_coverage.py --db data/ews-main.sqlite --db data/ews-military.sqlite --db data/ews-untracked.sqlite --slots 48",
+    "update:main": "python3 scripts/update_latest_heatmap.py --db data/ews-main.sqlite",
+    "update:military": "python3 scripts/update_latest_heatmap.py --db data/ews-military.sqlite",
+    "update:untracked": "python3 scripts/track_non_icao_hex.py --db data/ews-untracked.sqlite --latest-live --cache-dir data/cache/adsbx_live --replace-live-snapshot",
+    "backfill:main": "python3 scripts/backfill_history.py --db data/ews-main.sqlite",
+    "backfill:military": "python3 scripts/backfill_history.py --db data/ews-military.sqlite",
+    "backfill:untracked": "python3 scripts/track_non_icao_hex.py --db data/ews-untracked.sqlite --metrics-only --write-concurrent-metrics",
+    "export:snapshot": "node scripts/export_dashboard_snapshot.js --db data/ews-main.sqlite --endpoint main --cohort global_business_jet",
+    "export:main": "node scripts/export_dashboard_snapshot.js --db data/ews-main.sqlite --endpoint main --cohort global_business_jet",
+    "export:military": "node scripts/export_dashboard_snapshot.js --db data/ews-military.sqlite --endpoint military --cohort global_military_aircraft",
+    "export:untracked": "node scripts/export_dashboard_snapshot.js --db data/ews-untracked.sqlite --endpoint untracked --cohort non_icao_untracked",
+    "refresh:all": "node scripts/refresh_all_snapshots.js",
+    "rss:update": "node scripts/update_rss_feed.js",
+    "telegram:alert": "node scripts/send_telegram_alert.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
+    "better-sqlite3": "^12.4.1",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "libphonenumber-js": "^1.13.1",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3"
+    "@types/react-dom": "^19.2.3",
+    "concurrently": "^9.2.1"
   }
 }

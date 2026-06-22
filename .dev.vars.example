@@ -1,0 +1,23 @@
+APP_BASE_URL=http://localhost:8788
+EWS_PUBLIC_URL=https://ews.kylemcdonald.net/
+EWS_NOTIFICATION_URL=https://aews.cc/
+
+STRIPE_SECRET_KEY=sk_test_replace_me
+STRIPE_WEBHOOK_SECRET=whsec_replace_me
+STRIPE_PRODUCT_ID=prod_USlMnoY4GL7OAn
+# Optional. If unset, the function resolves the active $5/year price for STRIPE_PRODUCT_ID.
+STRIPE_PRICE_ID=
+
+SENDGRID_API_KEY=SG.replace_me
+SENDGRID_FROM_EMAIL=alerts@example.com
+SENDGRID_FROM_NAME="Apocalypse EWS"
+
+TELNYX_API_KEY=KEY_replace_me
+TELNYX_NUMBER=+15551234567
+TELNYX_PUBLIC_KEY=replace_me
+TELNYX_WEBHOOK_URL=
+TELNYX_WEBHOOK_FAILOVER_URL=
+
+INTERNAL_ALERT_TOKEN=replace_me
+NOTIFICATION_HASH_SECRET=replace_me_with_random_32_bytes_or_more
+NOTIFICATION_ENCRYPTION_KEY=replace_me_with_base64_32_bytes

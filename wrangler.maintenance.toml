@@ -1,0 +1,11 @@
+name = "ews-notification-maintenance"
+main = "workers/notification-maintenance.js"
+compatibility_date = "2026-05-05"
+
+[triggers]
+crons = ["17 * * * *"]
+
+[[d1_databases]]
+binding = "EWS_NOTIFY_DB"
+database_name = "ews-notifications"
+database_id = "7ca8e151-fa6f-4688-a3ac-7fd404ba70e9"

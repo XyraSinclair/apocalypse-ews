@@ -1,0 +1,9 @@
+name = "apocalypse-ews"
+compatibility_date = "2026-05-05"
+pages_build_output_dir = "client/dist"
+
+[[d1_databases]]
+binding = "EWS_NOTIFY_DB"
+database_name = "ews-notifications"
+database_id = "replace-with-cloudflare-d1-database-id"
+migrations_dir = "migrations"
