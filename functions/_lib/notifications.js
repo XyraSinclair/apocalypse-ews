@@ -1066,10 +1066,7 @@ export async function maybeSendLevel5Notifications(env, snapshot, { source = "sc
       lastSentAt,
     };
   }
-
   const triggeredAt = new Date().toISOString();
-  await setMetaValue(env, LEVEL5_COOLDOWN_META_KEY, triggeredAt);
-
   const messageText = formatEmergencyNotification(snapshot, { alertUrl: getAlertUrl(env) });
   const smsMessageText = formatEmergencyNotification(snapshot, { includeAlertUrl: false });
   const alertId = await createAlertRecord(env, {
@@ -1092,6 +1089,11 @@ export async function maybeSendLevel5Notifications(env, snapshot, { source = "sc
     concurrency,
     smsMinIntervalMs,
   });
+  const deliveredCount = Number(summary.emailSentCount || 0) + Number(summary.smsSentCount || 0);
+  if (summary.errorCount === 0 && deliveredCount > 0) {
+    await setMetaValue(env, LEVEL5_COOLDOWN_META_KEY, triggeredAt);
+  }
+
 
   return {
     ok: summary.errorCount === 0,
