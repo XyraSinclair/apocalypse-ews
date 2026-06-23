@@ -39,17 +39,19 @@ async function handleSendGridEvent(env, event) {
   const error = getSendGridDeliveryError(event);
   const messageIds = getSendGridProviderMessageIds(event);
   for (const messageId of messageIds) {
-    const updated = await updateDeliveryByProviderMessageId(env, messageId, {
+    const deliveryUpdate = await updateDeliveryByProviderMessageId(env, messageId, {
       status,
       providerStatus,
       error,
     });
-    if (updated) {
+    if (deliveryUpdate) {
       return {
         event: event.event || null,
         messageId,
         status,
-        updated: true,
+        updated: deliveryUpdate.changed === true,
+        ignoredStale: deliveryUpdate.ignored === true,
+        previousStatus: deliveryUpdate.previousStatus || null,
       };
     }
   }

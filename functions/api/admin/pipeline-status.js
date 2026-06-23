@@ -74,6 +74,35 @@ function summarizeFeedPayload(payload, itemKey) {
   };
 }
 
+function addFailure(failures, condition, code) {
+  if (!condition) {
+    failures.push(code);
+  }
+}
+
+function buildReadinessFailures(status) {
+  const failures = [];
+  addFailure(failures, status.publicUrlConfigured, "missing_public_url");
+  addFailure(failures, status.databaseBound, "missing_d1_binding");
+  addFailure(failures, status.internalAuthConfigured, "missing_internal_alert_token");
+  addFailure(failures, status.notificationCryptoConfigured, "missing_notification_crypto");
+  addFailure(failures, status.alertEventBridgeAccepting, "alert_event_bridge_not_accepting");
+  addFailure(failures, status.providerConfig.sendgridConfigured, "sendgrid_not_configured");
+  addFailure(failures, status.providerConfig.sendgridWebhookVerificationConfigured, "sendgrid_webhook_verification_not_configured");
+  addFailure(failures, status.providerConfig.sendgridDeliveryStatusConfigured, "sendgrid_delivery_status_not_configured");
+  addFailure(failures, status.providerConfig.telnyxConfigured, "telnyx_not_configured");
+  addFailure(failures, status.providerConfig.telnyxWebhookVerificationConfigured, "telnyx_webhook_verification_not_configured");
+  addFailure(failures, status.providerConfig.telnyxDeliveryStatusConfigured, "telnyx_delivery_status_not_configured");
+  addFailure(failures, status.feeds.alerts.available && Number(status.feeds.alerts.itemCount || 0) > 0, "alerts_feed_empty_or_unavailable");
+  addFailure(failures, status.feeds.takeoffs.available && Number(status.feeds.takeoffs.itemCount || 0) > 0, "takeoffs_feed_empty_or_unavailable");
+  addFailure(failures, status.feeds.eventSignals.available && Number(status.feeds.eventSignals.itemCount || 0) > 0, "event_signals_feed_empty_or_unavailable");
+  addFailure(failures, status.notifications.available, "notifications_unavailable");
+  const subscribers = status.notifications.subscribers || {};
+  addFailure(failures, Number(subscribers.activeEmail || 0) > 0, "no_active_email_subscribers");
+  addFailure(failures, Number(subscribers.activeSms || 0) > 0, "no_active_sms_subscribers");
+  return failures;
+}
+
 async function summarizeFeed(request, env, pathname, itemKey) {
   try {
     const payload = await readPublishedJson(request, env, pathname);
@@ -99,23 +128,35 @@ export async function onRequestGet({ request, env }) {
     const notifications = databaseBound
       ? { available: true, ...(await getNotificationPipelineStatus(env)) }
       : { available: false, reason: "missing_EWS_NOTIFY_DB" };
+    const providerConfig = getProviderConfig(env);
+    const publicUrlConfigured = hasHttpsUrl(env.APP_BASE_URL) || hasHttpsUrl(env.EWS_PUBLIC_URL);
+    const alertEventBridgeAccepting = databaseBound && internalAuthConfigured && notificationCryptoConfigured;
+    const feeds = {
+      alerts: await summarizeFeed(request, env, "/alerts.json", "events"),
+      takeoffs: await summarizeFeed(request, env, "/takeoffs.json", "events"),
+      eventSignals: await summarizeFeed(request, env, "/event-signals.json", "records"),
+    };
+    const status = {
+      now: new Date().toISOString(),
+      publicUrlConfigured,
+      databaseBound,
+      internalAuthConfigured,
+      notificationCryptoConfigured,
+      alertEventBridgeAccepting,
+      providerConfig,
+      feeds,
+      notifications,
+    };
+    const failures = buildReadinessFailures(status);
 
     return jsonResponse(
       {
-        ok: true,
-        now: new Date().toISOString(),
-        publicUrlConfigured: hasHttpsUrl(env.APP_BASE_URL) || hasHttpsUrl(env.EWS_PUBLIC_URL),
-        databaseBound,
-        internalAuthConfigured,
-        notificationCryptoConfigured,
-        alertEventBridgeAccepting: databaseBound && internalAuthConfigured && notificationCryptoConfigured,
-        providerConfig: getProviderConfig(env),
-        feeds: {
-          alerts: await summarizeFeed(request, env, "/alerts.json", "events"),
-          takeoffs: await summarizeFeed(request, env, "/takeoffs.json", "events"),
-          eventSignals: await summarizeFeed(request, env, "/event-signals.json", "records"),
+        ok: failures.length === 0,
+        readiness: {
+          ok: failures.length === 0,
+          failures,
         },
-        notifications,
+        ...status,
       },
       {
         headers: {

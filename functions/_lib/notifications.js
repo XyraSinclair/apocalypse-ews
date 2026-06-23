@@ -1197,6 +1197,13 @@ async function prepareClaimedAlertForSend(env, alertId, claim) {
     };
   }
   if (existing?.status === "processing") {
+    const staleMs = getPositiveIntegerEnv(env, "ALERT_PROCESSING_STALE_MS", 15 * 60 * 1000, {
+      min: 60 * 1000,
+      max: 24 * 60 * 60 * 1000,
+    });
+    if (await beginAlertRecordSend(env, alertId, { statuses: ["processing"], staleMs })) {
+      return null;
+    }
     return {
       ok: true,
       sent: false,

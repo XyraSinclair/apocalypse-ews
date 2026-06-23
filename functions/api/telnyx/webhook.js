@@ -116,7 +116,9 @@ async function handleOutboundStatus(env, eventType, payload) {
   return {
     messageId,
     status,
-    updated: Boolean(deliveryUpdate),
+    updated: deliveryUpdate?.changed === true,
+    ignoredStale: deliveryUpdate?.ignored === true,
+    previousStatus: deliveryUpdate?.previousStatus || null,
   };
 }
 

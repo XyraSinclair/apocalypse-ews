@@ -165,6 +165,11 @@ function assertDeployEnvFileLoading(tempRoot) {
     'EWS_ALERT_EVENTS_WEBHOOK_URL=https://alerts.example.test/api/internal/alert-events',
     'EWS_SMOKE_TEST_EMAIL=smoke@example.test',
     'EWS_SMOKE_TEST_PHONE=+14155552671',
+    'SENDGRID_API_KEY=smoke-sendgrid-key',
+    'SENDGRID_FROM_EMAIL=alerts@example.test',
+    'TELNYX_API_KEY=smoke-telnyx-key',
+    'TELNYX_PUBLIC_KEY=smoke-telnyx-public-key',
+    'TELNYX_NUMBER=+14155552671',
     'SENDGRID_WEBHOOK_PUBLIC_KEY=smoke-sendgrid-webhook-public-key',
     'VITE_DASHBOARD_URL=https://alerts.example.test/dashboard.json',
     'VITE_MILITARY_DASHBOARD_URL=https://alerts.example.test/military-dashboard.json',
@@ -345,6 +350,65 @@ async function assertClaimAlertRecordIsIdempotent() {
   assert(claimedRetry === true, 'Completed-with-errors alert record was not retry-claimable.');
 }
 
+async function assertAlertProcessingStaleReclaim() {
+  const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-functions-esm-'));
+  fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{\"type\":\"module\"}\n');
+  fs.cpSync(path.join(ROOT_DIR, 'functions', '_lib'), path.join(moduleRoot, '_lib'), { recursive: true });
+  const dbModuleUrl = pathToFileURL(path.join(moduleRoot, '_lib', 'db.js')).href;
+  const { beginAlertRecordSend } = await import(dbModuleUrl);
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-stale-alert-')), 'notify.sqlite');
+  const db = new Database(dbPath);
+  applyD1Migrations(db);
+  db.prepare(`
+    INSERT INTO notification_alerts (
+      id,
+      kind,
+      source,
+      message_text,
+      status,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'alert-stale-processing',
+    'takeoff_rate_anomaly',
+    'smoke',
+    'Stale processing alert',
+    'processing',
+    '2026-06-23T00:00:00.000Z',
+    '2026-06-23T00:00:00.000Z',
+  );
+  db.prepare(`
+    INSERT INTO notification_alerts (
+      id,
+      kind,
+      source,
+      message_text,
+      status,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'alert-fresh-processing',
+    'takeoff_rate_anomaly',
+    'smoke',
+    'Fresh processing alert',
+    'processing',
+    new Date().toISOString(),
+    new Date().toISOString(),
+  );
+  const env = { EWS_NOTIFY_DB: createD1Adapter(db) };
+  assert(
+    await beginAlertRecordSend(env, 'alert-stale-processing', { statuses: ['processing'], staleMs: 60_000 }),
+    'Stale processing alert was not reclaimable.',
+  );
+  assert(
+    !(await beginAlertRecordSend(env, 'alert-fresh-processing', { statuses: ['processing'], staleMs: 60_000 })),
+    'Fresh processing alert was incorrectly reclaimable.',
+  );
+  db.close();
+}
+
 async function assertPagesPipelineStatus(token) {
   const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-pages-functions-esm-'));
   fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{"type":"module"}\n');
@@ -431,6 +495,8 @@ async function assertPagesPipelineStatus(token) {
   });
   const payload = await authorized.json();
   assert(authorized.status === 200, `Pages pipeline status returned ${authorized.status}: ${JSON.stringify(payload)}`);
+  assert(payload.ok === true, `Pages pipeline status did not derive ok=true: ${JSON.stringify(payload.readiness?.failures || [])}`);
+  assert(Array.isArray(payload.readiness?.failures) && payload.readiness.failures.length === 0, 'Pages pipeline status reported readiness failures.');
   assert(payload.databaseBound === true, 'Pages pipeline status did not report the D1 binding.');
   assert(payload.alertEventBridgeAccepting === true, 'Pages pipeline status did not report bridge readiness.');
   assert(payload.notificationCryptoConfigured === true, 'Pages pipeline status did not report notification crypto as configured.');
@@ -458,6 +524,11 @@ async function assertPagesPipelineStatus(token) {
   assert(
     malformedFeedPayload.feeds.alerts.available === false,
     'Pages pipeline status accepted an alerts feed without an events array.',
+  );
+  assert(malformedFeedPayload.ok === false, 'Pages pipeline status did not derive ok=false for a malformed alerts feed.');
+  assert(
+    malformedFeedPayload.readiness?.failures?.includes('alerts_feed_empty_or_unavailable'),
+    'Pages pipeline status did not identify the malformed alerts feed readiness failure.',
   );
 }
 
@@ -597,6 +668,41 @@ async function assertSendGridWebhookDeliveryStatus() {
   const delivery = db.prepare('SELECT status, provider_status FROM notification_deliveries WHERE id = ?').get('delivery-sendgrid-webhook');
   assert(delivery.status === 'delivered', 'SendGrid webhook did not record delivered status.');
   assert(delivery.provider_status === 'delivered', 'SendGrid webhook did not record provider status.');
+  const staleTimestamp = String(Math.floor(Date.now() / 1000) + 1);
+  const staleRawBody = JSON.stringify([
+    {
+      event: 'processed',
+      sg_event_id: 'sendgrid-stale-event-id',
+      sg_message_id: 'sendgrid-message-id.filter0002.123.456.0',
+      response: 'queued',
+    },
+  ]);
+  const staleSignature = nodeCrypto
+    .sign('sha256', Buffer.concat([Buffer.from(staleTimestamp), Buffer.from(staleRawBody)]), privateKey)
+    .toString('base64');
+  const staleResponse = await onRequestPost({
+    request: new Request('https://alerts.example.test/api/sendgrid/webhook', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-twilio-email-event-webhook-signature': staleSignature,
+        'x-twilio-email-event-webhook-timestamp': staleTimestamp,
+      },
+      body: staleRawBody,
+    }),
+    env: {
+      SENDGRID_WEBHOOK_PUBLIC_KEY: publicKey.export({ type: 'spki', format: 'pem' }),
+      EWS_NOTIFY_DB: createD1Adapter(db),
+    },
+  });
+  const stalePayload = await staleResponse.json();
+  assert(staleResponse.status === 200, `Stale SendGrid webhook returned ${staleResponse.status}: ${JSON.stringify(stalePayload)}`);
+  assert(stalePayload.results?.[0]?.updated === false, 'Stale SendGrid webhook incorrectly reported a delivery update.');
+  assert(stalePayload.results?.[0]?.ignoredStale === true, 'Stale SendGrid webhook did not mark the lower-precedence status as stale.');
+  assert(stalePayload.results?.[0]?.previousStatus === 'delivered', 'Stale SendGrid webhook did not report the previous terminal status.');
+  const staleDelivery = db.prepare('SELECT status, provider_status FROM notification_deliveries WHERE id = ?').get('delivery-sendgrid-webhook');
+  assert(staleDelivery.status === 'delivered', 'Stale SendGrid webhook downgraded a delivered email.');
+  assert(staleDelivery.provider_status === 'delivered', 'Stale SendGrid webhook changed the terminal provider status.');
   db.close();
 }
 
@@ -683,6 +789,110 @@ async function assertAlertEventEndpointFailureStatus(token) {
     globalThis.fetch = originalFetch;
     db.close();
   }
+}
+
+async function assertTakeoffRateDetection() {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-takeoff-rate-'));
+  const dbPath = path.join(tempRoot, 'ews.sqlite');
+  const snapshotPath = path.join(tempRoot, 'dashboard.json');
+  const db = new Database(dbPath);
+  db.exec(fs.readFileSync(path.join(ROOT_DIR, 'schema.sql'), 'utf8'));
+  const observedAtMs = Date.UTC(2026, 5, 23, 12, 0, 0);
+  const observedAt = new Date(observedAtMs).toISOString();
+  const halfHourMs = 30 * 60 * 1000;
+  const insertMetric = db.prepare('INSERT INTO concurrent_metrics (sampled_at, concurrent_count) VALUES (?, ?)');
+  const insertTakeoff = db.prepare(`
+    INSERT INTO takeoff_events (
+      cohort,
+      hex,
+      registration,
+      label,
+      source,
+      observed_at,
+      previous_observed_at,
+      altitude_ft,
+      ground_speed_kt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (let index = 1; index <= 48; index += 1) {
+    const sampledAt = new Date(observedAtMs - (index * halfHourMs)).toISOString();
+    insertMetric.run(sampledAt, 10);
+    if (index % 16 === 0) {
+      insertTakeoff.run(
+        'global_business_jet',
+        `abc${String(index).padStart(3, '0')}`,
+        `N${index}`,
+        `Baseline ${index}`,
+        'smoke',
+        sampledAt,
+        new Date(observedAtMs - ((index + 1) * halfHourMs)).toISOString(),
+        1400,
+        150,
+      );
+    }
+  }
+  insertMetric.run(observedAt, 10);
+  for (let index = 0; index < 5; index += 1) {
+    insertTakeoff.run(
+      'global_business_jet',
+      `def${String(index).padStart(3, '0')}`,
+      `N9${index}`,
+      `Current ${index}`,
+      'smoke',
+      observedAt,
+      new Date(observedAtMs - halfHourMs).toISOString(),
+      1600 + index,
+      180 + index,
+    );
+  }
+  writeJson(snapshotPath, {
+    current: {
+      asOf: observedAt,
+      concurrentCount: 10,
+      baselineMean: 10,
+      zScore: 0,
+      emergencyLevel: 1,
+    },
+    signals: {
+      composite: {
+        emergencyLevel: 1,
+        sigmaShift: 0,
+        expectedConcurrentCount: 10,
+      },
+    },
+  });
+
+  const run = await execNode([
+    'scripts/detect_alert_events.js',
+    '--db',
+    dbPath,
+    '--snapshot',
+    snapshotPath,
+    '--cohort',
+    'global_business_jet',
+    '--takeoff-batch-min',
+    '3',
+    '--takeoff-rate-min-count',
+    '3',
+    '--takeoff-rate-min-samples',
+    '24',
+    '--takeoff-rate-z-score',
+    '3',
+  ]);
+  const output = JSON.parse(run.stdout.trim());
+  assert(output.takeoffRateModelReady === true, 'Takeoff-rate detector did not report a ready baseline.');
+  assert(output.takeoffRateSampleCount >= 24, 'Takeoff-rate detector did not use the historical sample window.');
+  assert(output.takeoffRateZScore >= 3, 'Takeoff-rate detector did not compute an anomalous z-score.');
+  const alerts = db.prepare('SELECT kind, payload_json AS payloadJson FROM alert_events ORDER BY kind ASC').all();
+  const kinds = alerts.map((event) => event.kind);
+  assert(kinds.includes('takeoff_batch'), 'Takeoff detector did not create a batch alert.');
+  assert(kinds.includes('takeoff_rate_anomaly'), 'Takeoff detector did not create a takeoff-rate anomaly alert.');
+  assert(!kinds.includes('statistical_anomaly'), 'Takeoff detector emitted a concurrent statistical anomaly without an elevated level.');
+  const ratePayload = JSON.parse(alerts.find((event) => event.kind === 'takeoff_rate_anomaly').payloadJson);
+  assert(ratePayload.windowStart && ratePayload.windowEnd, 'Takeoff-rate anomaly did not include window bounds.');
+  assert(ratePayload.signalFamily === 'takeoff_rate', 'Takeoff-rate anomaly did not include the signal family.');
+  assert(ratePayload.takeoffCount === 5, 'Takeoff-rate anomaly recorded the wrong takeoff count.');
+  db.close();
 }
 
 
@@ -792,10 +1002,12 @@ async function main() {
     assert(bridgeStatus.reason === bridgeOutput.reason, 'Bridge status file did not persist the latest result.');
 
     await assertPagesPipelineStatus(token);
+    await assertTakeoffRateDetection();
     await assertPagesPipelineSmokeScript(token);
     await assertManualSubscriberValidation();
     await assertSendGridWebhookDeliveryStatus();
     await assertClaimAlertRecordIsIdempotent();
+    await assertAlertProcessingStaleReclaim();
     await assertAlertEventEndpointFailureStatus(token);
     console.log(JSON.stringify({ ok: true, baseUrl, tempRoot }));
   } finally {

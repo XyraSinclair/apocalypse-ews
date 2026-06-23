@@ -154,6 +154,10 @@ function detectAlertEvents() {
     MAIN_DB,
     '--cohort',
     'global_business_jet',
+    '--takeoff-batch-min',
+    '3',
+    '--takeoff-rate-min-count',
+    '3',
   ]);
   run('node', [
     'scripts/detect_alert_events.js',
@@ -165,6 +169,10 @@ function detectAlertEvents() {
     'global_military_aircraft',
     '--events-db',
     MAIN_DB,
+    '--takeoff-batch-min',
+    '4',
+    '--takeoff-rate-min-count',
+    '4',
   ]);
   run('node', [
     'scripts/detect_alert_events.js',
@@ -176,6 +184,10 @@ function detectAlertEvents() {
     'non_icao_untracked',
     '--events-db',
     MAIN_DB,
+    '--takeoff-batch-min',
+    '10',
+    '--takeoff-rate-min-count',
+    '10',
   ]);
 }
 

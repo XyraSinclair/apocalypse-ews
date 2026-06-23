@@ -1271,7 +1271,7 @@ async function recalculateAlertDeliveryCounts(env, alertId) {
         SELECT
           SUM(CASE WHEN channel = 'email' AND status IN ('sent', 'delivered') THEN 1 ELSE 0 END) AS email_sent_count,
           SUM(CASE WHEN channel = 'sms' AND status IN ('sent', 'delivered') THEN 1 ELSE 0 END) AS sms_sent_count,
-          SUM(CASE WHEN status IN ('failed', 'undelivered') THEN 1 ELSE 0 END) AS error_count
+          SUM(CASE WHEN status IN ('failed', 'undelivered', 'unconfirmed') THEN 1 ELSE 0 END) AS error_count
         FROM notification_deliveries
         WHERE alert_id = ?
       `,
@@ -1358,13 +1358,39 @@ export async function claimAlertRecord(
   };
 }
 
-export async function beginAlertRecordSend(env, alertId, statuses = ["created", "completed_with_errors"]) {
-  if (!statuses.length) {
+export async function beginAlertRecordSend(env, alertId, options = {}) {
+  const statuses = Array.isArray(options)
+    ? options
+    : options.statuses || ["created", "completed_with_errors"];
+  const staleMs = Array.isArray(options) ? 0 : Math.max(Number(options.staleMs || 0), 0);
+  const directStatuses = staleMs ? statuses.filter((status) => status !== "processing") : statuses;
+
+  if (directStatuses.length) {
+    const placeholders = directStatuses.map(() => "?").join(", ");
+    const result = await getDb(env)
+      .prepare(
+        `
+          UPDATE notification_alerts
+          SET
+            status = 'processing',
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+            AND status IN (${placeholders})
+        `,
+      )
+      .bind(alertId, ...directStatuses)
+      .run();
+    if (insertedRowCount(result) > 0) {
+      return true;
+    }
+  }
+
+  if (!staleMs || !statuses.includes("processing")) {
     return false;
   }
 
-  const placeholders = statuses.map(() => "?").join(", ");
-  const result = await getDb(env)
+  const staleBeforeEpoch = Math.floor((Date.now() - staleMs) / 1000);
+  const stale = await getDb(env)
     .prepare(
       `
         UPDATE notification_alerts
@@ -1372,13 +1398,14 @@ export async function beginAlertRecordSend(env, alertId, statuses = ["created", 
           status = 'processing',
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-          AND status IN (${placeholders})
+          AND status = 'processing'
+          AND CAST(COALESCE(strftime('%s', updated_at), '0') AS INTEGER) <= ?
       `,
     )
-    .bind(alertId, ...statuses)
+    .bind(alertId, staleBeforeEpoch)
     .run();
 
-  return insertedRowCount(result) > 0;
+  return insertedRowCount(stale) > 0;
 }
 
 export async function createAlertRecord(env, details) {
@@ -2344,7 +2371,7 @@ async function getAdminSubscriberSearchRecords(env, { page, pageSize, emailSearc
           COUNT(id) AS delivery_count,
           SUM(CASE WHEN channel = 'email' THEN 1 ELSE 0 END) AS email_delivery_count,
           SUM(CASE WHEN channel = 'sms' THEN 1 ELSE 0 END) AS sms_delivery_count,
-          SUM(CASE WHEN status IN ('failed', 'undelivered') THEN 1 ELSE 0 END) AS delivery_error_count,
+          SUM(CASE WHEN status IN ('failed', 'undelivered', 'unconfirmed') THEN 1 ELSE 0 END) AS delivery_error_count,
           MAX(COALESCE(updated_at, created_at)) AS last_delivery_at
         FROM notification_deliveries
         WHERE subscriber_id IN (${placeholders})
@@ -2477,7 +2504,7 @@ export async function getAdminSubscriberRecords(env, options = {}) {
           COUNT(d.id) AS delivery_count,
           SUM(CASE WHEN d.channel = 'email' THEN 1 ELSE 0 END) AS email_delivery_count,
           SUM(CASE WHEN d.channel = 'sms' THEN 1 ELSE 0 END) AS sms_delivery_count,
-          SUM(CASE WHEN d.status IN ('failed', 'undelivered') THEN 1 ELSE 0 END) AS delivery_error_count,
+          SUM(CASE WHEN d.status IN ('failed', 'undelivered', 'unconfirmed') THEN 1 ELSE 0 END) AS delivery_error_count,
           MAX(COALESCE(d.updated_at, d.created_at)) AS last_delivery_at,
           (
             SELECT COUNT(im.id)
@@ -2536,6 +2563,30 @@ export async function getSubscriberForCustomerPortal(env, subscriberId) {
     .bind(subscriberId)
     .first();
 }
+function deliveryStatusRank(status) {
+  switch (String(status || "").trim()) {
+    case "delivered":
+    case "failed":
+    case "undelivered":
+    case "unconfirmed":
+      return 3;
+    case "sent":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+function isTerminalDeliverySuccess(status) {
+  return String(status || "").trim() === "delivered";
+}
+
+function shouldApplyDeliveryStatusTransition(currentStatus, nextStatus) {
+  if (!nextStatus) {
+    return false;
+  }
+  return deliveryStatusRank(nextStatus) >= deliveryStatusRank(currentStatus);
+}
 
 export async function updateDeliveryByProviderMessageId(
   env,
@@ -2555,6 +2606,8 @@ export async function updateDeliveryByProviderMessageId(
           d.alert_id,
           d.subscriber_id,
           d.channel,
+          d.status,
+          d.error,
           a.kind
         FROM notification_deliveries d
         JOIN notification_alerts a ON a.id = d.alert_id
@@ -2567,6 +2620,25 @@ export async function updateDeliveryByProviderMessageId(
   if (!existing) {
     return null;
   }
+
+  if (!shouldApplyDeliveryStatusTransition(existing.status, status)) {
+    return {
+      alertId: existing.alert_id,
+      subscriberId: existing.subscriber_id,
+      channel: existing.channel,
+      kind: existing.kind,
+      changed: false,
+      ignored: true,
+      previousStatus: existing.status,
+      status,
+    };
+  }
+
+  const nextError = isTerminalDeliverySuccess(status)
+    ? null
+    : error
+      ? String(error).slice(0, 1000)
+      : existing.error || null;
 
   await db
     .prepare(
@@ -2587,7 +2659,7 @@ export async function updateDeliveryByProviderMessageId(
       providerStatus,
       carrier ? String(carrier).slice(0, 500) : null,
       lineType ? String(lineType).slice(0, 100) : null,
-      error ? String(error).slice(0, 1000) : null,
+      nextError,
       nowIso(),
       existing.id,
     )
@@ -2599,6 +2671,10 @@ export async function updateDeliveryByProviderMessageId(
     subscriberId: existing.subscriber_id,
     channel: existing.channel,
     kind: existing.kind,
+    changed: true,
+    ignored: false,
+    previousStatus: existing.status,
+    status,
   };
 }
 

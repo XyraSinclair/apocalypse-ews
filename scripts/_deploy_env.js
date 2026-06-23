@@ -11,10 +11,17 @@ const REQUIRED_NOTIFICATION_SECRET_ENV_VARS = [
   "NOTIFICATION_HASH_SECRET",
   "NOTIFICATION_ENCRYPTION_KEY",
 ];
+const REQUIRED_PROVIDER_ENV_VARS = [
+  "SENDGRID_API_KEY",
+  "SENDGRID_FROM_EMAIL",
+  "TELNYX_API_KEY",
+  "TELNYX_PUBLIC_KEY",
+];
 const REQUIRED_DEPLOY_ENV_VARS = [
   "CLOUDFLARE_API_TOKEN",
   "INTERNAL_ALERT_TOKEN",
   "EWS_PUBLIC_URL",
+  ...REQUIRED_PROVIDER_ENV_VARS,
   "SENDGRID_WEBHOOK_PUBLIC_KEY",
   "EWS_ALERT_EVENTS_WEBHOOK_URL",
   "EWS_SMOKE_TEST_EMAIL",
@@ -264,6 +271,8 @@ function validateDeployEnv(env) {
 
   const publicUrlError = missingNames.has("EWS_PUBLIC_URL") ? null : validatePublicUrl("EWS_PUBLIC_URL", env.EWS_PUBLIC_URL);
 
+  const telnyxSenderConfigured =
+    Boolean(env.TELNYX_NUMBER) || Boolean(env.TELNYX_FROM_PHONE) || Boolean(env.TELNYX_MESSAGING_PROFILE_ID);
   return [
     ...missing,
     publicUrlError,
@@ -273,6 +282,9 @@ function validateDeployEnv(env) {
     missingNames.has("NOTIFICATION_ENCRYPTION_KEY")
       ? null
       : validateNotificationEncryptionKey(env.NOTIFICATION_ENCRYPTION_KEY),
+    telnyxSenderConfigured
+      ? null
+      : "One of TELNYX_NUMBER, TELNYX_FROM_PHONE, or TELNYX_MESSAGING_PROFILE_ID is required.",
     ...validateDashboardEnv(env).filter((error) => {
       const name = error.split(" ")[0];
       return !missingNames.has(name);

@@ -96,7 +96,9 @@ async function main() {
     headers: { authorization: `Bearer ${token}` },
   });
   assert(response.ok, `Authenticated pipeline status returned HTTP ${response.status}: ${text}`);
-  assert(payload?.ok === true, 'Pipeline status did not return ok=true.');
+  const readinessFailures = Array.isArray(payload?.readiness?.failures) ? payload.readiness.failures : [];
+  assert(payload?.ok === true, `Pipeline status did not return ok=true. Failures: ${readinessFailures.join(', ') || 'unknown'}.`);
+  assert(readinessFailures.length === 0, `Pipeline readiness failures: ${readinessFailures.join(', ')}.`);
   assert(payload.databaseBound === true, 'Pipeline status reports missing EWS_NOTIFY_DB binding.');
   assert(payload.alertEventBridgeAccepting === true, 'Pipeline status reports that alert event bridge is not accepting events.');
   assert(payload.feeds?.alerts?.available === true, 'Pipeline status reports alerts feed unavailable.');
