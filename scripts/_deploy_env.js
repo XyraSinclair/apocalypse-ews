@@ -9,6 +9,7 @@ const REQUIRED_DASHBOARD_ENV_VARS = [
 ];
 const REQUIRED_DEPLOY_ENV_VARS = [
   "CLOUDFLARE_API_TOKEN",
+  "EWS_PUBLIC_URL",
   ...REQUIRED_DASHBOARD_ENV_VARS,
 ];
 
@@ -73,6 +74,30 @@ function validateDashboardUrl(name, value) {
   return null;
 }
 
+function validatePublicUrl(name, value) {
+  if (!value) {
+    return `${name} is missing.`;
+  }
+
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return `${name} must be an absolute URL.`;
+  }
+
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return `${name} must use http or https.`;
+  }
+
+  if (/^(?:127\.0\.0\.1|localhost)$/i.test(url.hostname)) {
+    return `${name} must be a public URL, not localhost.`;
+  }
+
+  return null;
+}
+
+
 function validateDashboardEnv(env) {
   return REQUIRED_DASHBOARD_ENV_VARS
     .map((name) => validateDashboardUrl(name, env[name]))
@@ -83,13 +108,16 @@ function validateDeployEnv(env) {
   const missingNames = new Set(REQUIRED_DEPLOY_ENV_VARS.filter((name) => !env[name]));
   const missing = Array.from(missingNames).map((name) => `${name} is missing.`);
 
+  const publicUrlError = missingNames.has("EWS_PUBLIC_URL") ? null : validatePublicUrl("EWS_PUBLIC_URL", env.EWS_PUBLIC_URL);
+
   return [
     ...missing,
+    publicUrlError,
     ...validateDashboardEnv(env).filter((error) => {
       const name = error.split(" ")[0];
       return !missingNames.has(name);
     }),
-  ];
+  ].filter(Boolean);
 }
 
 module.exports = {

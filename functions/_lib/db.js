@@ -1555,6 +1555,111 @@ export async function recordInboundSmsMessage(env, message = {}) {
     receivedAt,
   };
 }
+function countRowsByField(rows, field) {
+  return Object.fromEntries(
+    rows.map((row) => [String(row[field] || "unknown"), Number(row.count || 0)]),
+  );
+}
+
+function numberField(row, field) {
+  return Number(row?.[field] || 0);
+}
+
+export async function getNotificationPipelineStatus(env) {
+  const db = getDb(env);
+  const subscriberSummary = await db
+    .prepare(
+      `
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+          SUM(CASE WHEN status = 'active' AND wants_email = 1 AND email_hash IS NOT NULL THEN 1 ELSE 0 END) AS active_email,
+          SUM(CASE WHEN status = 'active' AND wants_sms = 1 AND phone_hash IS NOT NULL AND sms_opted_out_at IS NULL THEN 1 ELSE 0 END) AS active_sms,
+          SUM(CASE WHEN status = 'pending_checkout' THEN 1 ELSE 0 END) AS pending_checkout,
+          SUM(CASE WHEN status = 'past_due' THEN 1 ELSE 0 END) AS past_due,
+          SUM(CASE WHEN status = 'canceled' THEN 1 ELSE 0 END) AS canceled
+        FROM notification_signups
+      `,
+    )
+    .first();
+  const alertStatusRows = await db
+    .prepare(
+      `
+        SELECT status, COUNT(*) AS count
+        FROM notification_alerts
+        GROUP BY status
+        ORDER BY status ASC
+      `,
+    )
+    .all();
+  const deliveryStatusRows = await db
+    .prepare(
+      `
+        SELECT status, COUNT(*) AS count
+        FROM notification_deliveries
+        GROUP BY status
+        ORDER BY status ASC
+      `,
+    )
+    .all();
+  const deliveryChannelRows = await db
+    .prepare(
+      `
+        SELECT channel, status, COUNT(*) AS count
+        FROM notification_deliveries
+        GROUP BY channel, status
+        ORDER BY channel ASC, status ASC
+      `,
+    )
+    .all();
+  const recentAlerts = await db
+    .prepare(
+      `
+        SELECT
+          id,
+          kind,
+          source,
+          level,
+          slot_key AS slotKey,
+          status,
+          subscriber_count AS subscriberCount,
+          email_sent_count AS emailSentCount,
+          sms_sent_count AS smsSentCount,
+          error_count AS errorCount,
+          created_at AS createdAt,
+          sent_at AS sentAt
+        FROM notification_alerts
+        ORDER BY created_at DESC
+        LIMIT 10
+      `,
+    )
+    .all();
+
+  return {
+    subscribers: {
+      total: numberField(subscriberSummary, "total"),
+      active: numberField(subscriberSummary, "active"),
+      activeEmail: numberField(subscriberSummary, "active_email"),
+      activeSms: numberField(subscriberSummary, "active_sms"),
+      pendingCheckout: numberField(subscriberSummary, "pending_checkout"),
+      pastDue: numberField(subscriberSummary, "past_due"),
+      canceled: numberField(subscriberSummary, "canceled"),
+    },
+    alerts: {
+      statusCounts: countRowsByField(alertStatusRows.results || alertStatusRows, "status"),
+      recent: recentAlerts.results || recentAlerts,
+    },
+    deliveries: {
+      statusCounts: countRowsByField(deliveryStatusRows.results || deliveryStatusRows, "status"),
+      channelStatusCounts: (deliveryChannelRows.results || deliveryChannelRows).map((row) => ({
+        channel: row.channel,
+        status: row.status,
+        count: Number(row.count || 0),
+      })),
+    },
+  };
+}
+
 
 export async function getRecentAlertDeliveries(env, limit = 25) {
   const safeLimit = Math.max(1, Math.min(100, Number(limit) || 25));

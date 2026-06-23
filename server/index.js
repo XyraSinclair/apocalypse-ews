@@ -119,6 +119,11 @@ function timingSafeEqualString(left, right) {
   return crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+function hasEnv(name) {
+  return Boolean(String(process.env[name] || "").trim());
+}
+
+
 function requireInternalAuth(request) {
   const expectedToken = String(process.env.INTERNAL_ALERT_TOKEN || "").trim();
   if (!expectedToken) {
@@ -287,9 +292,11 @@ app.get("/api/admin/local-pipeline-status", (request, response) => {
     now: new Date().toISOString(),
     publicUrlConfigured: Boolean(cleanPublicUrl(process.env.EWS_PUBLIC_URL)),
     providerConfig: {
-      sendgridConfigured: Boolean(process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL),
-      telnyxConfigured: Boolean(process.env.TELNYX_API_KEY && process.env.TELNYX_NUMBER),
-      telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
+      sendgridConfigured: hasEnv("SENDGRID_API_KEY") && hasEnv("SENDGRID_FROM_EMAIL"),
+      telnyxConfigured:
+        hasEnv("TELNYX_API_KEY") &&
+        (hasEnv("TELNYX_NUMBER") || hasEnv("TELNYX_FROM_PHONE") || hasEnv("TELNYX_MESSAGING_PROFILE_ID")),
+      telegramConfigured: hasEnv("TELEGRAM_BOT_TOKEN") && hasEnv("TELEGRAM_CHANNEL"),
     },
     bridge: bridgeStatus.available
       ? {

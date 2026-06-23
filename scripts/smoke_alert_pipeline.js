@@ -145,6 +145,103 @@ async function assertClaimAlertRecordIsIdempotent() {
   assert(existing?.id === details.id, 'Claimed alert record was not readable.');
 }
 
+async function assertPagesPipelineStatus(token) {
+  const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-pages-functions-esm-'));
+  fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{"type":"module"}\n');
+  fs.cpSync(path.join(ROOT_DIR, 'functions'), path.join(moduleRoot, 'functions'), { recursive: true });
+  const endpointUrl = pathToFileURL(path.join(moduleRoot, 'functions', 'api', 'admin', 'pipeline-status.js')).href;
+  const { onRequestGet } = await import(endpointUrl);
+  const feedPayloads = new Map([
+    ['/alerts.json', { generatedAt: '2026-06-23T00:00:00.000Z', events: [{ id: 'alert-1' }] }],
+    ['/takeoffs.json', { generatedAt: '2026-06-23T00:00:00.000Z', events: [{ id: 'takeoff-1' }] }],
+    ['/event-signals.json', { generatedAt: '2026-06-23T00:00:00.000Z', records: [{ id: 'signal-1' }] }],
+  ]);
+  const env = {
+    INTERNAL_ALERT_TOKEN: token,
+    EWS_PUBLIC_URL: 'https://alerts.example.test/',
+    SENDGRID_API_KEY: 'smoke-sendgrid-key',
+    SENDGRID_FROM_EMAIL: 'alerts@example.test',
+    TELNYX_API_KEY: 'smoke-telnyx-key',
+    TELNYX_MESSAGING_PROFILE_ID: 'smoke-profile-id',
+    TELNYX_PUBLIC_KEY: 'smoke-public-key',
+    STRIPE_SECRET_KEY: 'smoke-stripe-key',
+    STRIPE_PRICE_ID: 'price_smoke',
+    EWS_NOTIFY_DB: {
+      prepare(sql) {
+        return {
+          async first() {
+            if (/FROM notification_signups/i.test(sql)) {
+              return {
+                total: 3,
+                active: 2,
+                active_email: 2,
+                active_sms: 1,
+                pending_checkout: 1,
+                past_due: 0,
+                canceled: 0,
+              };
+            }
+            throw new Error(`Unexpected first SQL: ${sql}`);
+          },
+          async all() {
+            if (/FROM notification_alerts/i.test(sql) && /GROUP BY status/i.test(sql)) {
+              return { results: [{ status: 'sent', count: 2 }] };
+            }
+            if (/FROM notification_deliveries/i.test(sql) && /GROUP BY status/i.test(sql)) {
+              return { results: [{ status: 'sent', count: 3 }] };
+            }
+            if (/FROM notification_deliveries/i.test(sql) && /GROUP BY channel, status/i.test(sql)) {
+              return { results: [{ channel: 'sms', status: 'sent', count: 1 }] };
+            }
+            if (/FROM notification_alerts/i.test(sql) && /ORDER BY created_at DESC/i.test(sql)) {
+              return { results: [{ id: 'alert_event:smoke', status: 'sent' }] };
+            }
+            throw new Error(`Unexpected all SQL: ${sql}`);
+          },
+        };
+      },
+    },
+    ASSETS: {
+      async fetch(request) {
+        const pathname = new URL(request.url).pathname;
+        if (!feedPayloads.has(pathname)) {
+          return new Response('not found', { status: 404 });
+        }
+        return new Response(JSON.stringify(feedPayloads.get(pathname)), {
+          headers: { 'content-type': 'application/json; charset=utf-8' },
+        });
+      },
+    },
+  };
+
+  const unauthorized = await onRequestGet({
+    request: new Request('https://alerts.example.test/api/admin/pipeline-status'),
+    env,
+  });
+  assert(unauthorized.status === 401, `Pages pipeline status without auth returned ${unauthorized.status}, not 401.`);
+
+  const authorized = await onRequestGet({
+    request: new Request('https://alerts.example.test/api/admin/pipeline-status', {
+      headers: { authorization: `Bearer ${token}` },
+    }),
+    env,
+  });
+  const payload = await authorized.json();
+  assert(authorized.status === 200, `Pages pipeline status returned ${authorized.status}: ${JSON.stringify(payload)}`);
+  assert(payload.databaseBound === true, 'Pages pipeline status did not report the D1 binding.');
+  assert(payload.alertEventBridgeAccepting === true, 'Pages pipeline status did not report bridge readiness.');
+  assert(payload.providerConfig.sendgridConfigured === true, 'Pages pipeline status did not report SendGrid as configured.');
+  assert(payload.providerConfig.telnyxConfigured === true, 'Pages pipeline status did not report Telnyx as configured.');
+  assert(payload.providerConfig.telnyxWebhookVerificationConfigured === true, 'Pages pipeline status did not report Telnyx webhook verification as configured.');
+  assert(payload.providerConfig.stripeConfigured === true, 'Pages pipeline status did not report Stripe as configured.');
+  assert(payload.feeds.alerts.itemCount === 1, 'Pages pipeline status did not summarize alerts.');
+  assert(payload.feeds.takeoffs.itemCount === 1, 'Pages pipeline status did not summarize takeoffs.');
+  assert(payload.feeds.eventSignals.itemCount === 1, 'Pages pipeline status did not summarize event signals.');
+  assert(payload.notifications.subscribers.active === 2, 'Pages pipeline status did not summarize active subscribers.');
+  assert(payload.notifications.alerts.statusCounts.sent === 2, 'Pages pipeline status did not summarize alert statuses.');
+}
+
+
 async function main() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-alert-smoke-'));
   const publishedDir = path.join(tempRoot, 'published');
@@ -176,6 +273,12 @@ async function main() {
     INTERNAL_ALERT_TOKEN: token,
     NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
     NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
+    SENDGRID_API_KEY: 'smoke-sendgrid-key',
+    SENDGRID_FROM_EMAIL: 'alerts@example.test',
+    TELNYX_API_KEY: 'smoke-telnyx-key',
+    TELNYX_NUMBER: '+15555550123',
+    TELEGRAM_BOT_TOKEN: 'smoke-telegram-token',
+    TELEGRAM_CHANNEL: 'alerts-channel',
   };
   const server = spawn(process.execPath, ['server/index.js'], {
     cwd: ROOT_DIR,
@@ -221,6 +324,9 @@ async function main() {
     assert(authorized.payload.localDispatch.activeSubscriberCount === 1, 'Pipeline status did not count the active subscriber.');
     assert(authorized.payload.feeds.eventSignals.itemCount === 1, 'Pipeline status did not summarize event signal records.');
     assert(authorized.payload.bridge.reason === 'smoke_seed', 'Pipeline status did not surface bridge health.');
+    assert(authorized.payload.providerConfig.sendgridConfigured === true, 'Pipeline status did not report SendGrid as configured.');
+    assert(authorized.payload.providerConfig.telnyxConfigured === true, 'Pipeline status did not report Telnyx as configured.');
+    assert(authorized.payload.providerConfig.telegramConfigured === true, 'Pipeline status did not report Telegram as configured from TELEGRAM_CHANNEL.');
 
     const eventSignals = await waitForJson(`${baseUrl}/api/event-signals`);
     assert(eventSignals.payload.records.length === 1, 'Event signals API did not return the published record.');
@@ -236,6 +342,7 @@ async function main() {
     assert(bridgeOutput.reason === 'missing_EWS_ALERT_EVENTS_WEBHOOK_URL', 'Bridge missing-url run did not report the expected reason.');
     assert(bridgeStatus.reason === bridgeOutput.reason, 'Bridge status file did not persist the latest result.');
 
+    await assertPagesPipelineStatus(token);
     await assertClaimAlertRecordIsIdempotent();
     console.log(JSON.stringify({ ok: true, baseUrl, tempRoot }));
   } finally {
