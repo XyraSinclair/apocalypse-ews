@@ -1,5 +1,6 @@
 import {
   claimAlertRecord,
+  beginAlertRecordSend,
   claimRenewalReminder,
   createAlertRecord,
   getAlertRecordById,
@@ -1180,6 +1181,45 @@ export async function sendRenewalReminderBatch(env, options = {}) {
   return summary;
 }
 
+async function prepareClaimedAlertForSend(env, alertId, claim) {
+  if (claim.inserted) {
+    return null;
+  }
+
+  const existing = await getAlertRecordById(env, alertId);
+  if (existing?.status === "sent") {
+    return {
+      ok: true,
+      sent: false,
+      reason: "already_recorded",
+      alertId,
+      status: existing.status,
+    };
+  }
+  if (existing?.status === "processing") {
+    return {
+      ok: true,
+      sent: false,
+      reason: "already_processing",
+      alertId,
+      status: existing.status,
+    };
+  }
+
+  if (existing && (await beginAlertRecordSend(env, alertId))) {
+    return null;
+  }
+
+  const latest = await getAlertRecordById(env, alertId);
+  return {
+    ok: false,
+    sent: false,
+    reason: latest ? "alert_record_not_claimed" : "alert_record_missing",
+    alertId,
+    status: latest?.status || null,
+  };
+}
+
 export async function sendAlertEventNotifications(env, rawEvent, { source = "alert_event_bridge" } = {}) {
   const event = normalizeExternalAlertEvent(rawEvent);
   const alertId = externalAlertRecordId(event);
@@ -1191,20 +1231,15 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
     level: event.level,
     slotKey: event.eventKey,
     messageText,
+    status: "processing",
   });
-  const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
-  const concurrency = getLevel5NotificationConcurrency(env);
-  const existing = claim.inserted ? null : await getAlertRecordById(env, alertId);
-  if (!claim.inserted && existing?.status === "sent") {
-    return {
-      ok: true,
-      sent: false,
-      reason: "already_recorded",
-      alertId,
-      status: existing.status,
-    };
+  const skip = await prepareClaimedAlertForSend(env, alertId, claim);
+  if (skip) {
+    return skip;
   }
 
+  const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
+  const concurrency = getLevel5NotificationConcurrency(env);
   const summary = await sendAlertToActiveSubscriberBatches(env, {
     alertId,
     messageText,
@@ -1253,13 +1288,25 @@ export async function maybeSendLevel5Notifications(env, snapshot, { source = "sc
   const triggeredAt = new Date().toISOString();
   const messageText = formatEmergencyNotification(snapshot, { alertUrl: getAlertUrl(env) });
   const smsMessageText = formatEmergencyNotification(snapshot, { includeAlertUrl: false });
-  const alertId = await createAlertRecord(env, {
+  const alertId = `level5:${slotKey || "unknown"}`;
+  const claim = await claimAlertRecord(env, {
+    id: alertId,
     kind: "level5",
     source,
     level: emergencyLevel,
     slotKey,
     messageText,
+    status: "processing",
   });
+  const skip = await prepareClaimedAlertForSend(env, alertId, claim);
+  if (skip) {
+    return {
+      ...skip,
+      emergencyLevel,
+      slotKey,
+    };
+  }
+
   const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
   const concurrency = getLevel5NotificationConcurrency(env);
   const summary = await sendAlertToActiveSubscriberBatches(env, {
@@ -1275,7 +1322,6 @@ export async function maybeSendLevel5Notifications(env, snapshot, { source = "sc
   if (summary.errorCount === 0 && deliveredCount > 0) {
     await setMetaValue(env, LEVEL5_COOLDOWN_META_KEY, triggeredAt);
   }
-
 
   return {
     ok: summary.errorCount === 0,

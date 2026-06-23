@@ -317,6 +317,8 @@ type EventSignalRecord = {
   windowEnd?: string | null;
   timezone?: string | null;
   label?: string | null;
+  classificationLabel?: string | null;
+  severity?: string | null;
   method?: string | null;
   distanceMiles?: number | null;
   peakResidual?: number | null;
@@ -325,6 +327,7 @@ type EventSignalRecord = {
   landingEvents?: number | null;
   provenance?: string | null;
   status?: string | null;
+  sampleAircraft?: string[];
 };
 
 async function fetchEventSignals(): Promise<{ generatedAt: string | null; records: EventSignalRecord[] }> {
@@ -1116,11 +1119,13 @@ function EventSignalsPage() {
               </div>
               <dl>
                 <div><dt>Phase</dt><dd>{record.phase}</dd></div>
-                <div><dt>Label</dt><dd>{record.label || 'n/a'}</dd></div>
+                {record.severity ? <div><dt>Severity</dt><dd>{record.severity}</dd></div> : null}
+                <div><dt>Classification</dt><dd>{record.classificationLabel || record.label || 'n/a'}</dd></div>
                 <div><dt>Window</dt><dd>{formatDateTime(record.windowStart)}{record.windowEnd && record.windowEnd !== record.windowStart ? ` – ${formatDateTime(record.windowEnd)}` : ''}</dd></div>
                 <div><dt>Distance</dt><dd>{record.distanceMiles == null ? 'n/a' : `${formatNumber(record.distanceMiles, 0)} mi`}</dd></div>
                 <div><dt>Peak residual</dt><dd>{record.peakResidual == null ? 'n/a' : formatNumber(record.peakResidual, 1)}</dd></div>
                 <div><dt>Takeoffs</dt><dd>{record.takeoffEvents == null ? 'n/a' : formatInteger(record.takeoffEvents)}</dd></div>
+                {record.sampleAircraft?.length ? <div><dt>Aircraft</dt><dd>{record.sampleAircraft.join(', ')}</dd></div> : null}
               </dl>
             </article>
           ))}

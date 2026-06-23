@@ -61,22 +61,40 @@ function severityForLevel(level) {
   return 'watch';
 }
 
-function eventExists(db, event) {
-  return Boolean(
-    db
-      .prepare(`
-        SELECT 1
-        FROM alert_events
-        WHERE event_key = @eventKey
-           OR (kind = @kind AND cohort = @cohort AND occurred_at = @occurredAt)
-        LIMIT 1
-      `)
-      .get(event),
-  );
+function findExistingEvent(db, event) {
+  return db
+    .prepare(`
+      SELECT id, event_key AS eventKey
+      FROM alert_events
+      WHERE event_key = @eventKey
+         OR (kind = @kind AND cohort = @cohort AND occurred_at = @occurredAt)
+      ORDER BY CASE WHEN event_key = @eventKey THEN 0 ELSE 1 END
+      LIMIT 1
+    `)
+    .get(event);
+}
+
+function updateExistingEvent(db, existing, event) {
+  if (!existing) {
+    return;
+  }
+
+  db.prepare(`
+    UPDATE alert_events
+    SET
+      event_key = @eventKey,
+      severity = @severity,
+      title = @title,
+      message = @message,
+      payload_json = @payloadJson
+    WHERE id = @id
+  `).run({ ...event, id: existing.id });
 }
 
 function insertAlertEvent(db, event) {
-  if (eventExists(db, event)) {
+  const existing = findExistingEvent(db, event);
+  if (existing) {
+    updateExistingEvent(db, existing, event);
     return false;
   }
 
@@ -129,7 +147,22 @@ function getTakeoffEvents(db, cohort, observedAt) {
 }
 
 function compactAircraftList(takeoffs) {
-  return takeoffs.slice(0, 10).map((event) => event.label || event.registration || event.hex.toUpperCase());
+  const sample = [];
+  const seen = new Set();
+  for (const event of takeoffs) {
+    const identifier = event.registration || event.hex.toUpperCase();
+    const label = event.label && event.label !== identifier ? event.label : null;
+    const aircraft = [identifier, label].filter(Boolean).join(' · ');
+    if (seen.has(aircraft)) {
+      continue;
+    }
+    seen.add(aircraft);
+    sample.push(aircraft);
+    if (sample.length >= 10) {
+      break;
+    }
+  }
+  return sample;
 }
 
 function buildEvents({ db, snapshot, cohort, anomalyLevel, takeoffBatchMin, takeoffAnomalyLevel }) {

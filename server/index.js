@@ -102,11 +102,18 @@ function summarizePublishedFeed(fileName, itemKey) {
     return file;
   }
 
-  const items = Array.isArray(file.payload[itemKey]) ? file.payload[itemKey] : [];
+  if (!Array.isArray(file.payload[itemKey])) {
+    return {
+      available: false,
+      path: file.path,
+      error: `Published feed is missing the ${itemKey} array.`,
+    };
+  }
+
   return {
     available: true,
     generatedAt: file.payload.generatedAt || null,
-    itemCount: items.length,
+    itemCount: file.payload[itemKey].length,
   };
 }
 
@@ -130,6 +137,23 @@ function hasHttpsEnv(name) {
 function hasTelnyxDeliveryStatusPath() {
   return hasHttpsEnv("TELNYX_WEBHOOK_URL") || hasHttpsEnv("APP_BASE_URL") || hasHttpsEnv("EWS_PUBLIC_URL");
 }
+
+function hasBase64EncodedBytes(value, byteLength) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return false;
+  }
+  try {
+    return Buffer.from(normalized, "base64").length === byteLength;
+  } catch {
+    return false;
+  }
+}
+
+function hasNotificationCrypto() {
+  return hasEnv("NOTIFICATION_HASH_SECRET") && hasBase64EncodedBytes(process.env.NOTIFICATION_ENCRYPTION_KEY, 32);
+}
+
 
 
 
@@ -296,10 +320,12 @@ app.get("/api/admin/local-pipeline-status", (request, response) => {
   requireInternalAuth(request);
   const db = getDb();
   const bridgeStatus = readOptionalPublishedJson("alert-bridge-status.json");
+  const notificationCryptoConfigured = hasNotificationCrypto();
   response.set("cache-control", "no-store").json({
     ok: true,
     now: new Date().toISOString(),
     publicUrlConfigured: Boolean(cleanPublicUrl(process.env.APP_BASE_URL) || cleanPublicUrl(process.env.EWS_PUBLIC_URL)),
+    notificationCryptoConfigured,
     providerConfig: {
       sendgridConfigured: hasEnv("SENDGRID_API_KEY") && hasEnv("SENDGRID_FROM_EMAIL"),
       telnyxConfigured:

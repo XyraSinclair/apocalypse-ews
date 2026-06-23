@@ -7,11 +7,16 @@ const REQUIRED_DASHBOARD_ENV_VARS = [
   "VITE_MILITARY_DASHBOARD_URL",
   "VITE_UNTRACKED_DASHBOARD_URL",
 ];
+const REQUIRED_NOTIFICATION_SECRET_ENV_VARS = [
+  "NOTIFICATION_HASH_SECRET",
+  "NOTIFICATION_ENCRYPTION_KEY",
+];
 const REQUIRED_DEPLOY_ENV_VARS = [
   "CLOUDFLARE_API_TOKEN",
   "INTERNAL_ALERT_TOKEN",
   "EWS_PUBLIC_URL",
   ...REQUIRED_DASHBOARD_ENV_VARS,
+  ...REQUIRED_NOTIFICATION_SECRET_ENV_VARS,
 ];
 const REQUIRED_WRANGLER_VARS = [
   "EWS_PUBLIC_URL",
@@ -104,6 +109,24 @@ function validatePublicUrl(name, value) {
   return null;
 }
 
+function validateNotificationEncryptionKey(value) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = String(value).trim();
+  if (normalized.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) {
+    return "NOTIFICATION_ENCRYPTION_KEY must be a base64-encoded 32-byte key.";
+  }
+
+  if (Buffer.from(normalized, "base64").length !== 32) {
+    return "NOTIFICATION_ENCRYPTION_KEY must be a base64-encoded 32-byte key.";
+  }
+
+  return null;
+}
+
+
 function getTomlString(block, key) {
   const match = block.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"\\s*$`, "m"));
   return match ? match[1].trim() : "";
@@ -118,6 +141,8 @@ function validateWranglerConfig(filePath = WRANGLER_CONFIG_PATH) {
   const errors = [];
   let d1DatabaseName = "";
 
+  const vars = {};
+
   if (!fs.existsSync(filePath)) {
     return {
       ok: false,
@@ -129,6 +154,7 @@ function validateWranglerConfig(filePath = WRANGLER_CONFIG_PATH) {
   const configText = fs.readFileSync(filePath, "utf8");
   for (const name of REQUIRED_WRANGLER_VARS) {
     const value = getTomlString(configText, name);
+    vars[name] = value;
     if (!value) {
       errors.push(`wrangler.toml [vars] must set ${name}.`);
       continue;
@@ -142,7 +168,6 @@ function validateWranglerConfig(filePath = WRANGLER_CONFIG_PATH) {
       errors.push(publicUrlError);
     }
   }
-
   const d1Block = getD1DatabaseBlock(configText);
   if (!d1Block) {
     errors.push("wrangler.toml must bind the EWS_NOTIFY_DB D1 database.");
@@ -168,7 +193,7 @@ function validateWranglerConfig(filePath = WRANGLER_CONFIG_PATH) {
     }
   }
 
-  return { ok: errors.length === 0, d1DatabaseName, errors };
+  return { ok: errors.length === 0, d1DatabaseName, vars, errors };
 }
 
 
@@ -189,6 +214,9 @@ function validateDeployEnv(env) {
   return [
     ...missing,
     publicUrlError,
+    missingNames.has("NOTIFICATION_ENCRYPTION_KEY")
+      ? null
+      : validateNotificationEncryptionKey(env.NOTIFICATION_ENCRYPTION_KEY),
     ...validateDashboardEnv(env).filter((error) => {
       const name = error.split(" ")[0];
       return !missingNames.has(name);

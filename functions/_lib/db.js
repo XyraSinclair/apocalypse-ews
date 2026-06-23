@@ -1349,6 +1349,29 @@ export async function claimAlertRecord(
   };
 }
 
+export async function beginAlertRecordSend(env, alertId, statuses = ["created", "completed_with_errors"]) {
+  if (!statuses.length) {
+    return false;
+  }
+
+  const placeholders = statuses.map(() => "?").join(", ");
+  const result = await getDb(env)
+    .prepare(
+      `
+        UPDATE notification_alerts
+        SET
+          status = 'processing',
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND status IN (${placeholders})
+      `,
+    )
+    .bind(alertId, ...statuses)
+    .run();
+
+  return insertedRowCount(result) > 0;
+}
+
 export async function createAlertRecord(env, details) {
   const claim = await claimAlertRecord(env, details);
   return claim.id;

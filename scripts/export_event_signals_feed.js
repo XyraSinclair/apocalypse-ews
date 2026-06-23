@@ -41,24 +41,30 @@ function recordsFromResearch() {
   if (!fs.existsSync(RESEARCH_JSON)) return [];
   const payload = JSON.parse(fs.readFileSync(RESEARCH_JSON, 'utf8'));
   const results = Array.isArray(payload.results) ? payload.results : [];
-  return results.map((result) => ({
-    id: `research:${result.key || result.event}:${result.phase}`,
-    source: 'localized_event_signal_research',
-    event: result.event,
-    phase: result.phase,
-    windowStart: result.local_start,
-    windowEnd: result.local_end,
-    timezone: result.timezone,
-    label: result.classification?.label || 'Unclassified',
-    method: result.classification?.primary_cluster_method || null,
-    primaryCluster: formatCluster(result.classification?.primary_cluster),
-    distanceMiles: distanceForResult(result),
-    peakResidual: result.current_global_residual?.peak_residual ?? null,
-    observedAircraft: result.current_observed_aircraft ?? null,
-    takeoffEvents: result.current_takeoff_events ?? null,
-    landingEvents: result.current_landing_events ?? null,
-    provenance: result.source_note || 'Localized event signal research.',
-  }));
+  return results.map((result) => {
+    const classificationLabel = result.classification?.label || 'Unclassified';
+    return {
+      id: `research:${result.key || result.event}:${result.phase}`,
+      source: 'localized_event_signal_research',
+      event: result.event,
+      phase: result.phase,
+      windowStart: result.local_start,
+      windowEnd: result.local_end,
+      timezone: result.timezone,
+      label: classificationLabel,
+      classificationLabel,
+      severity: null,
+      method: result.classification?.primary_cluster_method || null,
+      primaryCluster: formatCluster(result.classification?.primary_cluster),
+      distanceMiles: distanceForResult(result),
+      peakResidual: result.current_global_residual?.peak_residual ?? null,
+      observedAircraft: result.current_observed_aircraft ?? null,
+      takeoffEvents: result.current_takeoff_events ?? null,
+      landingEvents: result.current_landing_events ?? null,
+      sampleAircraft: [],
+      provenance: result.source_note || 'Localized event signal research.',
+    };
+  });
 }
 
 function recordsFromLiveAlerts(limit) {
@@ -75,6 +81,9 @@ function recordsFromLiveAlerts(limit) {
       .all(limit)
       .map((event) => {
         const payload = parseJson(event.payloadJson, {});
+        const sampleAircraft = Array.isArray(payload.aircraft)
+          ? payload.aircraft.filter(Boolean).map(String).slice(0, 10)
+          : [];
         return {
           id: `alert:${event.eventKey}`,
           source: 'live_alert_event',
@@ -83,7 +92,9 @@ function recordsFromLiveAlerts(limit) {
           windowStart: event.occurredAt,
           windowEnd: event.occurredAt,
           timezone: 'UTC',
-          label: event.severity,
+          label: null,
+          classificationLabel: null,
+          severity: event.severity,
           method: 'refresh_pipeline_alert_event',
           primaryCluster: null,
           distanceMiles: null,
@@ -91,6 +102,7 @@ function recordsFromLiveAlerts(limit) {
           observedAircraft: payload.concurrentCount ?? null,
           takeoffEvents: payload.takeoffCount ?? null,
           landingEvents: null,
+          sampleAircraft,
           provenance: `${event.cohort}: ${event.message}`,
           status: event.status,
           alertEventKey: event.eventKey,

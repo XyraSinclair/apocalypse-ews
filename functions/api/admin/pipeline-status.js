@@ -19,6 +19,23 @@ function hasTelnyxDeliveryStatusPath(env) {
   );
 }
 
+function hasBase64EncodedBytes(value, byteLength) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return false;
+  }
+  try {
+    return atob(normalized).length === byteLength;
+  } catch {
+    return false;
+  }
+}
+
+function hasNotificationCrypto(env) {
+  return hasText(env.NOTIFICATION_HASH_SECRET) && hasBase64EncodedBytes(env.NOTIFICATION_ENCRYPTION_KEY, 32);
+}
+
+
 function getProviderConfig(env) {
   return {
     sendgridConfigured: hasText(env.SENDGRID_API_KEY) && hasText(env.SENDGRID_FROM_EMAIL),
@@ -33,11 +50,17 @@ function getProviderConfig(env) {
 }
 
 function summarizeFeedPayload(payload, itemKey) {
-  const items = Array.isArray(payload[itemKey]) ? payload[itemKey] : [];
+  if (!Array.isArray(payload[itemKey])) {
+    return {
+      available: false,
+      error: `Published feed is missing the ${itemKey} array.`,
+    };
+  }
+
   return {
     available: true,
     generatedAt: payload.generatedAt || null,
-    itemCount: items.length,
+    itemCount: payload[itemKey].length,
   };
 }
 
@@ -61,6 +84,8 @@ export async function onRequestGet({ request, env }) {
   try {
     requireInternalAuth(request, env);
     const databaseBound = Boolean(env.EWS_NOTIFY_DB);
+    const internalAuthConfigured = hasText(env.INTERNAL_ALERT_TOKEN);
+    const notificationCryptoConfigured = hasNotificationCrypto(env);
     const notifications = databaseBound
       ? { available: true, ...(await getNotificationPipelineStatus(env)) }
       : { available: false, reason: "missing_EWS_NOTIFY_DB" };
@@ -69,10 +94,11 @@ export async function onRequestGet({ request, env }) {
       {
         ok: true,
         now: new Date().toISOString(),
-        publicUrlConfigured: hasText(env.APP_BASE_URL) || hasText(env.EWS_PUBLIC_URL),
+        publicUrlConfigured: hasHttpsUrl(env.APP_BASE_URL) || hasHttpsUrl(env.EWS_PUBLIC_URL),
         databaseBound,
-        internalAuthConfigured: hasText(env.INTERNAL_ALERT_TOKEN),
-        alertEventBridgeAccepting: databaseBound && hasText(env.INTERNAL_ALERT_TOKEN),
+        internalAuthConfigured,
+        notificationCryptoConfigured,
+        alertEventBridgeAccepting: databaseBound && internalAuthConfigured && notificationCryptoConfigured,
         providerConfig: getProviderConfig(env),
         feeds: {
           alerts: await summarizeFeed(request, env, "/alerts.json", "events"),

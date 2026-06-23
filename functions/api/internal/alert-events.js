@@ -16,7 +16,8 @@ export async function onRequestPost({ request, env }) {
       results.push(await sendAlertEventNotifications(env, event, { source: payload.source || "alert_event_bridge" }));
     }
 
-    return jsonResponse({ ok: results.every((result) => result.ok), results });
+    const ok = results.every((result) => result.ok);
+    return jsonResponse({ ok, results }, { status: ok ? 200 : 502 });
   } catch (error) {
     return handleError(error);
   }

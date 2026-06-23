@@ -16,6 +16,10 @@ const distDir = path.join(REPO_ROOT, "dist");
 const publishedDir = path.join(REPO_ROOT, "data", "published");
 
 
+function normalizeBaseUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
 
 function run(command, args, options = {}) {
   console.log(`$ ${[command, ...args].join(" ")}`);
@@ -64,8 +68,8 @@ function applyD1Migrations(databaseName) {
 }
 
 
-async function restoreCurrentRss() {
-  const rssUrl = env.EWS_RSS_URL || new URL("/rss.xml", publicUrl).toString();
+async function restoreCurrentRss(targetPublicUrl) {
+  const rssUrl = env.EWS_RSS_URL || new URL("/rss.xml", targetPublicUrl).toString();
   const response = await fetch(rssUrl);
   if (!response.ok) {
     throw new Error(`Unable to restore current RSS feed from ${rssUrl}: ${response.status}`);
@@ -81,6 +85,11 @@ async function restoreCurrentRss() {
 async function main() {
   const wrangler = validateWranglerConfig();
   const errors = [...validateDeployEnv(env), ...wrangler.errors];
+  const wranglerPublicUrl = normalizeBaseUrl(wrangler.vars?.EWS_PUBLIC_URL || "");
+  const localPublicUrl = normalizeBaseUrl(publicUrl);
+  if (wranglerPublicUrl && localPublicUrl && wranglerPublicUrl !== localPublicUrl) {
+    errors.push(`EWS_PUBLIC_URL (${localPublicUrl}) must match wrangler.toml [vars] EWS_PUBLIC_URL (${wranglerPublicUrl}).`);
+  }
   for (const name of REQUIRED_DEPLOY_ENV_VARS) {
     console.log(`${name}=${env[name] ? "set" : "missing"}`);
   }
@@ -93,9 +102,10 @@ async function main() {
     process.exit(1);
   }
 
+  const smokePublicUrl = wranglerPublicUrl || localPublicUrl;
   run("npm", ["run", "build"]);
   copyPublishedAssets();
-  await restoreCurrentRss();
+  await restoreCurrentRss(smokePublicUrl);
   run("npm", ["run", "verify:dashboard-urls"]);
   applyD1Migrations(wrangler.d1DatabaseName);
 
@@ -115,8 +125,8 @@ async function main() {
   }
 
   run("npx", deployArgs);
-  run("npm", ["run", "smoke:live", "--", publicUrl]);
-  run("npm", ["run", "smoke:pages-pipeline", "--", publicUrl, "--require-providers"]);
+  run("npm", ["run", "smoke:live", "--", smokePublicUrl]);
+  run("npm", ["run", "smoke:pages-pipeline", "--", smokePublicUrl, "--require-providers"]);
 }
 
 main().catch((error) => {

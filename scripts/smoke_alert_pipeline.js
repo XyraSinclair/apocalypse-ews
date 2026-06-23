@@ -95,6 +95,47 @@ function initTempDb(dbPath) {
   db.close();
 }
 
+function applyD1Migrations(db) {
+  const migrationsDir = path.join(ROOT_DIR, 'migrations');
+  for (const fileName of fs.readdirSync(migrationsDir).filter((name) => name.endsWith('.sql')).sort()) {
+    db.exec(fs.readFileSync(path.join(migrationsDir, fileName), 'utf8'));
+  }
+}
+
+function createD1Adapter(db) {
+  return {
+    prepare(sql) {
+      const statement = db.prepare(sql);
+      return {
+        bind(...params) {
+          return {
+            async run() {
+              const result = statement.run(...params);
+              return { meta: { changes: result.changes } };
+            },
+            async first() {
+              return statement.get(...params) || null;
+            },
+            async all() {
+              return { results: statement.all(...params) };
+            },
+          };
+        },
+        async run() {
+          const result = statement.run();
+          return { meta: { changes: result.changes } };
+        },
+        async first() {
+          return statement.get() || null;
+        },
+        async all() {
+          return { results: statement.all() };
+        },
+      };
+    },
+  };
+}
+
 async function assertClaimAlertRecordIsIdempotent() {
   const inserted = new Map();
   const env = {
@@ -104,15 +145,24 @@ async function assertClaimAlertRecordIsIdempotent() {
           bind(...params) {
             return {
               async run() {
-                if (!/INSERT OR IGNORE INTO notification_alerts/i.test(sql)) {
-                  throw new Error(`Unexpected run SQL: ${sql}`);
+                if (/INSERT OR IGNORE INTO notification_alerts/i.test(sql)) {
+                  const [id, kind, source, level, slotKey, messageText, status, createdAt] = params;
+                  if (inserted.has(id)) {
+                    return { meta: { changes: 0 } };
+                  }
+                  inserted.set(id, { id, kind, source, level, slot_key: slotKey, message_text: messageText, status, created_at: createdAt });
+                  return { meta: { changes: 1 } };
                 }
-                const [id, kind, source, level, slotKey, messageText, status, createdAt] = params;
-                if (inserted.has(id)) {
-                  return { meta: { changes: 0 } };
+                if (/UPDATE notification_alerts/i.test(sql) && /status = 'processing'/i.test(sql)) {
+                  const [id, ...statuses] = params;
+                  const existing = inserted.get(id);
+                  if (!existing || !statuses.includes(existing.status)) {
+                    return { meta: { changes: 0 } };
+                  }
+                  existing.status = 'processing';
+                  return { meta: { changes: 1 } };
                 }
-                inserted.set(id, { id, kind, source, level, slot_key: slotKey, message_text: messageText, status, created_at: createdAt });
-                return { meta: { changes: 1 } };
+                throw new Error(`Unexpected run SQL: ${sql}`);
               },
               async first() {
                 return inserted.get(params[0]) || null;
@@ -128,7 +178,7 @@ async function assertClaimAlertRecordIsIdempotent() {
   fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{\"type\":\"module\"}\n');
   fs.cpSync(path.join(ROOT_DIR, 'functions', '_lib'), path.join(moduleRoot, '_lib'), { recursive: true });
   const dbModuleUrl = pathToFileURL(path.join(moduleRoot, '_lib', 'db.js')).href;
-  const { claimAlertRecord, getAlertRecordById } = await import(dbModuleUrl);
+  const { beginAlertRecordSend, claimAlertRecord, getAlertRecordById } = await import(dbModuleUrl);
   const details = {
     id: 'alert_event:smoke-idempotence',
     kind: 'takeoff_cluster',
@@ -143,6 +193,15 @@ async function assertClaimAlertRecordIsIdempotent() {
   assert(first.inserted === true, 'First alert record claim did not insert.');
   assert(second.inserted === false, 'Second alert record claim was not idempotent.');
   assert(existing?.id === details.id, 'Claimed alert record was not readable.');
+  assert(existing?.status === 'created', 'Claimed alert record did not preserve the initial status.');
+  const claimedCreated = await beginAlertRecordSend(env, details.id);
+  assert(claimedCreated === true, 'Created alert record was not claimable for send.');
+  assert(inserted.get(details.id)?.status === 'processing', 'Claimed alert record was not moved to processing.');
+  const claimedProcessing = await beginAlertRecordSend(env, details.id);
+  assert(claimedProcessing === false, 'Processing alert record was claimed twice.');
+  inserted.get(details.id).status = 'completed_with_errors';
+  const claimedRetry = await beginAlertRecordSend(env, details.id);
+  assert(claimedRetry === true, 'Completed-with-errors alert record was not retry-claimable.');
 }
 
 async function assertPagesPipelineStatus(token) {
@@ -166,6 +225,8 @@ async function assertPagesPipelineStatus(token) {
     TELNYX_PUBLIC_KEY: 'smoke-public-key',
     STRIPE_SECRET_KEY: 'smoke-stripe-key',
     STRIPE_PRICE_ID: 'price_smoke',
+    NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
+    NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
     EWS_NOTIFY_DB: {
       prepare(sql) {
         return {
@@ -230,6 +291,7 @@ async function assertPagesPipelineStatus(token) {
   assert(authorized.status === 200, `Pages pipeline status returned ${authorized.status}: ${JSON.stringify(payload)}`);
   assert(payload.databaseBound === true, 'Pages pipeline status did not report the D1 binding.');
   assert(payload.alertEventBridgeAccepting === true, 'Pages pipeline status did not report bridge readiness.');
+  assert(payload.notificationCryptoConfigured === true, 'Pages pipeline status did not report notification crypto as configured.');
   assert(payload.providerConfig.sendgridConfigured === true, 'Pages pipeline status did not report SendGrid as configured.');
   assert(payload.providerConfig.telnyxConfigured === true, 'Pages pipeline status did not report Telnyx as configured.');
   assert(payload.providerConfig.telnyxWebhookVerificationConfigured === true, 'Pages pipeline status did not report Telnyx webhook verification as configured.');
@@ -240,6 +302,104 @@ async function assertPagesPipelineStatus(token) {
   assert(payload.feeds.eventSignals.itemCount === 1, 'Pages pipeline status did not summarize event signals.');
   assert(payload.notifications.subscribers.active === 2, 'Pages pipeline status did not summarize active subscribers.');
   assert(payload.notifications.alerts.statusCounts.sent === 2, 'Pages pipeline status did not summarize alert statuses.');
+
+  feedPayloads.set('/alerts.json', { generatedAt: '2026-06-23T00:00:00.000Z' });
+  const malformedFeedResponse = await onRequestGet({
+    request: new Request('https://alerts.example.test/api/admin/pipeline-status', {
+      headers: { authorization: `Bearer ${token}` },
+    }),
+    env,
+  });
+  const malformedFeedPayload = await malformedFeedResponse.json();
+  assert(
+    malformedFeedPayload.feeds.alerts.available === false,
+    'Pages pipeline status accepted an alerts feed without an events array.',
+  );
+}
+
+async function assertAlertEventEndpointFailureStatus(token) {
+  const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-pages-functions-esm-'));
+  fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{"type":"module"}\n');
+  fs.cpSync(path.join(ROOT_DIR, 'functions'), path.join(moduleRoot, 'functions'), { recursive: true });
+  const endpointUrl = pathToFileURL(path.join(moduleRoot, 'functions', 'api', 'internal', 'alert-events.js')).href;
+  const cryptoUrl = pathToFileURL(path.join(moduleRoot, 'functions', '_lib', 'crypto.js')).href;
+  const { onRequestPost } = await import(endpointUrl);
+  const { contactHash, encryptString } = await import(cryptoUrl);
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-d1-smoke-')), 'notify.sqlite');
+  const db = new Database(dbPath);
+  applyD1Migrations(db);
+  const env = {
+    INTERNAL_ALERT_TOKEN: token,
+    APP_BASE_URL: 'https://alerts.example.test',
+    NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
+    NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
+    SENDGRID_API_KEY: 'smoke-sendgrid-key',
+    SENDGRID_FROM_EMAIL: 'alerts@example.test',
+    EWS_NOTIFY_DB: createD1Adapter(db),
+  };
+  const email = 'endpoint-failure@example.test';
+  db.prepare(`
+    INSERT INTO notification_signups (
+      id,
+      status,
+      email_cipher,
+      email_hash,
+      wants_email,
+      wants_sms,
+      source,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'sub-endpoint-failure',
+    'active',
+    await encryptString(env, email),
+    await contactHash(env, 'email', email),
+    1,
+    0,
+    'manual',
+    '2026-06-23T00:00:00.000Z',
+    '2026-06-23T00:00:00.000Z',
+  );
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('api.sendgrid.com')) {
+      return new Response('sendgrid down', { status: 500 });
+    }
+    return originalFetch(url);
+  };
+  try {
+    const response = await onRequestPost({
+      request: new Request('https://alerts.example.test/api/internal/alert-events', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          event: {
+            eventKey: 'smoke-failing-event',
+            kind: 'takeoff_anomaly',
+            cohort: 'global_business_jet',
+            title: 'Smoke failing event',
+            message: 'Smoke failing event message',
+            severity: 'high',
+            level: 4,
+            occurredAt: '2026-06-23T00:00:00.000Z',
+          },
+        }),
+      }),
+      env,
+    });
+    const payload = await response.json();
+    assert(response.status === 502, `Alert event endpoint returned ${response.status}, not 502, for failed fanout.`);
+    assert(payload.ok === false, 'Alert event endpoint did not report ok=false for failed fanout.');
+    assert(payload.results?.[0]?.ok === false, 'Alert event endpoint did not preserve the failed fanout result.');
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
 }
 
 
@@ -328,6 +488,7 @@ async function main() {
     assert(authorized.payload.providerConfig.sendgridConfigured === true, 'Pipeline status did not report SendGrid as configured.');
     assert(authorized.payload.providerConfig.telnyxConfigured === true, 'Pipeline status did not report Telnyx as configured.');
     assert(authorized.payload.providerConfig.telegramConfigured === true, 'Pipeline status did not report Telegram as configured from TELEGRAM_CHANNEL.');
+    assert(authorized.payload.notificationCryptoConfigured === true, 'Pipeline status did not report notification crypto as configured.');
 
     const eventSignals = await waitForJson(`${baseUrl}/api/event-signals`);
     assert(eventSignals.payload.records.length === 1, 'Event signals API did not return the published record.');
@@ -345,6 +506,7 @@ async function main() {
 
     await assertPagesPipelineStatus(token);
     await assertClaimAlertRecordIsIdempotent();
+    await assertAlertEventEndpointFailureStatus(token);
     console.log(JSON.stringify({ ok: true, baseUrl, tempRoot }));
   } finally {
     if (server.exitCode === null && server.signalCode === null) {
