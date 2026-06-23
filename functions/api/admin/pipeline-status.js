@@ -19,6 +19,14 @@ function hasTelnyxDeliveryStatusPath(env) {
   );
 }
 
+function hasSendGridDeliveryStatusPath(env) {
+  return (
+    hasHttpsUrl(env.SENDGRID_WEBHOOK_URL) ||
+    hasHttpsUrl(env.APP_BASE_URL) ||
+    hasHttpsUrl(env.EWS_PUBLIC_URL)
+  );
+}
+
 function hasBase64EncodedBytes(value, byteLength) {
   const normalized = String(value || "").trim();
   if (!normalized) {
@@ -39,13 +47,15 @@ function hasNotificationCrypto(env) {
 function getProviderConfig(env) {
   return {
     sendgridConfigured: hasText(env.SENDGRID_API_KEY) && hasText(env.SENDGRID_FROM_EMAIL),
+    sendgridWebhookVerificationConfigured: hasText(env.SENDGRID_WEBHOOK_PUBLIC_KEY),
+    sendgridDeliveryStatusConfigured: hasText(env.SENDGRID_WEBHOOK_PUBLIC_KEY) && hasSendGridDeliveryStatusPath(env),
     telnyxConfigured:
       hasText(env.TELNYX_API_KEY) &&
       (hasText(env.TELNYX_NUMBER) || hasText(env.TELNYX_FROM_PHONE) || hasText(env.TELNYX_MESSAGING_PROFILE_ID)),
     telnyxWebhookVerificationConfigured: hasText(env.TELNYX_PUBLIC_KEY),
     telnyxDeliveryStatusConfigured: hasText(env.TELNYX_PUBLIC_KEY) && hasTelnyxDeliveryStatusPath(env),
     stripeConfigured: hasText(env.STRIPE_SECRET_KEY) && hasText(env.STRIPE_PRICE_ID),
-    telegramConfigured: hasText(env.TELEGRAM_BOT_TOKEN) && hasText(env.TELEGRAM_CHANNEL),
+    telegramEmergencyConfigured: hasText(env.TELEGRAM_BOT_TOKEN) && hasText(env.TELEGRAM_CHANNEL),
   };
 }
 

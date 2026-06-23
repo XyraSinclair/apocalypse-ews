@@ -15,6 +15,10 @@ const REQUIRED_DEPLOY_ENV_VARS = [
   "CLOUDFLARE_API_TOKEN",
   "INTERNAL_ALERT_TOKEN",
   "EWS_PUBLIC_URL",
+  "SENDGRID_WEBHOOK_PUBLIC_KEY",
+  "EWS_ALERT_EVENTS_WEBHOOK_URL",
+  "EWS_SMOKE_TEST_EMAIL",
+  "EWS_SMOKE_TEST_PHONE",
   ...REQUIRED_DASHBOARD_ENV_VARS,
   ...REQUIRED_NOTIFICATION_SECRET_ENV_VARS,
 ];
@@ -130,6 +134,34 @@ function validatePublicUrl(name, value) {
   return null;
 }
 
+function validateHttpsPublicUrl(name, value) {
+  const publicUrlError = validatePublicUrl(name, value);
+  if (publicUrlError) {
+    return publicUrlError;
+  }
+
+  const url = new URL(value);
+  if (url.protocol !== "https:") {
+    return `${name} must use https.`;
+  }
+
+  return null;
+}
+
+function validateAlertEventsWebhookUrl(value) {
+  const urlError = validateHttpsPublicUrl("EWS_ALERT_EVENTS_WEBHOOK_URL", value);
+  if (urlError) {
+    return urlError;
+  }
+
+  const url = new URL(value);
+  if (url.pathname !== "/api/internal/alert-events") {
+    return "EWS_ALERT_EVENTS_WEBHOOK_URL must point at /api/internal/alert-events.";
+  }
+
+  return null;
+}
+
 function validateNotificationEncryptionKey(value) {
   if (!value) {
     return null;
@@ -235,6 +267,9 @@ function validateDeployEnv(env) {
   return [
     ...missing,
     publicUrlError,
+    missingNames.has("EWS_ALERT_EVENTS_WEBHOOK_URL")
+      ? null
+      : validateAlertEventsWebhookUrl(env.EWS_ALERT_EVENTS_WEBHOOK_URL),
     missingNames.has("NOTIFICATION_ENCRYPTION_KEY")
       ? null
       : validateNotificationEncryptionKey(env.NOTIFICATION_ENCRYPTION_KEY),

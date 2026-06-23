@@ -184,15 +184,17 @@ export async function getMessagingStatus(env) {
   const profileId = configuredProfileId || sender.messagingProfileId || "";
   const messagingProfile = await getMessagingProfile(env, profileId);
   const blockingIssue = buildBlockingIssue({ sender, messagingProfile, sendMethod });
+  const deliveryStatusIssue = buildWebhookWarning(env, messagingProfile);
 
   return {
     ok: true,
     provider: "telnyx",
     checkedAt: new Date().toISOString(),
     sendMethod,
-    readyForSms: !blockingIssue,
+    readyForSms: !blockingIssue && !deliveryStatusIssue,
     blockingIssue,
-    webhookWarning: buildWebhookWarning(env, messagingProfile),
+    deliveryStatusIssue,
+    webhookWarning: deliveryStatusIssue,
     webhooks: {
       url: getTelnyxWebhookUrl(env),
       failoverUrl: getTelnyxWebhookFailoverUrl(env),

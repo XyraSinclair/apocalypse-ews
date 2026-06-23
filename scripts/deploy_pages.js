@@ -21,11 +21,7 @@ function normalizeBaseUrl(value) {
 }
 
 function getPagesPipelineSmokeArgs(targetPublicUrl) {
-  const args = ["run", "smoke:pages-pipeline", "--", targetPublicUrl, "--require-providers"];
-  if (String(env.EWS_REQUIRE_PROVIDER_TEST || "").trim() === "1") {
-    args.push("--require-test-delivery");
-  }
-  return args;
+  return ["run", "smoke:pages-pipeline", "--", targetPublicUrl, "--require-providers", "--require-test-delivery"];
 }
 
 

@@ -661,13 +661,22 @@ export async function createManualSubscriber(env, payload = {}, requestContext =
   const wantsEmail = Boolean(payload.wantsEmail);
   const email = wantsEmail ? normalizeEmail(payload.email || accountEmail) : null;
   const phone = normalizePhone(payload.phone);
-  const wantsSms = Boolean(payload.wantsSms) && Boolean(phone);
+  const wantsSms = Boolean(payload.wantsSms);
 
   if (!accountEmail) {
     throw new HttpError(400, "Enter an account email address for the manual subscriber.");
   }
-  if (!email && !phone) {
-    throw new HttpError(400, "Enter an alert email address, a phone number, or both.");
+  if (!wantsEmail && !wantsSms) {
+    throw new HttpError(400, "Enable at least one alert channel for the manual subscriber.");
+  }
+  if (wantsEmail && !email) {
+    throw new HttpError(400, "Enter an alert email address before enabling email alerts.");
+  }
+  if (wantsSms && !phone) {
+    throw new HttpError(400, "Enter a phone number before enabling SMS alerts.");
+  }
+  if (wantsSms && !isSupportedSmsPhone(phone)) {
+    throw new HttpError(400, "SMS alerts are currently available for US and Canada numbers.");
   }
   if (wantsSms && !payload.smsConsent) {
     throw new HttpError(400, "Confirm SMS consent before enabling SMS for a manual subscriber.");

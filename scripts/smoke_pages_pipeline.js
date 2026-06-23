@@ -108,6 +108,14 @@ async function main() {
   if (requireProviders) {
     assert(payload.publicUrlConfigured === true, 'Pipeline status reports missing public URL.');
     assert(payload.providerConfig?.sendgridConfigured === true, 'Pipeline status reports SendGrid unavailable.');
+    assert(
+      payload.providerConfig?.sendgridWebhookVerificationConfigured === true,
+      'Pipeline status reports SendGrid webhook verification unavailable.',
+    );
+    assert(
+      payload.providerConfig?.sendgridDeliveryStatusConfigured === true,
+      'Pipeline status reports SendGrid delivery status unavailable.',
+    );
     assert(payload.providerConfig?.telnyxConfigured === true, 'Pipeline status reports Telnyx unavailable.');
     assert(
       payload.providerConfig?.telnyxWebhookVerificationConfigured === true,
@@ -117,13 +125,14 @@ async function main() {
       payload.providerConfig?.telnyxDeliveryStatusConfigured === true,
       'Pipeline status reports Telnyx delivery status unavailable.',
     );
-    assert(
-      Number(subscriberSummary.activeEmail || 0) + Number(subscriberSummary.activeSms || 0) > 0,
-      'Pipeline status reports no active email or SMS subscribers.',
-    );
+    assert(Number(subscriberSummary.activeEmail || 0) > 0, 'Pipeline status reports no active email subscribers.');
+    assert(Number(subscriberSummary.activeSms || 0) > 0, 'Pipeline status reports no active SMS subscribers.');
   }
 
-  if (requireTestDelivery) {
+  if (requireTestDelivery && requireProviders) {
+    assert(testEmail, 'A test email recipient is required: set EWS_SMOKE_TEST_EMAIL or pass --test-email.');
+    assert(testPhone, 'A test SMS recipient is required: set EWS_SMOKE_TEST_PHONE or pass --test-phone.');
+  } else if (requireTestDelivery) {
     assert(testEmail || testPhone, 'A test recipient is required: set EWS_SMOKE_TEST_EMAIL/EWS_SMOKE_TEST_PHONE or pass --test-email/--test-phone.');
   }
 
@@ -154,6 +163,7 @@ async function main() {
       emailSentCount: Number(testPayload.emailSentCount || 0),
       smsSentCount: Number(testPayload.smsSentCount || 0),
       errorCount: Number(testPayload.errorCount || 0),
+      evidence: 'provider_api_acceptance',
     };
   }
 

@@ -138,6 +138,10 @@ function hasTelnyxDeliveryStatusPath() {
   return hasHttpsEnv("TELNYX_WEBHOOK_URL") || hasHttpsEnv("APP_BASE_URL") || hasHttpsEnv("EWS_PUBLIC_URL");
 }
 
+function hasSendGridDeliveryStatusPath() {
+  return hasHttpsEnv("SENDGRID_WEBHOOK_URL") || hasHttpsEnv("APP_BASE_URL") || hasHttpsEnv("EWS_PUBLIC_URL");
+}
+
 function hasBase64EncodedBytes(value, byteLength) {
   const normalized = String(value || "").trim();
   if (!normalized) {
@@ -328,13 +332,15 @@ app.get("/api/admin/local-pipeline-status", (request, response) => {
     notificationCryptoConfigured,
     providerConfig: {
       sendgridConfigured: hasEnv("SENDGRID_API_KEY") && hasEnv("SENDGRID_FROM_EMAIL"),
+      sendgridWebhookVerificationConfigured: hasEnv("SENDGRID_WEBHOOK_PUBLIC_KEY"),
+      sendgridDeliveryStatusConfigured: hasEnv("SENDGRID_WEBHOOK_PUBLIC_KEY") && hasSendGridDeliveryStatusPath(),
       telnyxConfigured:
         hasEnv("TELNYX_API_KEY") &&
         (hasEnv("TELNYX_NUMBER") || hasEnv("TELNYX_FROM_PHONE") || hasEnv("TELNYX_MESSAGING_PROFILE_ID")),
       telnyxWebhookVerificationConfigured: hasEnv("TELNYX_PUBLIC_KEY"),
       telnyxDeliveryStatusConfigured: hasEnv("TELNYX_PUBLIC_KEY") && hasTelnyxDeliveryStatusPath(),
       stripeConfigured: hasEnv("STRIPE_SECRET_KEY") && hasEnv("STRIPE_PRICE_ID"),
-      telegramConfigured: hasEnv("TELEGRAM_BOT_TOKEN") && hasEnv("TELEGRAM_CHANNEL"),
+      telegramEmergencyConfigured: hasEnv("TELEGRAM_BOT_TOKEN") && hasEnv("TELEGRAM_CHANNEL"),
     },
     bridge: bridgeStatus.available
       ? {

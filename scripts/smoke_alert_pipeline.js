@@ -7,6 +7,7 @@ const http = require('node:http');
 const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
+const nodeCrypto = require('node:crypto');
 const Database = require('better-sqlite3');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -15,6 +16,20 @@ function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+async function assertRejects(fn, expectedMessagePart) {
+  let error = null;
+  try {
+    await fn();
+  } catch (caught) {
+    error = caught;
+  }
+  assert(error, `Expected rejection containing: ${expectedMessagePart}`);
+  assert(
+    String(error.message || '').includes(expectedMessagePart),
+    `Expected rejection containing "${expectedMessagePart}", got "${error.message}".`,
+  );
 }
 
 function writeJson(filePath, payload) {
@@ -147,6 +162,10 @@ function assertDeployEnvFileLoading(tempRoot) {
     'CLOUDFLARE_API_TOKEN=smoke-cloudflare-token',
     'INTERNAL_ALERT_TOKEN=smoke-internal-token',
     'EWS_PUBLIC_URL=https://alerts.example.test/',
+    'EWS_ALERT_EVENTS_WEBHOOK_URL=https://alerts.example.test/api/internal/alert-events',
+    'EWS_SMOKE_TEST_EMAIL=smoke@example.test',
+    'EWS_SMOKE_TEST_PHONE=+14155552671',
+    'SENDGRID_WEBHOOK_PUBLIC_KEY=smoke-sendgrid-webhook-public-key',
     'VITE_DASHBOARD_URL=https://alerts.example.test/dashboard.json',
     'VITE_MILITARY_DASHBOARD_URL=https://alerts.example.test/military-dashboard.json',
     'VITE_UNTRACKED_DASHBOARD_URL=https://alerts.example.test/untracked-dashboard.json',
@@ -183,6 +202,8 @@ async function assertPagesPipelineSmokeScript(token) {
         alertEventBridgeAccepting: true,
         providerConfig: {
           sendgridConfigured: true,
+          sendgridWebhookVerificationConfigured: true,
+          sendgridDeliveryStatusConfigured: true,
           telnyxConfigured: true,
           telnyxWebhookVerificationConfigured: true,
           telnyxDeliveryStatusConfigured: true,
@@ -195,9 +216,9 @@ async function assertPagesPipelineSmokeScript(token) {
         notifications: {
           available: true,
           subscribers: {
-            active: 1,
+            active: 2,
             activeEmail: 1,
-            activeSms: 0,
+            activeSms: 1,
           },
         },
       });
@@ -210,7 +231,7 @@ async function assertPagesPipelineSmokeScript(token) {
         sent: true,
         alertId: 'smoke-admin-test',
         emailSentCount: 1,
-        smsSentCount: 0,
+        smsSentCount: 1,
         errorCount: 0,
       });
       return;
@@ -239,6 +260,8 @@ async function assertPagesPipelineSmokeScript(token) {
         '--require-test-delivery',
         '--test-email',
         'smoke@example.test',
+        '--test-phone',
+        '+14155552671',
       ],
       { env: { ...process.env, INTERNAL_ALERT_TOKEN: token, EWS_SMOKE_TEST_EMAIL: '', EWS_SMOKE_TEST_PHONE: '' } },
     );
@@ -246,6 +269,8 @@ async function assertPagesPipelineSmokeScript(token) {
     assert(payload.requireProviders === true, 'Pages smoke script did not record provider requirement.');
     assert(payload.requireTestDelivery === true, 'Pages smoke script did not record test-delivery requirement.');
     assert(payload.testDelivery?.emailSentCount === 1, 'Pages smoke script did not verify the test email delivery.');
+    assert(payload.testDelivery?.smsSentCount === 1, 'Pages smoke script did not verify the test SMS delivery.');
+    assert(payload.testDelivery?.evidence === 'provider_api_acceptance', 'Pages smoke script did not label provider acceptance evidence.');
     assert(testAlertPosts === 1, 'Pages smoke script did not call the admin test-alert endpoint exactly once.');
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -336,6 +361,7 @@ async function assertPagesPipelineStatus(token) {
     EWS_PUBLIC_URL: 'https://alerts.example.test/',
     SENDGRID_API_KEY: 'smoke-sendgrid-key',
     SENDGRID_FROM_EMAIL: 'alerts@example.test',
+    SENDGRID_WEBHOOK_PUBLIC_KEY: 'smoke-sendgrid-webhook-public-key',
     TELNYX_API_KEY: 'smoke-telnyx-key',
     TELNYX_MESSAGING_PROFILE_ID: 'smoke-profile-id',
     TELNYX_PUBLIC_KEY: 'smoke-public-key',
@@ -409,6 +435,8 @@ async function assertPagesPipelineStatus(token) {
   assert(payload.alertEventBridgeAccepting === true, 'Pages pipeline status did not report bridge readiness.');
   assert(payload.notificationCryptoConfigured === true, 'Pages pipeline status did not report notification crypto as configured.');
   assert(payload.providerConfig.sendgridConfigured === true, 'Pages pipeline status did not report SendGrid as configured.');
+  assert(payload.providerConfig.sendgridWebhookVerificationConfigured === true, 'Pages pipeline status did not report SendGrid webhook verification as configured.');
+  assert(payload.providerConfig.sendgridDeliveryStatusConfigured === true, 'Pages pipeline status did not report SendGrid delivery status as configured.');
   assert(payload.providerConfig.telnyxConfigured === true, 'Pages pipeline status did not report Telnyx as configured.');
   assert(payload.providerConfig.telnyxWebhookVerificationConfigured === true, 'Pages pipeline status did not report Telnyx webhook verification as configured.');
   assert(payload.providerConfig.telnyxDeliveryStatusConfigured === true, 'Pages pipeline status did not report Telnyx delivery status as configured.');
@@ -431,6 +459,145 @@ async function assertPagesPipelineStatus(token) {
     malformedFeedPayload.feeds.alerts.available === false,
     'Pages pipeline status accepted an alerts feed without an events array.',
   );
+}
+
+async function assertManualSubscriberValidation() {
+  const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-manual-subscriber-esm-'));
+  fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{"type":"module"}\n');
+  fs.cpSync(path.join(ROOT_DIR, 'functions', '_lib'), path.join(moduleRoot, '_lib'), { recursive: true });
+  const dbModuleUrl = pathToFileURL(path.join(moduleRoot, '_lib', 'db.js')).href;
+  const { createManualSubscriber } = await import(dbModuleUrl);
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-manual-subscriber-')), 'notify.sqlite');
+  const db = new Database(dbPath);
+  applyD1Migrations(db);
+  const env = {
+    NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
+    NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 3).toString('base64'),
+    EWS_NOTIFY_DB: createD1Adapter(db),
+  };
+
+  await assertRejects(
+    () => createManualSubscriber(env, { accountEmail: 'ops@example.test' }),
+    'Enable at least one alert channel',
+  );
+  await assertRejects(
+    () =>
+      createManualSubscriber(env, {
+        accountEmail: 'ops@example.test',
+        wantsSms: true,
+        phone: '+442071838750',
+        smsConsent: true,
+      }),
+    'SMS alerts are currently available for US and Canada numbers',
+  );
+
+  const emailSubscriber = await createManualSubscriber(env, {
+    accountEmail: 'ops-email@example.test',
+    wantsEmail: true,
+    email: 'alerts-email@example.test',
+  });
+  const smsSubscriber = await createManualSubscriber(
+    env,
+    {
+      accountEmail: 'ops-sms@example.test',
+      wantsSms: true,
+      phone: '+14155552671',
+      smsConsent: true,
+    },
+    { ip: '127.0.0.1', userAgent: 'smoke' },
+  );
+  assert(emailSubscriber.wantsEmail === true && emailSubscriber.wantsSms === false, 'Manual email subscriber enabled the wrong channels.');
+  assert(smsSubscriber.wantsEmail === false && smsSubscriber.wantsSms === true, 'Manual SMS subscriber enabled the wrong channels.');
+  db.close();
+}
+
+async function assertSendGridWebhookDeliveryStatus() {
+  const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-sendgrid-webhook-esm-'));
+  fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{"type":"module"}\n');
+  fs.cpSync(path.join(ROOT_DIR, 'functions'), path.join(moduleRoot, 'functions'), { recursive: true });
+  const endpointUrl = pathToFileURL(path.join(moduleRoot, 'functions', 'api', 'sendgrid', 'webhook.js')).href;
+  const { onRequestPost } = await import(endpointUrl);
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-sendgrid-webhook-')), 'notify.sqlite');
+  const db = new Database(dbPath);
+  applyD1Migrations(db);
+  db.prepare(`
+    INSERT INTO notification_alerts (
+      id,
+      kind,
+      source,
+      message_text,
+      status,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'alert-sendgrid-webhook',
+    'takeoff_cluster',
+    'smoke',
+    'SendGrid webhook smoke',
+    'sent',
+    '2026-06-23T00:00:00.000Z',
+    '2026-06-23T00:00:00.000Z',
+  );
+  db.prepare(`
+    INSERT INTO notification_deliveries (
+      id,
+      alert_id,
+      channel,
+      destination_hash,
+      status,
+      provider_message_id,
+      provider_status,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'delivery-sendgrid-webhook',
+    'alert-sendgrid-webhook',
+    'email',
+    'hash-email-sendgrid-webhook',
+    'sent',
+    'sendgrid-message-id',
+    'processed',
+    '2026-06-23T00:00:00.000Z',
+    '2026-06-23T00:00:00.000Z',
+  );
+
+  const { publicKey, privateKey } = nodeCrypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const rawBody = JSON.stringify([
+    {
+      event: 'delivered',
+      sg_event_id: 'sendgrid-event-id',
+      sg_message_id: 'sendgrid-message-id.filter0001.123.456.0',
+      response: '250 OK',
+    },
+  ]);
+  const signature = nodeCrypto
+    .sign('sha256', Buffer.concat([Buffer.from(timestamp), Buffer.from(rawBody)]), privateKey)
+    .toString('base64');
+  const response = await onRequestPost({
+    request: new Request('https://alerts.example.test/api/sendgrid/webhook', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-twilio-email-event-webhook-signature': signature,
+        'x-twilio-email-event-webhook-timestamp': timestamp,
+      },
+      body: rawBody,
+    }),
+    env: {
+      SENDGRID_WEBHOOK_PUBLIC_KEY: publicKey.export({ type: 'spki', format: 'pem' }),
+      EWS_NOTIFY_DB: createD1Adapter(db),
+    },
+  });
+  const payload = await response.json();
+  assert(response.status === 200, `SendGrid webhook returned ${response.status}: ${JSON.stringify(payload)}`);
+  assert(payload.results?.[0]?.updated === true, 'SendGrid webhook did not update the matching delivery.');
+  const delivery = db.prepare('SELECT status, provider_status FROM notification_deliveries WHERE id = ?').get('delivery-sendgrid-webhook');
+  assert(delivery.status === 'delivered', 'SendGrid webhook did not record delivered status.');
+  assert(delivery.provider_status === 'delivered', 'SendGrid webhook did not record provider status.');
+  db.close();
 }
 
 async function assertAlertEventEndpointFailureStatus(token) {
@@ -553,8 +720,9 @@ async function main() {
     NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
     SENDGRID_API_KEY: 'smoke-sendgrid-key',
     SENDGRID_FROM_EMAIL: 'alerts@example.test',
+    SENDGRID_WEBHOOK_PUBLIC_KEY: 'smoke-sendgrid-webhook-public-key',
     TELNYX_API_KEY: 'smoke-telnyx-key',
-    TELNYX_NUMBER: '+15555550123',
+    TELNYX_NUMBER: '+14155552671',
     TELEGRAM_BOT_TOKEN: 'smoke-telegram-token',
     TELEGRAM_CHANNEL: 'alerts-channel',
   };
@@ -603,8 +771,10 @@ async function main() {
     assert(authorized.payload.feeds.eventSignals.itemCount === 1, 'Pipeline status did not summarize event signal records.');
     assert(authorized.payload.bridge.reason === 'smoke_seed', 'Pipeline status did not surface bridge health.');
     assert(authorized.payload.providerConfig.sendgridConfigured === true, 'Pipeline status did not report SendGrid as configured.');
+    assert(authorized.payload.providerConfig.sendgridWebhookVerificationConfigured === true, 'Pipeline status did not report SendGrid webhook verification as configured.');
+    assert(authorized.payload.providerConfig.sendgridDeliveryStatusConfigured === true, 'Pipeline status did not report SendGrid delivery status as configured.');
     assert(authorized.payload.providerConfig.telnyxConfigured === true, 'Pipeline status did not report Telnyx as configured.');
-    assert(authorized.payload.providerConfig.telegramConfigured === true, 'Pipeline status did not report Telegram as configured from TELEGRAM_CHANNEL.');
+    assert(authorized.payload.providerConfig.telegramEmergencyConfigured === true, 'Pipeline status did not report emergency Telegram as configured from TELEGRAM_CHANNEL.');
     assert(authorized.payload.notificationCryptoConfigured === true, 'Pipeline status did not report notification crypto as configured.');
 
     const eventSignals = await waitForJson(`${baseUrl}/api/event-signals`);
@@ -623,6 +793,8 @@ async function main() {
 
     await assertPagesPipelineStatus(token);
     await assertPagesPipelineSmokeScript(token);
+    await assertManualSubscriberValidation();
+    await assertSendGridWebhookDeliveryStatus();
     await assertClaimAlertRecordIsIdempotent();
     await assertAlertEventEndpointFailureStatus(token);
     console.log(JSON.stringify({ ok: true, baseUrl, tempRoot }));
