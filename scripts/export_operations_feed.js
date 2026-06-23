@@ -37,6 +37,7 @@ function listAlertEvents(dbPath, limit) {
           kind,
           severity,
           cohort,
+          event_key AS eventKey,
           occurred_at AS occurredAt,
           title,
           message,
@@ -51,6 +52,7 @@ function listAlertEvents(dbPath, limit) {
       `)
       .all(limit)
       .map((event) => ({
+        stableId: `alert:${event.eventKey}`,
         ...event,
         payload: parseJsonField(event.payloadJson, null),
         payloadJson: undefined,

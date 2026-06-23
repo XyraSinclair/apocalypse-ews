@@ -67,7 +67,7 @@ function recordsFromLiveAlerts(limit) {
   try {
     return db
       .prepare(`
-        SELECT id, kind, severity, cohort, occurred_at AS occurredAt, title, message, payload_json AS payloadJson, status
+        SELECT id, kind, severity, cohort, event_key AS eventKey, occurred_at AS occurredAt, title, message, payload_json AS payloadJson, status
         FROM alert_events
         ORDER BY occurred_at DESC, id DESC
         LIMIT ?
@@ -76,7 +76,7 @@ function recordsFromLiveAlerts(limit) {
       .map((event) => {
         const payload = parseJson(event.payloadJson, {});
         return {
-          id: `alert:${event.id}`,
+          id: `alert:${event.eventKey}`,
           source: 'live_alert_event',
           event: event.title,
           phase: event.kind,
@@ -93,6 +93,7 @@ function recordsFromLiveAlerts(limit) {
           landingEvents: null,
           provenance: `${event.cohort}: ${event.message}`,
           status: event.status,
+          alertEventKey: event.eventKey,
         };
       });
   } finally {

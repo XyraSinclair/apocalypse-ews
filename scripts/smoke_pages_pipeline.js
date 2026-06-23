@@ -58,6 +58,14 @@ async function main() {
     assert(payload.publicUrlConfigured === true, 'Pipeline status reports missing public URL.');
     assert(payload.providerConfig?.sendgridConfigured === true, 'Pipeline status reports SendGrid unavailable.');
     assert(payload.providerConfig?.telnyxConfigured === true, 'Pipeline status reports Telnyx unavailable.');
+    assert(
+      payload.providerConfig?.telnyxWebhookVerificationConfigured === true,
+      'Pipeline status reports Telnyx webhook verification unavailable.',
+    );
+    assert(
+      payload.providerConfig?.telnyxDeliveryStatusConfigured === true,
+      'Pipeline status reports Telnyx delivery status unavailable.',
+    );
   }
 
   const alertCount = await expectPublicJson('/api/alerts?limit=1', 'events');

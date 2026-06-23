@@ -379,7 +379,7 @@ function getActiveSubscribers(db, env = process.env) {
 function listAlertEvents(db, { limit = 50 } = {}) {
   return db
     .prepare(`
-      SELECT id, kind, severity, cohort, occurred_at AS occurredAt, title, message, payload_json AS payloadJson, status, created_at AS createdAt, dispatched_at AS dispatchedAt, dispatch_summary_json AS dispatchSummaryJson
+      SELECT id, kind, severity, cohort, event_key AS eventKey, occurred_at AS occurredAt, title, message, payload_json AS payloadJson, status, created_at AS createdAt, dispatched_at AS dispatchedAt, dispatch_summary_json AS dispatchSummaryJson
       FROM alert_events
       ORDER BY occurred_at DESC, id DESC
       LIMIT ?
@@ -387,6 +387,7 @@ function listAlertEvents(db, { limit = 50 } = {}) {
     .all(Math.min(Math.max(Number(limit) || 50, 1), 200))
     .map((event) => ({
       ...event,
+      stableId: `alert:${event.eventKey}`,
       payload: JSON.parse(event.payloadJson),
       payloadJson: undefined,
       dispatchSummary: event.dispatchSummaryJson ? JSON.parse(event.dispatchSummaryJson) : null,

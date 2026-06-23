@@ -2,6 +2,11 @@ name = "apocalypse-ews"
 compatibility_date = "2026-05-05"
 pages_build_output_dir = "dist"
 
+[vars]
+EWS_PUBLIC_URL = "https://replace-with-public-pages-domain.example/"
+APP_BASE_URL = "https://replace-with-public-pages-domain.example"
+EWS_NOTIFICATION_URL = "https://replace-with-public-pages-domain.example"
+
 [[d1_databases]]
 binding = "EWS_NOTIFY_DB"
 database_name = "ews-notifications"

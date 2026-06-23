@@ -1427,6 +1427,48 @@ export async function recordDelivery(env, delivery) {
     .run();
 }
 
+export async function hasSuccessfulDelivery(env, { alertId, subscriberId = null, channel, destinationHash = null }) {
+  const subscriberScoped = subscriberId
+    ? await getDb(env)
+        .prepare(
+          `
+            SELECT 1
+            FROM notification_deliveries
+            WHERE alert_id = ?
+              AND subscriber_id = ?
+              AND channel = ?
+              AND status IN ('sent', 'delivered')
+            LIMIT 1
+          `,
+        )
+        .bind(alertId, subscriberId, channel)
+        .first()
+    : null;
+  if (subscriberScoped) {
+    return true;
+  }
+
+  if (!destinationHash) {
+    return false;
+  }
+
+  const destinationScoped = await getDb(env)
+    .prepare(
+      `
+        SELECT 1
+        FROM notification_deliveries
+        WHERE alert_id = ?
+          AND destination_hash = ?
+          AND channel = ?
+          AND status IN ('sent', 'delivered')
+        LIMIT 1
+      `,
+    )
+    .bind(alertId, destinationHash, channel)
+    .first();
+  return Boolean(destinationScoped);
+}
+
 function getInboundSmsReceivedAt(value) {
   const parsedTime = Date.parse(value || "");
   return Number.isFinite(parsedTime) ? new Date(parsedTime).toISOString() : nowIso();

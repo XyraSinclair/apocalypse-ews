@@ -6,6 +6,7 @@ const {
   REQUIRED_DEPLOY_ENV_VARS,
   getEnvWithDotEnv,
   validateDeployEnv,
+  validateWranglerConfig,
 } = require("./_deploy_env");
 
 const env = getEnvWithDotEnv();
@@ -13,7 +14,6 @@ const publicUrl = env.EWS_PUBLIC_URL || "https://ews.kylemcdonald.net/";
 const projectName = env.CLOUDFLARE_PAGES_PROJECT || "apocalypse-ews";
 const distDir = path.join(REPO_ROOT, "dist");
 const publishedDir = path.join(REPO_ROOT, "data", "published");
-const wranglerConfigPath = path.join(REPO_ROOT, "wrangler.toml");
 
 
 
@@ -58,18 +58,9 @@ function copyPublishedAssets() {
   }
   console.log(`Copied published JSON assets into ${distDir}.`);
 }
-function assertWranglerConfig() {
-  if (!fs.existsSync(wranglerConfigPath)) {
-    throw new Error("wrangler.toml is required for Pages deploys; copy wrangler.example.toml and set the D1 database_id.");
-  }
 
-  const configText = fs.readFileSync(wranglerConfigPath, "utf8");
-  if (!/binding\s*=\s*\"EWS_NOTIFY_DB\"/.test(configText)) {
-    throw new Error("wrangler.toml must bind the EWS_NOTIFY_DB D1 database.");
-  }
-  if (/replace-with-cloudflare-d1-database-id/.test(configText)) {
-    throw new Error("wrangler.toml still contains the placeholder D1 database_id.");
-  }
+function applyD1Migrations(databaseName) {
+  run("npx", ["wrangler", "d1", "migrations", "apply", databaseName, "--remote"]);
 }
 
 
@@ -88,7 +79,8 @@ async function restoreCurrentRss() {
 }
 
 async function main() {
-  const errors = validateDeployEnv(env);
+  const wrangler = validateWranglerConfig();
+  const errors = [...validateDeployEnv(env), ...wrangler.errors];
   for (const name of REQUIRED_DEPLOY_ENV_VARS) {
     console.log(`${name}=${env[name] ? "set" : "missing"}`);
   }
@@ -101,11 +93,11 @@ async function main() {
     process.exit(1);
   }
 
-  assertWranglerConfig();
   run("npm", ["run", "build"]);
   copyPublishedAssets();
   await restoreCurrentRss();
   run("npm", ["run", "verify:dashboard-urls"]);
+  applyD1Migrations(wrangler.d1DatabaseName);
 
   const deployArgs = [
     "wrangler",
@@ -124,6 +116,7 @@ async function main() {
 
   run("npx", deployArgs);
   run("npm", ["run", "smoke:live", "--", publicUrl]);
+  run("npm", ["run", "smoke:pages-pipeline", "--", publicUrl, "--require-providers"]);
 }
 
 main().catch((error) => {

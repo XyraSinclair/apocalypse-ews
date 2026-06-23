@@ -23,7 +23,7 @@ function rssItemFromAlertEvent(event, env = process.env) {
   const config = getRssConfig(env);
   const publishedAt = new Date(event.occurredAt || event.createdAt || Date.now());
   return {
-    guid: `ews-alert-${event.id}`,
+    guid: event.eventKey ? `ews-alert-${event.eventKey}` : `ews-alert-${event.id}`,
     title: event.title,
     summary: event.message,
     description: event.message,

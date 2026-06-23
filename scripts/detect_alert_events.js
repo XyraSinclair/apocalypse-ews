@@ -61,12 +61,22 @@ function severityForLevel(level) {
   return 'watch';
 }
 
-function eventExists(db, eventKey) {
-  return Boolean(db.prepare('SELECT 1 FROM alert_events WHERE event_key = ?').get(eventKey));
+function eventExists(db, event) {
+  return Boolean(
+    db
+      .prepare(`
+        SELECT 1
+        FROM alert_events
+        WHERE event_key = @eventKey
+           OR (kind = @kind AND cohort = @cohort AND occurred_at = @occurredAt)
+        LIMIT 1
+      `)
+      .get(event),
+  );
 }
 
 function insertAlertEvent(db, event) {
-  if (eventExists(db, event.eventKey)) {
+  if (eventExists(db, event)) {
     return false;
   }
 
@@ -159,7 +169,7 @@ function buildEvents({ db, snapshot, cohort, anomalyLevel, takeoffBatchMin, take
       kind: 'statistical_anomaly',
       severity: severityForLevel(emergencyLevel),
       cohort,
-      eventKey: `statistical_anomaly:${cohort}:${occurredAt}:level${emergencyLevel}`,
+      eventKey: `statistical_anomaly:${cohort}:${occurredAt}`,
       occurredAt,
       title: `Emergency level ${emergencyLevel} aircraft activity anomaly`,
       message: `${cohort} reached emergency level ${emergencyLevel}: ${Math.round(concurrentCount).toLocaleString()} airborne vs ${Math.round(expectedCount).toLocaleString()} expected.`,
@@ -180,7 +190,7 @@ function buildEvents({ db, snapshot, cohort, anomalyLevel, takeoffBatchMin, take
       kind: 'takeoff_anomaly',
       severity: severityForLevel(emergencyLevel),
       cohort,
-      eventKey: `takeoff_anomaly:${cohort}:${occurredAt}:level${emergencyLevel}`,
+      eventKey: `takeoff_anomaly:${cohort}:${occurredAt}`,
       occurredAt,
       title: `${takeoffs.length} takeoffs during emergency level ${emergencyLevel}`, 
       message: `${takeoffs.length} tracked aircraft became airborne while ${cohort} was at emergency level ${emergencyLevel}.`,

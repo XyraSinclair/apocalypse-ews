@@ -7,6 +7,7 @@ import {
   getActiveSubscriberBatch,
   getMetaValue,
   getSubscriberById,
+  hasSuccessfulDelivery,
   hydrateSubscriberContacts,
   markRenewalReminderFailed,
   markRenewalReminderSent,
@@ -319,6 +320,10 @@ async function sendSms(env, { to, text }) {
 
 async function sendDelivery(env, { alertId, subscriberId, channel, destination, text, subject = null, html = null }) {
   const destinationHash = await contactHash(env, channel === "sms" ? "phone" : channel, destination);
+  if (await hasSuccessfulDelivery(env, { alertId, subscriberId, channel, destinationHash })) {
+    return { ok: true, channel, skipped: true };
+  }
+
 
   try {
     const result =
@@ -561,16 +566,49 @@ function getRenewalReminderEmailContent({ renewalDate, amount, billingFrequency,
   };
 }
 
-async function recordDeliveryPreparationFailure(env, { alertId, subscriberId, channel, destination, error }) {
-  const destinationHash = await contactHash(env, channel === "sms" ? "phone" : channel, destination);
+async function recordDeliveryPreparationFailure(
+  env,
+  { alertId, subscriberId, channel, destination = null, destinationHash = null, error },
+) {
+  const resolvedDestinationHash =
+    destinationHash || (destination ? await contactHash(env, channel === "sms" ? "phone" : channel, destination) : null);
   await recordDelivery(env, {
     alertId,
     subscriberId,
     channel,
-    destinationHash,
+    destinationHash: resolvedDestinationHash,
     status: "failed",
     error: error.message,
   });
+}
+
+async function recordSubscriberHydrationFailure(env, { alertId, subscriber, error }) {
+  const subscriberId = subscriber?.id || null;
+  const records = [];
+  if (Number(subscriber?.wants_email || 0) === 1 && subscriber?.email_hash) {
+    records.push(
+      recordDeliveryPreparationFailure(env, {
+        alertId,
+        subscriberId,
+        channel: "email",
+        destinationHash: subscriber.email_hash,
+        error,
+      }),
+    );
+  }
+  if (Number(subscriber?.wants_sms || 0) === 1 && subscriber?.phone_hash && !subscriber?.sms_opted_out_at) {
+    records.push(
+      recordDeliveryPreparationFailure(env, {
+        alertId,
+        subscriberId,
+        channel: "sms",
+        destinationHash: subscriber.phone_hash,
+        error,
+      }),
+    );
+  }
+  await Promise.all(records);
+  return records.length;
 }
 
 async function sendAlertToSubscribers(
@@ -608,7 +646,13 @@ async function sendAlertToSubscribers(
       smsSentCount: 0,
       errorCount: 0,
     };
-    const hydrated = await hydrateSubscriberContacts(env, subscriber);
+    let hydrated;
+    try {
+      hydrated = await hydrateSubscriberContacts(env, subscriber);
+    } catch (error) {
+      subscriberSummary.errorCount += await recordSubscriberHydrationFailure(env, { alertId, subscriber, error });
+      return subscriberSummary;
+    }
     if (hydrated.wantsEmail && hydrated.email) {
       let emailText = messageText;
       let emailHtml = null;
@@ -1148,18 +1192,19 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
     slotKey: event.eventKey,
     messageText,
   });
-  if (!claim.inserted) {
-    const existing = await getAlertRecordById(env, alertId);
+  const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
+  const concurrency = getLevel5NotificationConcurrency(env);
+  const existing = claim.inserted ? null : await getAlertRecordById(env, alertId);
+  if (!claim.inserted && existing?.status === "sent") {
     return {
       ok: true,
       sent: false,
       reason: "already_recorded",
       alertId,
-      status: existing?.status || "unknown",
+      status: existing.status,
     };
   }
-  const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
-  const concurrency = getLevel5NotificationConcurrency(env);
+
   const summary = await sendAlertToActiveSubscriberBatches(env, {
     alertId,
     messageText,
@@ -1245,6 +1290,10 @@ export async function maybeSendLevel5Notifications(env, snapshot, { source = "sc
 }
 
 export async function sendAdminSingleTest(env, { email, phone }) {
+  if (phone && !safelyIsSupportedSmsPhone(phone)) {
+    throw new HttpError(400, "SMS test alerts only support US/Canada phone numbers.");
+  }
+
   const snapshot = {
     signals: {
       composite: {

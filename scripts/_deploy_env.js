@@ -9,9 +9,16 @@ const REQUIRED_DASHBOARD_ENV_VARS = [
 ];
 const REQUIRED_DEPLOY_ENV_VARS = [
   "CLOUDFLARE_API_TOKEN",
+  "INTERNAL_ALERT_TOKEN",
   "EWS_PUBLIC_URL",
   ...REQUIRED_DASHBOARD_ENV_VARS,
 ];
+const REQUIRED_WRANGLER_VARS = [
+  "EWS_PUBLIC_URL",
+  "APP_BASE_URL",
+  "EWS_NOTIFICATION_URL",
+];
+const WRANGLER_CONFIG_PATH = path.join(REPO_ROOT, "wrangler.toml");
 
 function parseDotEnvValue(value) {
   const trimmed = value.trim();
@@ -97,6 +104,75 @@ function validatePublicUrl(name, value) {
   return null;
 }
 
+function getTomlString(block, key) {
+  const match = block.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"\\s*$`, "m"));
+  return match ? match[1].trim() : "";
+}
+
+function getD1DatabaseBlock(configText) {
+  const blocks = configText.match(/\[\[d1_databases\]\][\s\S]*?(?=\n\[\[|\n\[|$)/g) || [];
+  return blocks.find((block) => getTomlString(block, "binding") === "EWS_NOTIFY_DB") || "";
+}
+
+function validateWranglerConfig(filePath = WRANGLER_CONFIG_PATH) {
+  const errors = [];
+  let d1DatabaseName = "";
+
+  if (!fs.existsSync(filePath)) {
+    return {
+      ok: false,
+      d1DatabaseName,
+      errors: ["wrangler.toml is required for Pages deploys; copy wrangler.example.toml and set the D1 database_id."],
+    };
+  }
+
+  const configText = fs.readFileSync(filePath, "utf8");
+  for (const name of REQUIRED_WRANGLER_VARS) {
+    const value = getTomlString(configText, name);
+    if (!value) {
+      errors.push(`wrangler.toml [vars] must set ${name}.`);
+      continue;
+    }
+    if (/replace-with/i.test(value)) {
+      errors.push(`wrangler.toml [vars] ${name} must not use a placeholder URL.`);
+      continue;
+    }
+    const publicUrlError = validatePublicUrl(`wrangler.toml [vars] ${name}`, value);
+    if (publicUrlError) {
+      errors.push(publicUrlError);
+    }
+  }
+
+  const d1Block = getD1DatabaseBlock(configText);
+  if (!d1Block) {
+    errors.push("wrangler.toml must bind the EWS_NOTIFY_DB D1 database.");
+  } else {
+    d1DatabaseName = getTomlString(d1Block, "database_name");
+    const databaseId = getTomlString(d1Block, "database_id");
+    const migrationsDir = getTomlString(d1Block, "migrations_dir") || "migrations";
+    const migrationsPath = path.resolve(path.dirname(filePath), migrationsDir);
+
+    if (!d1DatabaseName) {
+      errors.push("wrangler.toml EWS_NOTIFY_DB must set database_name.");
+    }
+    if (!databaseId || databaseId === "replace-with-cloudflare-d1-database-id") {
+      errors.push("wrangler.toml EWS_NOTIFY_DB must set a real database_id.");
+    }
+    if (!fs.existsSync(migrationsPath)) {
+      errors.push(`wrangler.toml migrations_dir does not exist: ${migrationsDir}.`);
+    } else {
+      const migrationFiles = fs.readdirSync(migrationsPath).filter((fileName) => fileName.endsWith(".sql"));
+      if (!migrationFiles.length) {
+        errors.push(`wrangler.toml migrations_dir has no SQL migrations: ${migrationsDir}.`);
+      }
+    }
+  }
+
+  return { ok: errors.length === 0, d1DatabaseName, errors };
+}
+
+
+
 
 function validateDashboardEnv(env) {
   return REQUIRED_DASHBOARD_ENV_VARS
@@ -124,7 +200,9 @@ module.exports = {
   REPO_ROOT,
   REQUIRED_DASHBOARD_ENV_VARS,
   REQUIRED_DEPLOY_ENV_VARS,
+  WRANGLER_CONFIG_PATH,
   getEnvWithDotEnv,
   validateDashboardEnv,
   validateDeployEnv,
+  validateWranglerConfig,
 };
