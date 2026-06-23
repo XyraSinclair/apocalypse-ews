@@ -3,16 +3,66 @@
 const { getEnvWithDotEnv } = require('./_deploy_env');
 
 const env = getEnvWithDotEnv();
-const args = process.argv.slice(2);
-const requireProviders = args.includes('--require-providers');
-const positionalArgs = args.filter((arg) => !arg.startsWith('--'));
+const parsedArgs = parseArgs(process.argv.slice(2));
+const requireProviders = parsedArgs.flags.has('require-providers');
+const requireTestDelivery = parsedArgs.flags.has('require-test-delivery');
 const targetUrl = normalizeBaseUrl(
-  positionalArgs[0] || process.env.EWS_SMOKE_URL || env.EWS_PUBLIC_URL || 'https://ews.kylemcdonald.net/',
+  parsedArgs.positionals[0] || process.env.EWS_SMOKE_URL || env.EWS_PUBLIC_URL || 'https://ews.kylemcdonald.net/',
 );
 const token = String(process.env.INTERNAL_ALERT_TOKEN || env.INTERNAL_ALERT_TOKEN || '').trim();
+const testEmail = String(parsedArgs.options.testEmail || process.env.EWS_SMOKE_TEST_EMAIL || env.EWS_SMOKE_TEST_EMAIL || '').trim();
+const testPhone = String(parsedArgs.options.testPhone || process.env.EWS_SMOKE_TEST_PHONE || env.EWS_SMOKE_TEST_PHONE || '').trim();
 
 function normalizeBaseUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function parseArgs(argv) {
+  const flags = new Set();
+  const options = {};
+  const positionals = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--require-providers') {
+      flags.add('require-providers');
+      continue;
+    }
+    if (arg === '--require-test-delivery') {
+      flags.add('require-test-delivery');
+      continue;
+    }
+    if (arg === '--test-email') {
+      const value = argv[index + 1];
+      if (!value) {
+        throw new Error('--test-email requires an email address.');
+      }
+      options.testEmail = value;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--test-email=')) {
+      options.testEmail = arg.slice('--test-email='.length);
+      continue;
+    }
+    if (arg === '--test-phone') {
+      const value = argv[index + 1];
+      if (!value) {
+        throw new Error('--test-phone requires a phone number.');
+      }
+      options.testPhone = value;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--test-phone=')) {
+      options.testPhone = arg.slice('--test-phone='.length);
+      continue;
+    }
+    if (arg.startsWith('--')) {
+      throw new Error(`Unknown argument: ${arg}`);
+    }
+    positionals.push(arg);
+  }
+  return { flags, options, positionals };
 }
 
 function assert(condition, message) {
@@ -54,6 +104,7 @@ async function main() {
   assert(payload.feeds?.eventSignals?.available === true, 'Pipeline status reports event signals feed unavailable.');
   assert(payload.notifications?.available === true, 'Pipeline status reports notifications unavailable.');
 
+  const subscriberSummary = payload.notifications?.subscribers || {};
   if (requireProviders) {
     assert(payload.publicUrlConfigured === true, 'Pipeline status reports missing public URL.');
     assert(payload.providerConfig?.sendgridConfigured === true, 'Pipeline status reports SendGrid unavailable.');
@@ -66,6 +117,44 @@ async function main() {
       payload.providerConfig?.telnyxDeliveryStatusConfigured === true,
       'Pipeline status reports Telnyx delivery status unavailable.',
     );
+    assert(
+      Number(subscriberSummary.activeEmail || 0) + Number(subscriberSummary.activeSms || 0) > 0,
+      'Pipeline status reports no active email or SMS subscribers.',
+    );
+  }
+
+  if (requireTestDelivery) {
+    assert(testEmail || testPhone, 'A test recipient is required: set EWS_SMOKE_TEST_EMAIL/EWS_SMOKE_TEST_PHONE or pass --test-email/--test-phone.');
+  }
+
+  let testDelivery = null;
+  if (testEmail || testPhone) {
+    const { response: testResponse, payload: testPayload, text: testText } = await readJson(`${targetUrl}/api/admin/test-alert`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: testEmail || undefined,
+        phone: testPhone || undefined,
+      }),
+    });
+    assert(testResponse.ok, `Test alert returned HTTP ${testResponse.status}: ${testText}`);
+    assert(testPayload?.ok === true, `Test alert delivery failed: ${testText}`);
+    if (testEmail) {
+      assert(Number(testPayload.emailSentCount || 0) > 0, 'Test alert did not send an email.');
+    }
+    if (testPhone) {
+      assert(Number(testPayload.smsSentCount || 0) > 0, 'Test alert did not send an SMS.');
+    }
+    testDelivery = {
+      ok: true,
+      alertId: testPayload.alertId || null,
+      emailSentCount: Number(testPayload.emailSentCount || 0),
+      smsSentCount: Number(testPayload.smsSentCount || 0),
+      errorCount: Number(testPayload.errorCount || 0),
+    };
   }
 
   const alertCount = await expectPublicJson('/api/alerts?limit=1', 'events');
@@ -76,13 +165,15 @@ async function main() {
     ok: true,
     targetUrl,
     requireProviders,
+    requireTestDelivery,
     feeds: {
       alerts: alertCount,
       takeoffs: takeoffCount,
       eventSignals: signalCount,
     },
-    subscribers: payload.notifications.subscribers,
+    subscribers: subscriberSummary,
     providers: payload.providerConfig,
+    testDelivery,
   }));
 }
 

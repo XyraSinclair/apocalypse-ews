@@ -20,6 +20,14 @@ function normalizeBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
 }
 
+function getPagesPipelineSmokeArgs(targetPublicUrl) {
+  const args = ["run", "smoke:pages-pipeline", "--", targetPublicUrl, "--require-providers"];
+  if (String(env.EWS_REQUIRE_PROVIDER_TEST || "").trim() === "1") {
+    args.push("--require-test-delivery");
+  }
+  return args;
+}
+
 
 function run(command, args, options = {}) {
   console.log(`$ ${[command, ...args].join(" ")}`);
@@ -126,7 +134,7 @@ async function main() {
 
   run("npx", deployArgs);
   run("npm", ["run", "smoke:live", "--", smokePublicUrl]);
-  run("npm", ["run", "smoke:pages-pipeline", "--", smokePublicUrl, "--require-providers"]);
+  run("npm", getPagesPipelineSmokeArgs(smokePublicUrl));
 }
 
 main().catch((error) => {

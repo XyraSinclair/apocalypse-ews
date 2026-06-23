@@ -1,11 +1,35 @@
 const {
   REQUIRED_DEPLOY_ENV_VARS,
+  getDeployEnvFiles,
   getEnvWithDotEnv,
   validateDeployEnv,
   validateWranglerConfig,
 } = require("./_deploy_env");
 
-const env = getEnvWithDotEnv();
+function parseArgs(argv) {
+  const envFiles = [];
+  for (let index = 2; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--env-file") {
+      const filePath = argv[index + 1];
+      if (!filePath) {
+        throw new Error("--env-file requires a path.");
+      }
+      envFiles.push(filePath);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--env-file=")) {
+      envFiles.push(arg.slice("--env-file=".length));
+      continue;
+    }
+    throw new Error(`Unknown argument: ${arg}`);
+  }
+  return { envFiles };
+}
+
+const args = parseArgs(process.argv);
+const env = getEnvWithDotEnv(process.env, { envFiles: getDeployEnvFiles(args.envFiles) });
 const envErrors = validateDeployEnv(env);
 const wrangler = validateWranglerConfig();
 const errors = [...envErrors, ...wrangler.errors];

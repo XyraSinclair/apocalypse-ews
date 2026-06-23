@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const net = require('node:net');
+const http = require('node:http');
 const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
@@ -134,6 +135,121 @@ function createD1Adapter(db) {
       };
     },
   };
+}
+
+function assertDeployEnvFileLoading(tempRoot) {
+  const {
+    getEnvWithDotEnv,
+    validateDeployEnv,
+  } = require('./_deploy_env');
+  const envPath = path.join(tempRoot, 'deploy.env');
+  fs.writeFileSync(envPath, [
+    'CLOUDFLARE_API_TOKEN=smoke-cloudflare-token',
+    'INTERNAL_ALERT_TOKEN=smoke-internal-token',
+    'EWS_PUBLIC_URL=https://alerts.example.test/',
+    'VITE_DASHBOARD_URL=https://alerts.example.test/dashboard.json',
+    'VITE_MILITARY_DASHBOARD_URL=https://alerts.example.test/military-dashboard.json',
+    'VITE_UNTRACKED_DASHBOARD_URL=https://alerts.example.test/untracked-dashboard.json',
+    'NOTIFICATION_HASH_SECRET=smoke-hash-secret',
+    `NOTIFICATION_ENCRYPTION_KEY=${Buffer.alloc(32, 11).toString('base64')}`,
+    '',
+  ].join('\n'));
+
+  const env = getEnvWithDotEnv({}, { envFiles: [envPath] });
+  assert(env.CLOUDFLARE_API_TOKEN === 'smoke-cloudflare-token', 'Deploy env loader did not read the explicit env file.');
+  assert(validateDeployEnv(env).length === 0, 'Deploy env validation rejected the explicit env file.');
+}
+
+function sendJson(response, status, payload) {
+  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  response.end(JSON.stringify(payload));
+}
+
+async function assertPagesPipelineSmokeScript(token) {
+  const port = await freePort();
+  const targetUrl = `http://127.0.0.1:${port}`;
+  let testAlertPosts = 0;
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, targetUrl);
+    if (url.pathname === '/api/admin/pipeline-status') {
+      if (request.headers.authorization !== `Bearer ${token}`) {
+        sendJson(response, 401, { error: 'Unauthorized' });
+        return;
+      }
+      sendJson(response, 200, {
+        ok: true,
+        publicUrlConfigured: true,
+        databaseBound: true,
+        alertEventBridgeAccepting: true,
+        providerConfig: {
+          sendgridConfigured: true,
+          telnyxConfigured: true,
+          telnyxWebhookVerificationConfigured: true,
+          telnyxDeliveryStatusConfigured: true,
+        },
+        feeds: {
+          alerts: { available: true },
+          takeoffs: { available: true },
+          eventSignals: { available: true },
+        },
+        notifications: {
+          available: true,
+          subscribers: {
+            active: 1,
+            activeEmail: 1,
+            activeSms: 0,
+          },
+        },
+      });
+      return;
+    }
+    if (url.pathname === '/api/admin/test-alert' && request.method === 'POST') {
+      testAlertPosts += 1;
+      sendJson(response, 200, {
+        ok: true,
+        sent: true,
+        alertId: 'smoke-admin-test',
+        emailSentCount: 1,
+        smsSentCount: 0,
+        errorCount: 0,
+      });
+      return;
+    }
+    if (url.pathname === '/api/alerts') {
+      sendJson(response, 200, { events: [{ id: 'alert-smoke' }] });
+      return;
+    }
+    if (url.pathname === '/api/takeoffs') {
+      sendJson(response, 200, { events: [{ id: 'takeoff-smoke' }] });
+      return;
+    }
+    if (url.pathname === '/api/event-signals') {
+      sendJson(response, 200, { records: [{ id: 'signal-smoke' }] });
+      return;
+    }
+    sendJson(response, 404, { error: 'not found' });
+  });
+  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
+  try {
+    const run = await execNode(
+      [
+        'scripts/smoke_pages_pipeline.js',
+        targetUrl,
+        '--require-providers',
+        '--require-test-delivery',
+        '--test-email',
+        'smoke@example.test',
+      ],
+      { env: { ...process.env, INTERNAL_ALERT_TOKEN: token, EWS_SMOKE_TEST_EMAIL: '', EWS_SMOKE_TEST_PHONE: '' } },
+    );
+    const payload = JSON.parse(run.stdout.trim());
+    assert(payload.requireProviders === true, 'Pages smoke script did not record provider requirement.');
+    assert(payload.requireTestDelivery === true, 'Pages smoke script did not record test-delivery requirement.');
+    assert(payload.testDelivery?.emailSentCount === 1, 'Pages smoke script did not verify the test email delivery.');
+    assert(testAlertPosts === 1, 'Pages smoke script did not call the admin test-alert endpoint exactly once.');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 }
 
 async function assertClaimAlertRecordIsIdempotent() {
@@ -409,6 +525,7 @@ async function main() {
   const dbPath = path.join(tempRoot, 'ews.sqlite');
   const bridgeStatusPath = path.join(tempRoot, 'bridge-status.json');
   const token = 'alert-pipeline-smoke-token';
+  assertDeployEnvFileLoading(tempRoot);
   initTempDb(dbPath);
   writeJson(path.join(publishedDir, 'alerts.json'), { generatedAt: '2026-06-23T00:00:00.000Z', events: [{ id: 1 }] });
   writeJson(path.join(publishedDir, 'takeoffs.json'), { generatedAt: '2026-06-23T00:00:00.000Z', events: [{ id: 1 }] });
@@ -505,6 +622,7 @@ async function main() {
     assert(bridgeStatus.reason === bridgeOutput.reason, 'Bridge status file did not persist the latest result.');
 
     await assertPagesPipelineStatus(token);
+    await assertPagesPipelineSmokeScript(token);
     await assertClaimAlertRecordIsIdempotent();
     await assertAlertEventEndpointFailureStatus(token);
     console.log(JSON.stringify({ ok: true, baseUrl, tempRoot }));

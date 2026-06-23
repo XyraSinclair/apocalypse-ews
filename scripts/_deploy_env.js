@@ -23,7 +23,10 @@ const REQUIRED_WRANGLER_VARS = [
   "APP_BASE_URL",
   "EWS_NOTIFICATION_URL",
 ];
+const SERVICE_ENV_PATH = "/etc/apocalypse-ews.env";
+const PROJECT_ENV_PATH = path.join(REPO_ROOT, ".env");
 const WRANGLER_CONFIG_PATH = path.join(REPO_ROOT, "wrangler.toml");
+const DEFAULT_DEPLOY_ENV_FILES = [SERVICE_ENV_PATH, PROJECT_ENV_PATH];
 
 function parseDotEnvValue(value) {
   const trimmed = value.trim();
@@ -37,8 +40,8 @@ function parseDotEnvValue(value) {
   return trimmed;
 }
 
-function readDotEnvFile(filePath = path.join(REPO_ROOT, ".env")) {
-  if (!fs.existsSync(filePath)) {
+function readDotEnvFile(filePath = PROJECT_ENV_PATH) {
+  if (!filePath || !fs.existsSync(filePath)) {
     return {};
   }
 
@@ -56,9 +59,27 @@ function readDotEnvFile(filePath = path.join(REPO_ROOT, ".env")) {
   return env;
 }
 
-function getEnvWithDotEnv(baseEnv = process.env) {
+function readDotEnvFiles(filePaths = DEFAULT_DEPLOY_ENV_FILES) {
+  const env = {};
+  for (const filePath of filePaths) {
+    const fileEnv = readDotEnvFile(filePath);
+    for (const [key, value] of Object.entries(fileEnv)) {
+      if (env[key] === undefined) {
+        env[key] = value;
+      }
+    }
+  }
+  return env;
+}
+
+function getDeployEnvFiles(extraEnvFiles = []) {
+  return [...extraEnvFiles.filter(Boolean), ...DEFAULT_DEPLOY_ENV_FILES];
+}
+
+function getEnvWithDotEnv(baseEnv = process.env, options = {}) {
+  const envFiles = options.envFiles || getDeployEnvFiles(options.extraEnvFiles || []);
   return {
-    ...readDotEnvFile(),
+    ...readDotEnvFiles(envFiles),
     ...baseEnv,
   };
 }
@@ -228,8 +249,14 @@ module.exports = {
   REPO_ROOT,
   REQUIRED_DASHBOARD_ENV_VARS,
   REQUIRED_DEPLOY_ENV_VARS,
+  SERVICE_ENV_PATH,
+  PROJECT_ENV_PATH,
   WRANGLER_CONFIG_PATH,
+  DEFAULT_DEPLOY_ENV_FILES,
+  getDeployEnvFiles,
   getEnvWithDotEnv,
+  readDotEnvFile,
+  readDotEnvFiles,
   validateDashboardEnv,
   validateDeployEnv,
   validateWranglerConfig,
