@@ -7,7 +7,7 @@ const { DATA_DIR, ensureDirectories } = require("../server/config");
 const { getDb, initDb } = require("../server/db");
 const { buildDashboardSnapshot, buildStoredHeatmapStatus } = require("../server/dashboard");
 const { listAlertEvents } = require("../server/local-notifications");
-const { buildEmergencyRssFeedXml, getRssConfig, getRssItems, maybeRecordEmergencyLevelRssItem } = require("../server/rss-feed");
+const { buildEmergencyRssFeedXml, dedupeRssItems, getRssItems, maybeRecordEmergencyLevelRssItem, rssItemFromAlertEvent } = require("../server/rss-feed");
 
 function parseArgs(argv) {
   const args = {
@@ -36,31 +36,6 @@ function printHelp() {
   console.log("Usage: node scripts/update_rss_feed.js [--output path] [--dry-run]");
 }
 
-
-function rssItemFromAlertEvent(event, env = process.env) {
-  const config = getRssConfig(env);
-  const publishedAt = new Date(event.occurredAt || event.createdAt || Date.now());
-  return {
-    guid: `ews-alert-${event.id}`,
-    title: event.title,
-    summary: event.message,
-    description: event.message,
-    link: config.siteUrl,
-    pubDate: Number.isFinite(publishedAt.getTime()) ? publishedAt.toUTCString() : new Date().toUTCString(),
-  };
-}
-
-function dedupeRssItems(items) {
-  const seen = new Set();
-  return items.filter((item) => {
-    const key = item.guid || item.slotKey || `${item.title}:${item.pubDate}`;
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
-}
 function main() {
   const args = parseArgs(process.argv);
   if (args.help) {

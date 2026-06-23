@@ -16,7 +16,7 @@ const {
 const { createHeatmapCacheRefresher } = require("./heatmap-cache");
 const { buildDashboardSnapshot } = require("./dashboard");
 const { maybeSendEmergencyLevelTelegramAlert } = require("./telegram-alert");
-const { buildEmergencyRssFeedXml, maybeRecordEmergencyLevelRssItem } = require("./rss-feed");
+const { buildEmergencyRssFeedXml, dedupeRssItems, getRssItems, maybeRecordEmergencyLevelRssItem, rssItemFromAlertEvent } = require("./rss-feed");
 const {
   HttpError,
   listAlertEvents,
@@ -255,10 +255,14 @@ for (const [routePath, fileName] of PUBLISHED_DASHBOARD_FILES) {
 }
 
 app.get(["/rss.xml", "/feed.xml"], (_request, response) => {
+  const items = dedupeRssItems([
+    ...listAlertEvents(getDb(), { limit: 100 }).map((event) => rssItemFromAlertEvent(event)),
+    ...getRssItems(),
+  ]);
   response
     .type("application/rss+xml")
     .set("Cache-Control", "public, max-age=300")
-    .send(buildEmergencyRssFeedXml());
+    .send(buildEmergencyRssFeedXml({ items }));
 });
 
 app.use((error, _request, response, _next) => {

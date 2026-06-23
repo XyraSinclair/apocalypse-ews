@@ -18,6 +18,31 @@ function getRssConfig(env = process.env) {
   };
 }
 
+
+function rssItemFromAlertEvent(event, env = process.env) {
+  const config = getRssConfig(env);
+  const publishedAt = new Date(event.occurredAt || event.createdAt || Date.now());
+  return {
+    guid: `ews-alert-${event.id}`,
+    title: event.title,
+    summary: event.message,
+    description: event.message,
+    link: config.siteUrl,
+    pubDate: Number.isFinite(publishedAt.getTime()) ? publishedAt.toUTCString() : new Date().toUTCString(),
+  };
+}
+
+function dedupeRssItems(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = item.guid || item.slotKey || `${item.title}:${item.pubDate}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
 function escapeXml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -154,4 +179,6 @@ module.exports = {
   getRssConfig,
   getRssItems,
   maybeRecordEmergencyLevelRssItem,
+  dedupeRssItems,
+  rssItemFromAlertEvent,
 };
