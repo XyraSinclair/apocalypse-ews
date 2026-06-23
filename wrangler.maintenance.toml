@@ -3,7 +3,7 @@ main = "workers/notification-maintenance.js"
 compatibility_date = "2026-05-05"
 
 [triggers]
-crons = ["17 * * * *"]
+crons = ["* * * * *"]
 
 [[d1_databases]]
 binding = "EWS_NOTIFY_DB"

@@ -6,6 +6,7 @@ import {
   getAlertRecordById,
   getRenewalReminderCandidates,
   getActiveSubscriberBatch,
+  getProcessingAlertRecords,
   getMetaValue,
   getSubscriberById,
   hasSuccessfulDelivery,
@@ -16,6 +17,7 @@ import {
   recordDelivery,
   setMetaValue,
   updateAlertRecord,
+  updateAlertFanoutProgress,
   updateSubscriberFromSubscription,
 } from "./db.js";
 import { contactHash } from "./crypto.js";
@@ -739,8 +741,28 @@ function mergeAlertSummaries(summary, batchSummary) {
   summary.smsEligibleCount += Number(batchSummary.smsEligibleCount || 0);
 }
 
+function normalizeMaxBatches(value) {
+  if (value === undefined || value === null) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.floor(numberValue);
+}
+
+function getAlertEventMaxBatchesPerInvocation(env) {
+  return getPositiveIntegerEnv(env, "ALERT_EVENT_MAX_BATCHES_PER_INVOCATION", 1, { min: 1, max: 100 });
+}
+
+function getAlertFanoutSubject(record) {
+  return String(record.subject || record.message_text || "Apocalypse EWS alert").slice(0, 500);
+}
+
 async function sendAlertToActiveSubscriberBatches(env, options) {
   const batchSize = getPositiveIntegerEnv(env, "LEVEL5_SUBSCRIBER_BATCH_SIZE", 500, { min: 1, max: 5000 });
+  const maxBatches = normalizeMaxBatches(options.maxBatches);
   const summary = {
     subscriberCount: 0,
     emailSentCount: 0,
@@ -751,13 +773,16 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
     smsMinIntervalMs: options.smsMinIntervalMs || 0,
     concurrency: options.concurrency || 1,
     batchSize,
+    batchCount: 0,
+    complete: false,
   };
-  let afterCreatedAt = "";
-  let afterId = "";
+  let afterCreatedAt = String(options.afterCreatedAt || "");
+  let afterId = String(options.afterId || "");
 
-  while (true) {
+  while (summary.batchCount < maxBatches) {
     const subscribers = await getActiveSubscriberBatch(env, { afterCreatedAt, afterId, limit: batchSize });
     if (!subscribers.length) {
+      summary.complete = true;
       break;
     }
     const lastSubscriber = subscribers[subscribers.length - 1];
@@ -765,10 +790,34 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
     afterId = String(lastSubscriber.id || "");
     const batchSummary = await sendAlertToSubscribers(env, { ...options, subscribers, updateRecord: false });
     mergeAlertSummaries(summary, batchSummary);
+    summary.batchCount += 1;
+    await updateAlertFanoutProgress(
+      env,
+      options.alertId,
+      { ...batchSummary, batchCount: 1 },
+      { afterCreatedAt, afterId },
+      "processing",
+    );
+    if (subscribers.length < batchSize) {
+      summary.complete = true;
+      break;
+    }
   }
 
-  summary.status = summary.errorCount > 0 ? "completed_with_errors" : "sent";
-  await updateAlertRecord(env, options.alertId, summary);
+  if (summary.complete) {
+    const totalErrorCount = Number(options.initialErrorCount || 0) + Number(summary.errorCount || 0);
+    summary.status = totalErrorCount > 0 ? "completed_with_errors" : "sent";
+    await updateAlertFanoutProgress(
+      env,
+      options.alertId,
+      { subscriberCount: 0, emailSentCount: 0, smsSentCount: 0, errorCount: 0, batchCount: 0 },
+      { afterCreatedAt: "", afterId: "" },
+      summary.status,
+    );
+  } else {
+    summary.status = "processing";
+  }
+
   return summary;
 }
 
@@ -1227,10 +1276,53 @@ async function prepareClaimedAlertForSend(env, alertId, claim) {
   };
 }
 
+async function continueAlertRecordFanout(env, alertRecord) {
+  const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
+  const concurrency = getLevel5NotificationConcurrency(env);
+  const summary = await sendAlertToActiveSubscriberBatches(env, {
+    alertId: alertRecord.id,
+    messageText: alertRecord.message_text,
+    smsMessageText: alertRecord.sms_message_text || alertRecord.message_text,
+    subject: getAlertFanoutSubject(alertRecord),
+    includeCustomerPortalLinks: true,
+    concurrency,
+    smsMinIntervalMs,
+    afterCreatedAt: alertRecord.fanout_after_created_at || "",
+    afterId: alertRecord.fanout_after_id || "",
+    maxBatches: getAlertEventMaxBatchesPerInvocation(env),
+    initialErrorCount: Number(alertRecord.error_count || 0),
+  });
+
+  return {
+    ok: summary.errorCount === 0,
+    sent: summary.complete,
+    queued: !summary.complete,
+    alertId: alertRecord.id,
+    kind: alertRecord.kind,
+    status: summary.status,
+    estimatedSmsWindowSeconds: Math.ceil((Number(summary.smsEligibleCount || 0) * smsMinIntervalMs) / 1000),
+    ...summary,
+  };
+}
+
+export async function continueAlertFanoutBatch(env, { limit = 10 } = {}) {
+  const records = await getProcessingAlertRecords(env, { limit });
+  const results = [];
+  for (const record of records) {
+    results.push(await continueAlertRecordFanout(env, record));
+  }
+  return {
+    ok: results.every((result) => result.ok),
+    processed: results.length,
+    results,
+  };
+}
+
 export async function sendAlertEventNotifications(env, rawEvent, { source = "alert_event_bridge" } = {}) {
   const event = normalizeExternalAlertEvent(rawEvent);
   const alertId = externalAlertRecordId(event);
   const messageText = formatExternalAlertMessage(env, event);
+  const smsMessageText = formatExternalAlertSms(event);
   const claim = await claimAlertRecord(env, {
     id: alertId,
     kind: event.kind,
@@ -1238,6 +1330,8 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
     level: event.level,
     slotKey: event.eventKey,
     messageText,
+    subject: event.title,
+    smsMessageText,
     status: "processing",
   });
   const skip = await prepareClaimedAlertForSend(env, alertId, claim);
@@ -1245,26 +1339,21 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
     return skip;
   }
 
-  const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
-  const concurrency = getLevel5NotificationConcurrency(env);
-  const summary = await sendAlertToActiveSubscriberBatches(env, {
-    alertId,
-    messageText,
-    smsMessageText: formatExternalAlertSms(event),
+  const summary = await continueAlertRecordFanout(env, {
+    id: alertId,
+    kind: event.kind,
+    message_text: messageText,
+    sms_message_text: smsMessageText,
     subject: event.title,
-    includeCustomerPortalLinks: true,
-    concurrency,
-    smsMinIntervalMs,
+    fanout_after_created_at: "",
+    fanout_after_id: "",
+    error_count: 0,
   });
 
   return {
-    ok: summary.errorCount === 0,
-    sent: true,
-    alertId,
+    ...summary,
     kind: event.kind,
     cohort: event.cohort,
-    estimatedSmsWindowSeconds: Math.ceil((Number(summary.smsEligibleCount || 0) * smsMinIntervalMs) / 1000),
-    ...summary,
   };
 }
 

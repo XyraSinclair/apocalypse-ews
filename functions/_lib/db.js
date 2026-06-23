@@ -1331,7 +1331,17 @@ function insertedRowCount(result) {
 
 export async function claimAlertRecord(
   env,
-  { id = crypto.randomUUID(), kind, source, level, slotKey, messageText, status = "created" },
+  {
+    id = crypto.randomUUID(),
+    kind,
+    source,
+    level,
+    slotKey,
+    messageText,
+    subject = null,
+    smsMessageText = null,
+    status = "created",
+  },
 ) {
   const result = await getDb(env)
     .prepare(
@@ -1343,13 +1353,26 @@ export async function claimAlertRecord(
           level,
           slot_key,
           message_text,
+          subject,
+          sms_message_text,
           status,
           created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
     )
-    .bind(id, kind, source, level ?? null, slotKey || null, messageText, status, nowIso())
+    .bind(
+      id,
+      kind,
+      source,
+      level ?? null,
+      slotKey || null,
+      messageText,
+      subject ? String(subject).slice(0, 500) : null,
+      smsMessageText || null,
+      status,
+      nowIso(),
+    )
     .run();
 
   return {
@@ -1413,7 +1436,13 @@ export async function createAlertRecord(env, details) {
   return claim.id;
 }
 
+function isCompletedAlertStatus(status) {
+  return status === "sent" || status === "completed_with_errors";
+}
+
 export async function updateAlertRecord(env, alertId, summary) {
+  const timestamp = nowIso();
+  const completedAt = isCompletedAlertStatus(summary.status) ? timestamp : null;
   await getDb(env)
     .prepare(
       `
@@ -1424,7 +1453,8 @@ export async function updateAlertRecord(env, alertId, summary) {
           email_sent_count = ?,
           sms_sent_count = ?,
           error_count = ?,
-          sent_at = ?,
+          sent_at = COALESCE(?, sent_at),
+          fanout_completed_at = COALESCE(?, fanout_completed_at),
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `,
@@ -1435,10 +1465,65 @@ export async function updateAlertRecord(env, alertId, summary) {
       summary.emailSentCount || 0,
       summary.smsSentCount || 0,
       summary.errorCount || 0,
-      nowIso(),
+      completedAt,
+      completedAt,
       alertId,
     )
     .run();
+}
+
+export async function updateAlertFanoutProgress(env, alertId, summary, cursor = {}, status = "processing") {
+  const timestamp = nowIso();
+  const completedAt = isCompletedAlertStatus(status) ? timestamp : null;
+  await getDb(env)
+    .prepare(
+      `
+        UPDATE notification_alerts
+        SET
+          status = ?,
+          subscriber_count = subscriber_count + ?,
+          email_sent_count = email_sent_count + ?,
+          sms_sent_count = sms_sent_count + ?,
+          error_count = error_count + ?,
+          fanout_after_created_at = ?,
+          fanout_after_id = ?,
+          fanout_batch_count = fanout_batch_count + ?,
+          sent_at = COALESCE(?, sent_at),
+          fanout_completed_at = COALESCE(?, fanout_completed_at),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+    )
+    .bind(
+      status,
+      summary.subscriberCount || 0,
+      summary.emailSentCount || 0,
+      summary.smsSentCount || 0,
+      summary.errorCount || 0,
+      cursor.afterCreatedAt || "",
+      cursor.afterId || "",
+      summary.batchCount || 0,
+      completedAt,
+      completedAt,
+      alertId,
+    )
+    .run();
+}
+
+export async function getProcessingAlertRecords(env, { limit = 10 } = {}) {
+  const rows = await getDb(env)
+    .prepare(
+      `
+        SELECT *
+        FROM notification_alerts
+        WHERE status = 'processing'
+        ORDER BY created_at ASC, id ASC
+        LIMIT ?
+      `,
+    )
+    .bind(Math.min(Math.max(Number(limit) || 10, 1), 100))
+    .all();
+  return rows.results || rows || [];
 }
 
 export async function recordDelivery(env, delivery) {

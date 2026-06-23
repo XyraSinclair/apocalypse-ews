@@ -292,11 +292,11 @@ async function assertClaimAlertRecordIsIdempotent() {
             return {
               async run() {
                 if (/INSERT OR IGNORE INTO notification_alerts/i.test(sql)) {
-                  const [id, kind, source, level, slotKey, messageText, status, createdAt] = params;
+                  const [id, kind, source, level, slotKey, messageText, subject, smsMessageText, status, createdAt] = params;
                   if (inserted.has(id)) {
                     return { meta: { changes: 0 } };
                   }
-                  inserted.set(id, { id, kind, source, level, slot_key: slotKey, message_text: messageText, status, created_at: createdAt });
+                  inserted.set(id, { id, kind, source, level, slot_key: slotKey, message_text: messageText, subject, sms_message_text: smsMessageText, status, created_at: createdAt });
                   return { meta: { changes: 1 } };
                 }
                 if (/UPDATE notification_alerts/i.test(sql) && /status = 'processing'/i.test(sql)) {
@@ -407,6 +407,104 @@ async function assertAlertProcessingStaleReclaim() {
     'Fresh processing alert was incorrectly reclaimable.',
   );
   db.close();
+}
+
+async function assertResumableAlertFanout() {
+  const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-functions-esm-'));
+  fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{\"type\":\"module\"}\n');
+  fs.cpSync(path.join(ROOT_DIR, 'functions', '_lib'), path.join(moduleRoot, '_lib'), { recursive: true });
+  const notificationsModuleUrl = pathToFileURL(path.join(moduleRoot, '_lib', 'notifications.js')).href;
+  const cryptoModuleUrl = pathToFileURL(path.join(moduleRoot, '_lib', 'crypto.js')).href;
+  const { continueAlertFanoutBatch, sendAlertEventNotifications } = await import(notificationsModuleUrl);
+  const { contactHash, encryptString } = await import(cryptoModuleUrl);
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-resumable-alert-')), 'notify.sqlite');
+  const db = new Database(dbPath);
+  applyD1Migrations(db);
+  const env = {
+    APP_BASE_URL: 'https://alerts.example.test',
+    NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
+    NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 12).toString('base64'),
+    SENDGRID_API_KEY: 'smoke-sendgrid-key',
+    SENDGRID_FROM_EMAIL: 'alerts@example.test',
+    LEVEL5_SUBSCRIBER_BATCH_SIZE: '2',
+    ALERT_EVENT_MAX_BATCHES_PER_INVOCATION: '1',
+    LEVEL5_NOTIFICATION_CONCURRENCY: '4',
+    EWS_NOTIFY_DB: createD1Adapter(db),
+  };
+  const insertSubscriber = db.prepare(`
+    INSERT INTO notification_signups (
+      id,
+      status,
+      email_cipher,
+      email_hash,
+      wants_email,
+      wants_sms,
+      source,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (let index = 0; index < 3; index += 1) {
+    const email = `fanout-${index}@example.test`;
+    insertSubscriber.run(
+      `sub-fanout-${index}`,
+      'active',
+      await encryptString(env, email),
+      await contactHash(env, 'email', email),
+      1,
+      0,
+      'manual',
+      `2026-06-23T00:0${index}:00.000Z`,
+      `2026-06-23T00:0${index}:00.000Z`,
+    );
+  }
+
+  const originalFetch = globalThis.fetch;
+  let sendCount = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('api.sendgrid.com')) {
+      sendCount += 1;
+      return new Response('', {
+        status: 202,
+        headers: {
+          'x-message-id': `fanout-message-${sendCount}`,
+        },
+      });
+    }
+    return originalFetch(url);
+  };
+  try {
+    const first = await sendAlertEventNotifications(env, {
+      eventKey: 'resumable-fanout-smoke',
+      kind: 'takeoff_rate_anomaly',
+      cohort: 'global_business_jet',
+      title: 'Resumable fanout smoke',
+      message: 'Resumable fanout smoke message',
+      severity: 'high',
+      level: 4,
+      occurredAt: '2026-06-23T00:00:00.000Z',
+    });
+    assert(first.status === 'processing' && first.queued === true, 'Initial resumable fanout did not leave the alert queued.');
+    assert(first.emailSentCount === 2, 'Initial resumable fanout did not send exactly one bounded batch.');
+    assert(sendCount === 2, 'Initial resumable fanout sent the wrong number of provider requests.');
+    const afterFirst = db.prepare('SELECT status, subscriber_count, email_sent_count, fanout_after_id FROM notification_alerts WHERE id = ?').get('alert_event:resumable-fanout-smoke');
+    assert(afterFirst.status === 'processing', 'Bounded fanout did not persist processing status.');
+    assert(afterFirst.subscriber_count === 2 && afterFirst.email_sent_count === 2, 'Bounded fanout did not persist first-batch counts.');
+    assert(afterFirst.fanout_after_id === 'sub-fanout-1', 'Bounded fanout did not persist the subscriber cursor.');
+
+    const continued = await continueAlertFanoutBatch(env, { limit: 5 });
+    assert(continued.processed === 1, 'Fanout continuation did not process the queued alert.');
+    assert(continued.results?.[0]?.status === 'sent', 'Fanout continuation did not complete the queued alert.');
+    assert(sendCount === 3, 'Fanout continuation sent the wrong number of provider requests.');
+    const afterContinue = db.prepare('SELECT status, subscriber_count, email_sent_count, fanout_after_id, fanout_completed_at FROM notification_alerts WHERE id = ?').get('alert_event:resumable-fanout-smoke');
+    assert(afterContinue.status === 'sent', 'Fanout continuation did not persist sent status.');
+    assert(afterContinue.subscriber_count === 3 && afterContinue.email_sent_count === 3, 'Fanout continuation did not persist cumulative counts.');
+    assert(afterContinue.fanout_after_id === '', 'Fanout continuation did not clear the cursor after completion.');
+    assert(afterContinue.fanout_completed_at, 'Fanout continuation did not persist a completion timestamp.');
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
 }
 
 async function assertPagesPipelineStatus(token) {
@@ -1001,6 +1099,7 @@ async function main() {
     assert(bridgeOutput.reason === 'missing_EWS_ALERT_EVENTS_WEBHOOK_URL', 'Bridge missing-url run did not report the expected reason.');
     assert(bridgeStatus.reason === bridgeOutput.reason, 'Bridge status file did not persist the latest result.');
 
+    await assertResumableAlertFanout();
     await assertPagesPipelineStatus(token);
     await assertTakeoffRateDetection();
     await assertPagesPipelineSmokeScript(token);
