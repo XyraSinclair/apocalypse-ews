@@ -205,28 +205,40 @@ function getLiveAircraftPathMap(db, hexes, liveSource = null) {
   return pathsByHex;
 }
 
+function parseOwnerOperator(notes) {
+  const text = String(notes || "").trim();
+  if (!text || !text.startsWith("{")) {
+    return null;
+  }
+  const parsed = JSON.parse(text);
+  return parsed.owner_operator || null;
+}
+
 function getLiveAircraft(liveSource = null) {
   const db = getDb();
   const rows = db
     .prepare(`
       SELECT
-        hex,
-        registration,
-        COALESCE(label, registration, hex) AS label,
-        observed_at,
-        lat,
-        lon,
-        altitude_ft AS altitudeFt,
-        ground_speed_kt AS groundSpeedKt,
-        track,
-        is_airborne AS isAirborne
+        live_snapshot.hex,
+        live_snapshot.registration,
+        COALESCE(live_snapshot.label, live_snapshot.registration, live_snapshot.hex) AS label,
+        live_snapshot.observed_at,
+        live_snapshot.lat,
+        live_snapshot.lon,
+        live_snapshot.altitude_ft AS altitudeFt,
+        live_snapshot.ground_speed_kt AS groundSpeedKt,
+        live_snapshot.track,
+        live_snapshot.is_airborne AS isAirborne,
+        tracked_aircraft.notes AS trackingNotes
       FROM live_snapshot
-      WHERE is_airborne = 1
-        AND source != 'demo'
-        AND (? IS NULL OR source = ?)
-        AND lat IS NOT NULL
-        AND lon IS NOT NULL
-      ORDER BY observed_at DESC, label ASC
+      LEFT JOIN tracked_aircraft
+        ON tracked_aircraft.hex = live_snapshot.hex
+      WHERE live_snapshot.is_airborne = 1
+        AND live_snapshot.source != 'demo'
+        AND (? IS NULL OR live_snapshot.source = ?)
+        AND live_snapshot.lat IS NOT NULL
+        AND live_snapshot.lon IS NOT NULL
+      ORDER BY live_snapshot.observed_at DESC, label ASC
     `)
     .all(liveSource, liveSource);
   const pathsByHex = getLiveAircraftPathMap(
@@ -239,6 +251,8 @@ function getLiveAircraft(liveSource = null) {
     ...row,
     track: row.track == null ? null : Number(row.track),
     isAirborne: Boolean(row.isAirborne),
+    ownerOperator: parseOwnerOperator(row.trackingNotes),
+    trackingNotes: undefined,
     path: pathsByHex.get(row.hex) || [],
   }));
 }

@@ -125,6 +125,7 @@ type Aircraft = {
   isAirborne?: boolean;
   path?: Array<{ observedAt?: string; lat?: number; lon?: number }>;
   cohortKind?: CohortKind;
+  ownerOperator?: string | null;
   markerId?: string;
 };
 
@@ -650,6 +651,10 @@ function AircraftHoverCard({ aircraft }: { aircraft: Aircraft }) {
         <div>
           <dt>Speed</dt>
           <dd>{formatNullableNumber(aircraft.groundSpeedKt, 1)} kt</dd>
+        </div>
+        <div className="map-hover-coordinates">
+          <dt>Owner / operator</dt>
+          <dd>{aircraft.ownerOperator ?? '—'}</dd>
         </div>
         <div className="map-hover-coordinates">
           <dt>Observed</dt>
