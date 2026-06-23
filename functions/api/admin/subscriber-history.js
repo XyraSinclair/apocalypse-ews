@@ -1,5 +1,6 @@
 import { getAdminSubscriberMessageHistory } from "../../_lib/db.js";
 import { handleError, HttpError, jsonResponse, readJsonRequest } from "../../_lib/http.js";
+import { requireInternalAuth } from "../../_lib/internal-auth.js";
 import { sendAdminSubscriberEmailReply, sendAdminSubscriberSmsReply } from "../../_lib/notifications.js";
 
 function getNotificationBaseUrl(env) {
@@ -10,6 +11,7 @@ function getNotificationBaseUrl(env) {
 
 export async function onRequestGet({ request, env }) {
   try {
+    requireInternalAuth(request, env);
     const url = new URL(request.url);
     const subscriberId = String(url.searchParams.get("subscriber") || "").trim();
     if (!subscriberId) {
@@ -38,6 +40,7 @@ export async function onRequestGet({ request, env }) {
 
 export async function onRequestPost({ request, env }) {
   try {
+    requireInternalAuth(request, env);
     const payload = await readJsonRequest(request);
     const subscriberId = String(payload.subscriber || "").trim();
     if (!subscriberId) {

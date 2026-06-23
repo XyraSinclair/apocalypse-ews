@@ -1,3 +1,4 @@
+import { timingSafeEqualString } from "./encoding.js";
 import { HttpError } from "./http.js";
 
 export function requireInternalAuth(request, env) {
@@ -7,7 +8,7 @@ export function requireInternalAuth(request, env) {
   }
 
   const authorization = request.headers.get("authorization") || "";
-  if (authorization !== `Bearer ${expectedToken}`) {
+  if (!timingSafeEqualString(authorization, `Bearer ${expectedToken}`)) {
     throw new HttpError(401, "Unauthorized.");
   }
 }

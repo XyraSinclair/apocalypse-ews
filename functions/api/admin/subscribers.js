@@ -4,6 +4,7 @@ import {
 } from "../../_lib/db.js";
 import { createAccountManagementLink } from "../../_lib/customer-portal.js";
 import { handleError, HttpError, jsonResponse, getRequestIp, getRequestUserAgent, readJsonRequest } from "../../_lib/http.js";
+import { requireInternalAuth } from "../../_lib/internal-auth.js";
 import { sendSignupConfirmationToSubscriber } from "../../_lib/notifications.js";
 
 function getNotificationBaseUrl(env) {
@@ -30,6 +31,7 @@ async function mapSubscriberResult(env, subscriber) {
 
 export async function onRequestPost({ request, env }) {
   try {
+    requireInternalAuth(request, env);
     const payload = await readJsonRequest(request);
     const action = String(payload.action || "").trim();
 

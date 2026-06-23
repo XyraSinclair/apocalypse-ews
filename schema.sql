@@ -182,6 +182,9 @@ CREATE TABLE IF NOT EXISTS notification_subscribers (
 CREATE INDEX IF NOT EXISTS idx_notification_subscribers_status
   ON notification_subscribers (status);
 
+CREATE INDEX IF NOT EXISTS idx_notification_subscribers_active_batch
+  ON notification_subscribers (status, id);
+
 CREATE TABLE IF NOT EXISTS alert_deliveries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   alert_event_id INTEGER NOT NULL,

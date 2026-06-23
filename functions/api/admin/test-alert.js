@@ -1,6 +1,7 @@
 import { normalizeEmail, normalizePhone } from "../../_lib/contacts.js";
 import { getAdminSubscriberRecords, getRecentAlertDeliveries } from "../../_lib/db.js";
 import { handleError, HttpError, jsonResponse, readJsonRequest } from "../../_lib/http.js";
+import { requireInternalAuth } from "../../_lib/internal-auth.js";
 import { sendAdminSingleTest } from "../../_lib/notifications.js";
 
 function getNotificationBaseUrl(env) {
@@ -11,6 +12,7 @@ function getNotificationBaseUrl(env) {
 
 export async function onRequestPost({ request, env }) {
   try {
+    requireInternalAuth(request, env);
     const payload = await readJsonRequest(request);
     const email = normalizeEmail(payload.email);
     const phone = normalizePhone(payload.phone);
@@ -28,6 +30,7 @@ export async function onRequestPost({ request, env }) {
 
 export async function onRequestGet({ request, env }) {
   try {
+    requireInternalAuth(request, env);
     const url = new URL(request.url);
     if (url.searchParams.get("view") === "subscribers") {
       const subscriberRecords = await getAdminSubscriberRecords(env, {

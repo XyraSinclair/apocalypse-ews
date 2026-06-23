@@ -9,7 +9,7 @@ const {
 
 const env = getEnvWithDotEnv();
 const errors = validateDashboardEnv(env);
-const distAssetsDir = path.join(REPO_ROOT, "client", "dist", "assets");
+const distAssetsDir = path.join(REPO_ROOT, "dist", "assets");
 
 if (!fs.existsSync(distAssetsDir)) {
   errors.push(`Built assets directory does not exist: ${distAssetsDir}`);

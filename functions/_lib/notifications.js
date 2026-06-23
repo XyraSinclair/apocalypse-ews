@@ -1,8 +1,9 @@
 import {
   claimRenewalReminder,
   createAlertRecord,
+  getAlertRecordById,
   getRenewalReminderCandidates,
-  getActiveSubscribers,
+  getActiveSubscriberBatch,
   getMetaValue,
   getSubscriberById,
   hydrateSubscriberContacts,
@@ -103,6 +104,53 @@ function getAlertUrl(env) {
 
 function getNotificationBaseUrl(env) {
   return getAlertUrl(env).replace(/\/+$/, "");
+}
+
+
+function normalizeAlertEventPayload(event) {
+  if (event?.payload && typeof event.payload === "object") {
+    return event.payload;
+  }
+  if (typeof event?.payloadJson === "string" && event.payloadJson) {
+    return JSON.parse(event.payloadJson);
+  }
+  return {};
+}
+
+function normalizeExternalAlertEvent(value) {
+  const eventKey = String(value?.eventKey || "").trim();
+  const kind = String(value?.kind || "").trim();
+  const cohort = String(value?.cohort || "").trim();
+  const title = String(value?.title || "").trim();
+  const message = String(value?.message || "").trim();
+  const occurredAt = String(value?.occurredAt || value?.occurred_at || "").trim();
+  if (!eventKey || !kind || !cohort || !title || !message || !occurredAt) {
+    throw new HttpError(400, "Alert event is missing required fields.");
+  }
+  const payload = normalizeAlertEventPayload(value);
+  const emergencyLevel = Number(payload.emergencyLevel || value?.level || 0);
+  return {
+    eventKey,
+    kind,
+    cohort,
+    title,
+    message,
+    occurredAt,
+    payload,
+    level: Number.isFinite(emergencyLevel) && emergencyLevel > 0 ? Math.round(emergencyLevel) : null,
+  };
+}
+
+function externalAlertRecordId(event) {
+  return `alert_event:${event.eventKey}`;
+}
+
+function formatExternalAlertMessage(env, event) {
+  return [event.message, getAlertUrl(env)].filter(Boolean).join(" ");
+}
+
+function formatExternalAlertSms(event) {
+  return `${event.title}. ${event.message}`.slice(0, 800);
 }
 
 function getPositiveIntegerEnv(env, key, fallback, { min = 1, max = Number.POSITIVE_INFINITY } = {}) {
@@ -536,6 +584,7 @@ async function sendAlertToSubscribers(
     emailContentFactory = null,
     concurrency = 1,
     smsMinIntervalMs = 0,
+    updateRecord = true,
   },
 ) {
   const summary = {
@@ -629,7 +678,51 @@ async function sendAlertToSubscribers(
   }
 
   summary.status = summary.errorCount > 0 ? "completed_with_errors" : "sent";
-  await updateAlertRecord(env, alertId, summary);
+  if (updateRecord) {
+    await updateAlertRecord(env, alertId, summary);
+  }
+  return summary;
+}
+
+function mergeAlertSummaries(summary, batchSummary) {
+  summary.subscriberCount += Number(batchSummary.subscriberCount || 0);
+  summary.emailSentCount += Number(batchSummary.emailSentCount || 0);
+  summary.smsSentCount += Number(batchSummary.smsSentCount || 0);
+  summary.errorCount += Number(batchSummary.errorCount || 0);
+  summary.emailEligibleCount += Number(batchSummary.emailEligibleCount || 0);
+  summary.smsEligibleCount += Number(batchSummary.smsEligibleCount || 0);
+}
+
+async function sendAlertToActiveSubscriberBatches(env, options) {
+  const batchSize = getPositiveIntegerEnv(env, "LEVEL5_SUBSCRIBER_BATCH_SIZE", 500, { min: 1, max: 5000 });
+  const summary = {
+    subscriberCount: 0,
+    emailSentCount: 0,
+    smsSentCount: 0,
+    errorCount: 0,
+    emailEligibleCount: 0,
+    smsEligibleCount: 0,
+    smsMinIntervalMs: options.smsMinIntervalMs || 0,
+    concurrency: options.concurrency || 1,
+    batchSize,
+  };
+  let afterCreatedAt = "";
+  let afterId = "";
+
+  while (true) {
+    const subscribers = await getActiveSubscriberBatch(env, { afterCreatedAt, afterId, limit: batchSize });
+    if (!subscribers.length) {
+      break;
+    }
+    const lastSubscriber = subscribers[subscribers.length - 1];
+    afterCreatedAt = String(lastSubscriber.created_at || "");
+    afterId = String(lastSubscriber.id || "");
+    const batchSummary = await sendAlertToSubscribers(env, { ...options, subscribers, updateRecord: false });
+    mergeAlertSummaries(summary, batchSummary);
+  }
+
+  summary.status = summary.errorCount > 0 ? "completed_with_errors" : "sent";
+  await updateAlertRecord(env, options.alertId, summary);
   return summary;
 }
 
@@ -1042,6 +1135,52 @@ export async function sendRenewalReminderBatch(env, options = {}) {
   return summary;
 }
 
+export async function sendAlertEventNotifications(env, rawEvent, { source = "alert_event_bridge" } = {}) {
+  const event = normalizeExternalAlertEvent(rawEvent);
+  const alertId = externalAlertRecordId(event);
+  const existing = await getAlertRecordById(env, alertId);
+  if (existing && existing.status !== "created") {
+    return {
+      ok: true,
+      sent: false,
+      reason: "already_recorded",
+      alertId,
+      status: existing.status,
+    };
+  }
+
+  const messageText = formatExternalAlertMessage(env, event);
+  await createAlertRecord(env, {
+    id: alertId,
+    kind: event.kind,
+    source: `${source}:${event.cohort}`,
+    level: event.level,
+    slotKey: event.eventKey,
+    messageText,
+  });
+  const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
+  const concurrency = getLevel5NotificationConcurrency(env);
+  const summary = await sendAlertToActiveSubscriberBatches(env, {
+    alertId,
+    messageText,
+    smsMessageText: formatExternalAlertSms(event),
+    subject: event.title,
+    includeCustomerPortalLinks: true,
+    concurrency,
+    smsMinIntervalMs,
+  });
+
+  return {
+    ok: summary.errorCount === 0,
+    sent: true,
+    alertId,
+    kind: event.kind,
+    cohort: event.cohort,
+    estimatedSmsWindowSeconds: Math.ceil((Number(summary.smsEligibleCount || 0) * smsMinIntervalMs) / 1000),
+    ...summary,
+  };
+}
+
 export async function maybeSendLevel5Notifications(env, snapshot, { source = "scheduled_refresh" } = {}) {
   const emergencyLevel = getEmergencyLevel(snapshot);
   const slotKey = getLatestSlotKey(snapshot);
@@ -1076,12 +1215,10 @@ export async function maybeSendLevel5Notifications(env, snapshot, { source = "sc
     slotKey,
     messageText,
   });
-  const subscribers = await getActiveSubscribers(env);
   const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
   const concurrency = getLevel5NotificationConcurrency(env);
-  const summary = await sendAlertToSubscribers(env, {
+  const summary = await sendAlertToActiveSubscriberBatches(env, {
     alertId,
-    subscribers,
     messageText,
     smsMessageText,
     subject: "Apocalypse EWS: emergency level 5",

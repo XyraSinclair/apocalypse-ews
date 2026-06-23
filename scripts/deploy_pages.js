@@ -11,6 +11,9 @@ const {
 const env = getEnvWithDotEnv();
 const publicUrl = env.EWS_PUBLIC_URL || "https://ews.kylemcdonald.net/";
 const projectName = env.CLOUDFLARE_PAGES_PROJECT || "apocalypse-ews";
+const distDir = path.join(REPO_ROOT, "dist");
+const publishedDir = path.join(REPO_ROOT, "data", "published");
+
 
 function run(command, args, options = {}) {
   console.log(`$ ${[command, ...args].join(" ")}`);
@@ -40,6 +43,20 @@ function getCommitHash() {
   return result.stdout.trim();
 }
 
+function copyPublishedAssets() {
+  if (!fs.existsSync(publishedDir)) {
+    throw new Error(`Published data directory does not exist: ${publishedDir}`);
+  }
+  fs.mkdirSync(distDir, { recursive: true });
+  for (const fileName of fs.readdirSync(publishedDir)) {
+    if (!fileName.endsWith(".json")) {
+      continue;
+    }
+    fs.copyFileSync(path.join(publishedDir, fileName), path.join(distDir, fileName));
+  }
+  console.log(`Copied published JSON assets into ${distDir}.`);
+}
+
 async function restoreCurrentRss() {
   const rssUrl = env.EWS_RSS_URL || new URL("/rss.xml", publicUrl).toString();
   const response = await fetch(rssUrl);
@@ -48,7 +65,7 @@ async function restoreCurrentRss() {
   }
 
   const rssXml = await response.text();
-  const rssPath = path.join(REPO_ROOT, "client", "dist", "rss.xml");
+  const rssPath = path.join(distDir, "rss.xml");
   fs.mkdirSync(path.dirname(rssPath), { recursive: true });
   fs.writeFileSync(rssPath, rssXml);
   console.log(`Restored current RSS feed from ${rssUrl}.`);
@@ -69,6 +86,7 @@ async function main() {
   }
 
   run("npm", ["run", "build"]);
+  copyPublishedAssets();
   await restoreCurrentRss();
   run("npm", ["run", "verify:dashboard-urls"]);
 
@@ -76,7 +94,7 @@ async function main() {
     "wrangler",
     "pages",
     "deploy",
-    "client/dist",
+    "dist",
     "--project-name",
     projectName,
     "--branch",

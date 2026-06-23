@@ -19,9 +19,11 @@ const { maybeSendEmergencyLevelTelegramAlert } = require("./telegram-alert");
 const { buildEmergencyRssFeedXml, dedupeRssItems, getRssItems, maybeRecordEmergencyLevelRssItem, rssItemFromAlertEvent } = require("./rss-feed");
 const {
   HttpError,
+  getManagedSubscriber,
   listAlertEvents,
   listTakeoffEvents,
   upsertSubscriber,
+  updateManagedSubscriber,
 } = require("./local-notifications");
 
 loadEnvFile();
@@ -58,7 +60,19 @@ const PUBLISHED_DASHBOARD_FILES = new Map([
   ["/dashboard.json", "dashboard.json"],
   ["/military-dashboard.json", "military-dashboard.json"],
   ["/untracked-dashboard.json", "untracked-dashboard.json"],
+  ["/alerts.json", "alerts.json"],
+  ["/takeoffs.json", "takeoffs.json"],
+  ["/event-signals.json", "event-signals.json"],
 ]);
+
+function readPublishedJson(fileName) {
+  const filePath = path.join(DATA_DIR, "published", fileName);
+  if (!fs.existsSync(filePath)) {
+    throw new HttpError(503, `Published feed is not available at ${filePath}.`);
+  }
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
 
 app.use(cors());
 app.use(express.json());
@@ -217,9 +231,30 @@ app.get("/api/alerts", (request, response) => {
   });
 });
 
+app.get("/api/event-signals", (_request, response) => {
+  response.set("cache-control", "no-store").json(readPublishedJson("event-signals.json"));
+});
+
 app.post("/api/notifications/signup", (request, response) => {
   const subscriber = upsertSubscriber(getDb(), request.body, process.env);
   response.json({
+    ok: true,
+    ...subscriber,
+    subscriber,
+  });
+});
+
+app.get("/api/manage/subscriber", (request, response) => {
+  const subscriber = getManagedSubscriber(getDb(), process.env, request.query.subscriber, request.query.token);
+  response.set("cache-control", "no-store").json({
+    ok: true,
+    subscriber,
+  });
+});
+
+app.post("/api/manage/subscriber", (request, response) => {
+  const subscriber = updateManagedSubscriber(getDb(), process.env, request.body);
+  response.set("cache-control", "no-store").json({
     ok: true,
     subscriber,
   });

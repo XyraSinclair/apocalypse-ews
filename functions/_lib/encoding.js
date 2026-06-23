@@ -38,6 +38,21 @@ export function basicAuth(username, password) {
   return `Basic ${bytesToBase64(utf8Bytes(`${username}:${password}`))}`;
 }
 
+export function timingSafeEqualString(a, b) {
+  const left = String(a || "");
+  const right = String(b || "");
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  let diff = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    diff |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+
+  return diff === 0;
+}
+
 export function timingSafeEqualHex(a, b) {
   const left = String(a || "").toLowerCase();
   const right = String(b || "").toLowerCase();

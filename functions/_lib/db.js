@@ -593,6 +593,31 @@ export async function getActiveSubscribers(env) {
   return results || [];
 }
 
+export async function getActiveSubscriberBatch(env, { afterCreatedAt = "", afterId = "", limit = 500 } = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 5000);
+  const db = getDb(env);
+  const { results } = await db
+    .prepare(
+      `
+        SELECT *
+        FROM notification_signups
+        WHERE status = ?
+          AND (wants_email = 1 OR wants_sms = 1)
+          AND (
+            created_at > ?
+            OR (created_at = ? AND id > ?)
+          )
+        ORDER BY created_at ASC, id ASC
+        LIMIT ?
+      `,
+    )
+    .bind(SUBSCRIBER_STATUS.ACTIVE, afterCreatedAt, afterCreatedAt, afterId, safeLimit)
+    .all();
+
+  return results || [];
+}
+
+
 export async function hydrateSubscriberContacts(env, subscriber) {
   const [email, accountEmail, phone] = await Promise.all([
     decryptString(env, subscriber.email_cipher),
@@ -1274,12 +1299,28 @@ async function recalculateAlertDeliveryCounts(env, alertId) {
     .run();
 }
 
-export async function createAlertRecord(env, { kind, source, level, slotKey, messageText, status = "created" }) {
-  const id = crypto.randomUUID();
+export async function getAlertRecordById(env, id) {
+  if (!id) {
+    return null;
+  }
+  return getDb(env)
+    .prepare(
+      `
+        SELECT *
+        FROM notification_alerts
+        WHERE id = ?
+        LIMIT 1
+      `,
+    )
+    .bind(id)
+    .first();
+}
+
+export async function createAlertRecord(env, { id = crypto.randomUUID(), kind, source, level, slotKey, messageText, status = "created" }) {
   await getDb(env)
     .prepare(
       `
-        INSERT INTO notification_alerts (
+        INSERT OR IGNORE INTO notification_alerts (
           id,
           kind,
           source,

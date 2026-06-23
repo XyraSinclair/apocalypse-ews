@@ -1,6 +1,6 @@
 name = "apocalypse-ews"
 compatibility_date = "2026-05-05"
-pages_build_output_dir = "client/dist"
+pages_build_output_dir = "dist"
 
 [[d1_databases]]
 binding = "EWS_NOTIFY_DB"

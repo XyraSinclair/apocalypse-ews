@@ -32,7 +32,9 @@
     "dispatch:alerts": "node scripts/dispatch_alert_events.js",
     "refresh:all": "node scripts/refresh_all_snapshots.js",
     "rss:update": "node scripts/update_rss_feed.js",
-    "telegram:alert": "node scripts/send_telegram_alert.js"
+    "telegram:alert": "node scripts/send_telegram_alert.js",
+    "verify:dashboard-urls": "node scripts/verify_dashboard_bundle.js",
+    "smoke:live": "node scripts/smoke_live_site.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -46,6 +48,7 @@
     "vite": "latest"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "concurrently": "^10.0.3"

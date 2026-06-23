@@ -212,9 +212,170 @@ async function fetchDashboard(kind: CohortKind, baseUrl: string): Promise<[Cohor
   return [kind, JSON.parse(text) as DashboardResponse];
 }
 
+type SignupContacts = { email: string | null; phone: string | null };
+
+type SignupResult =
+  | { mode: 'checkout'; checkoutUrl: string; sessionId: string | null; reused: boolean }
+  | { mode: 'local'; emailEnabled: boolean; smsEnabled: boolean; managementPath: string | null };
+
+class CheckoutUnavailableError extends Error {}
+
+async function readApiPayload(response: Response): Promise<Record<string, unknown>> {
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!contentType.includes('json')) {
+    const body = await response.text();
+    return { error: body || `${response.status} ${response.statusText}` };
+  }
+
+  const payload = await response.json();
+  return payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+}
+
+function apiErrorMessage(payload: Record<string, unknown>, fallback: string) {
+  return typeof payload.error === 'string' && payload.error ? payload.error : fallback;
+}
+
+async function createCheckoutSignup(contacts: SignupContacts): Promise<SignupResult> {
+  const response = await fetch('/api/signup/create-checkout-session', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: contacts.email, phone: contacts.phone, smsConsent: Boolean(contacts.phone) }),
+  });
+  if (response.status === 404 || response.status === 405) {
+    throw new CheckoutUnavailableError('Checkout API is not available on this deployment.');
+  }
+
+  const payload = await readApiPayload(response);
+  if (!response.ok) {
+    throw new Error(apiErrorMessage(payload, `Checkout failed with HTTP ${response.status}`));
+  }
+  if (typeof payload.checkoutUrl !== 'string' || !payload.checkoutUrl) {
+    throw new Error('Checkout API did not return a Stripe checkout URL.');
+  }
+
+  return {
+    mode: 'checkout',
+    checkoutUrl: payload.checkoutUrl,
+    sessionId: typeof payload.sessionId === 'string' ? payload.sessionId : null,
+    reused: payload.reused === true,
+  };
+}
+
+async function createLocalNotificationSignup(contacts: SignupContacts): Promise<SignupResult> {
+  const response = await fetch('/api/notifications/signup', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: contacts.email, phone: contacts.phone }),
+  });
+  const payload = await readApiPayload(response);
+  if (!response.ok) {
+    throw new Error(apiErrorMessage(payload, `Signup failed with HTTP ${response.status}`));
+  }
+
+  return {
+    mode: 'local',
+    emailEnabled: payload.emailEnabled === true,
+    smsEnabled: payload.smsEnabled === true,
+    managementPath: typeof payload.managementPath === 'string' ? payload.managementPath : null,
+  };
+}
+
+async function createNotificationSignup(contacts: SignupContacts): Promise<SignupResult> {
+  try {
+    return await createCheckoutSignup(contacts);
+  } catch (error) {
+    if (error instanceof CheckoutUnavailableError) {
+      return createLocalNotificationSignup(contacts);
+    }
+    throw error;
+  }
+}
+
+type ManagedSubscriber = {
+  id: string | number;
+  status: string;
+  source?: string | null;
+  accountEmail?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  phoneCountryName?: string | null;
+  smsSupported?: boolean;
+  wantsEmail?: boolean;
+  wantsSms?: boolean;
+  currentPeriodEnd?: string | null;
+  stripeCancelAtPeriodEnd?: boolean;
+  hasStripeSubscription?: boolean;
+  stripeBillingPortalUrl?: string | null;
+};
+
+type EventSignalRecord = {
+  id: string;
+  source: string;
+  event: string;
+  phase: string;
+  windowStart?: string | null;
+  windowEnd?: string | null;
+  timezone?: string | null;
+  label?: string | null;
+  method?: string | null;
+  distanceMiles?: number | null;
+  peakResidual?: number | null;
+  observedAircraft?: number | null;
+  takeoffEvents?: number | null;
+  landingEvents?: number | null;
+  provenance?: string | null;
+  status?: string | null;
+};
+
+async function fetchEventSignals(): Promise<{ generatedAt: string | null; records: EventSignalRecord[] }> {
+  const response = await fetch('/api/event-signals', { cache: 'no-store' });
+  const payload = await readApiPayload(response);
+  if (!response.ok) {
+    throw new Error(apiErrorMessage(payload, `Event signals request failed with HTTP ${response.status}`));
+  }
+  return {
+    generatedAt: typeof payload.generatedAt === 'string' ? payload.generatedAt : null,
+    records: Array.isArray(payload.records) ? (payload.records as EventSignalRecord[]) : [],
+  };
+}
+
+function requireManagedSubscriber(payload: Record<string, unknown>): ManagedSubscriber {
+  if (!payload.subscriber || typeof payload.subscriber !== 'object') {
+    throw new Error('Management API did not return subscriber settings.');
+  }
+  return payload.subscriber as ManagedSubscriber;
+}
+
+async function fetchManagedSubscriber(subscriber: string, token: string): Promise<ManagedSubscriber> {
+  const params = new URLSearchParams({ subscriber, token });
+  const response = await fetch(`/api/manage/subscriber?${params.toString()}`, { cache: 'no-store' });
+  const payload = await readApiPayload(response);
+  if (!response.ok) {
+    throw new Error(apiErrorMessage(payload, `Management request failed with HTTP ${response.status}`));
+  }
+  return requireManagedSubscriber(payload);
+}
+
+async function saveManagedSubscriber(payload: Record<string, unknown>): Promise<ManagedSubscriber> {
+  const response = await fetch('/api/manage/subscriber', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const responsePayload = await readApiPayload(response);
+  if (!response.ok) {
+    throw new Error(apiErrorMessage(responsePayload, `Management update failed with HTTP ${response.status}`));
+  }
+  return requireManagedSubscriber(responsePayload);
+}
+
+
 function App() {
   const path = window.location.pathname;
-  return path.startsWith('/signup') ? <SignupPage /> : <DashboardPage />;
+  if (path.startsWith('/signup')) return <SignupPage />;
+  if (path.startsWith('/manage')) return <ManagePage />;
+  if (path.startsWith('/event-signals')) return <EventSignalsPage />;
+  return <DashboardPage />;
 }
 
 function DashboardPage() {
@@ -330,7 +491,7 @@ function DashboardPage() {
     <main className="app-shell">
       <div className="background-wallpaper" aria-hidden="true" />
       <p className="signup-teaser">
-        <a href="/signup">Sign up</a> for text message or email notifications.
+        <a href="/signup">Sign up</a> for text message or email notifications. <a href="/event-signals">Review event signals</a>.
       </p>
 
       {error ? <div className="status-banner status-banner-error"><strong>Refresh error:</strong> {error}</div> : null}
@@ -385,7 +546,7 @@ function HeroPanel() {
       <p className="hero-credit">independent implementation from observed behavior</p>
       <p className="hero-link-row">
         <a href="https://ews.kylemcdonald.net/">Reference site</a> / <a href="https://t.me/apocalypse_ews">Telegram</a> /{' '}
-        <a href="https://ews.kylemcdonald.net/rss.xml">RSS</a>
+        <a href="https://ews.kylemcdonald.net/rss.xml">RSS</a> / <a href="/event-signals">Event signals</a>
       </p>
     </section>
   );
@@ -821,12 +982,23 @@ function SignupPage() {
   const [phone, setPhone] = useState('');
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [managementPath, setManagementPath] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('success') === '1') {
+      setStatus('Checkout completed. Your notification subscription activates as soon as the payment webhook confirms.');
+    } else if (params.get('canceled') === '1') {
+      setError('Checkout was canceled before the notification subscription was activated.');
+    }
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
     setStatus(null);
+    setManagementPath(null);
     const trimmedEmail = email.trim();
     const trimmedPhone = phone.trim();
     if (!trimmedEmail && !trimmedPhone) {
@@ -842,22 +1014,23 @@ function SignupPage() {
       return;
     }
 
+    const contacts = { email: trimmedEmail || null, phone: trimmedPhone || null };
     setSubmitting(true);
     try {
-      const response = await fetch('/api/notifications/signup', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email: trimmedEmail || null, phone: trimmedPhone || null }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error || `Signup failed with HTTP ${response.status}`);
-      }
+      const result = await createNotificationSignup(contacts);
       window.localStorage.setItem(
         'ews-notification-request',
-        JSON.stringify({ email: trimmedEmail || null, phone: trimmedPhone || null, createdAt: new Date().toISOString() }),
+        JSON.stringify({ ...contacts, createdAt: new Date().toISOString(), mode: result.mode }),
       );
-      setStatus('Notification subscription saved on the backend. You will receive queued takeoff and anomaly alerts when delivery credentials are configured.');
+
+      if (result.mode === 'checkout') {
+        setStatus(result.reused ? 'Reopening your existing secure checkout session.' : 'Opening secure checkout.');
+        window.location.assign(result.checkoutUrl);
+        return;
+      }
+
+      setManagementPath(result.managementPath);
+      setStatus('Notification subscription saved. You will receive takeoff and anomaly alerts when delivery providers are configured.');
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Notification signup failed.');
     } finally {
@@ -871,14 +1044,15 @@ function SignupPage() {
       <section className="focus-grid signup-grid">
         <section className="panel hero-copy-panel signup-copy-panel">
           <h1>Apocalypse Notifications</h1>
-          <p>Get notified when the emergency level reaches 5. Production deployments should connect this form to checkout, email, and SMS delivery services.</p>
-          <p>Contact info should be used only for alerts and subscription updates, not marketing.</p>
+          <p>Get notified when tracked aircraft become airborne or statistical anomaly thresholds trip.</p>
+          <p>Contact info is used only for operational alerts, subscription updates, and unsubscribe/management links.</p>
           <p className="hero-link-row"><a href="/">Back to Dashboard</a></p>
         </section>
         <section className="panel signup-panel">
           <h2>Notification Signup</h2>
           {error ? <p className="signup-status signup-status-error">{error}</p> : null}
           {status ? <p className="signup-status signup-status-success">{status}</p> : null}
+          {managementPath ? <p className="signup-status"><a href={managementPath}>Manage this subscription</a></p> : null}
           <form className="signup-form" onSubmit={submit} noValidate>
             <label className="signup-field">
               <span>Email address</span>
@@ -890,6 +1064,190 @@ function SignupPage() {
             </label>
             <button className="signup-submit" type="submit" disabled={submitting}>{submitting ? 'Saving...' : 'Sign Up'}</button>
           </form>
+        </section>
+      </section>
+    </main>
+  );
+}
+
+function EventSignalsPage() {
+  const [records, setRecords] = useState<EventSignalRecord[]>([]);
+  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setError(null);
+      try {
+        const payload = await fetchEventSignals();
+        if (cancelled) return;
+        setRecords(payload.records);
+        setGeneratedAt(payload.generatedAt);
+      } catch (loadError) {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : 'Could not load event signals.');
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <main className="app-shell signup-shell">
+      <div className="background-wallpaper" aria-hidden="true" />
+      <section className="panel hero-copy-panel">
+        <h1>Event Signal Review</h1>
+        <p>Live alert events and localized historical disaster-window research share one surface so operators can compare takeoff clusters, anomaly scores, and provenance.</p>
+        <p className="hero-link-row"><a href="/">Back to Dashboard</a> / <a href="/signup">Get alerts</a></p>
+      </section>
+      {error ? <div className="status-banner status-banner-error"><strong>Signal feed error:</strong> {error}</div> : null}
+      <section className="panel operations-panel">
+        <h2>Signals</h2>
+        {generatedAt ? <p className="panel-caption">Generated {formatDateTime(generatedAt)}</p> : null}
+        {!records.length && !error ? <p className="empty-copy">No event signals have been published yet.</p> : null}
+        <div className="event-signal-list">
+          {records.map((record) => (
+            <article className="event-signal-card" key={record.id}>
+              <div>
+                <h3>{record.event}</h3>
+                <p>{record.provenance || record.source}</p>
+              </div>
+              <dl>
+                <div><dt>Phase</dt><dd>{record.phase}</dd></div>
+                <div><dt>Label</dt><dd>{record.label || 'n/a'}</dd></div>
+                <div><dt>Window</dt><dd>{formatDateTime(record.windowStart)}{record.windowEnd && record.windowEnd !== record.windowStart ? ` – ${formatDateTime(record.windowEnd)}` : ''}</dd></div>
+                <div><dt>Distance</dt><dd>{record.distanceMiles == null ? 'n/a' : `${formatNumber(record.distanceMiles, 0)} mi`}</dd></div>
+                <div><dt>Peak residual</dt><dd>{record.peakResidual == null ? 'n/a' : formatNumber(record.peakResidual, 1)}</dd></div>
+                <div><dt>Takeoffs</dt><dd>{record.takeoffEvents == null ? 'n/a' : formatInteger(record.takeoffEvents)}</dd></div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function ManagePage() {
+  const [subscriber, setSubscriber] = useState<ManagedSubscriber | null>(null);
+  const [wantsEmail, setWantsEmail] = useState(false);
+  const [wantsSms, setWantsSms] = useState(false);
+  const [renewSubscription, setRenewSubscription] = useState(true);
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const params = new URLSearchParams(window.location.search);
+  const subscriberId = params.get('subscriber') || '';
+  const token = params.get('token') || '';
+
+  function applySubscriber(nextSubscriber: ManagedSubscriber) {
+    setSubscriber(nextSubscriber);
+    setWantsEmail(Boolean(nextSubscriber.wantsEmail));
+    setWantsSms(Boolean(nextSubscriber.wantsSms));
+    setRenewSubscription(!nextSubscriber.stripeCancelAtPeriodEnd);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setError(null);
+      setStatus(null);
+      if (!subscriberId || !token) {
+        setError('Management link is missing a subscriber token.');
+        return;
+      }
+      try {
+        const loadedSubscriber = await fetchManagedSubscriber(subscriberId, token);
+        if (!cancelled) applySubscriber(loadedSubscriber);
+      } catch (loadError) {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : 'Could not load subscription settings.');
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [subscriberId, token]);
+
+  async function save(action: 'save' | 'delete_account' = 'save', overrides: Partial<Pick<ManagedSubscriber, 'wantsEmail' | 'wantsSms'>> = {}) {
+    if (!subscriberId || !token) {
+      setError('Management link is missing a subscriber token.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setStatus(null);
+    try {
+      const nextSubscriber = await saveManagedSubscriber({
+        subscriber: subscriberId,
+        token,
+        action,
+        wantsEmail: typeof overrides.wantsEmail === 'boolean' ? overrides.wantsEmail : wantsEmail,
+        wantsSms: typeof overrides.wantsSms === 'boolean' ? overrides.wantsSms : wantsSms,
+        renewSubscription,
+      });
+      applySubscriber(nextSubscriber);
+      setStatus(action === 'delete_account' ? 'Subscription canceled.' : 'Subscription settings saved.');
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Could not update subscription settings.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const canDeleteAccount = subscriber?.source === 'manual' || subscriber?.source === 'local_api';
+  const accountLabel = subscriber?.accountEmail || subscriber?.email || subscriber?.phone || `Subscriber ${subscriber?.id ?? ''}`;
+
+  return (
+    <main className="app-shell signup-shell">
+      <div className="background-wallpaper" aria-hidden="true" />
+      <section className="focus-grid signup-grid">
+        <section className="panel hero-copy-panel signup-copy-panel">
+          <h1>Manage Notifications</h1>
+          <p>Change alert channels, unsubscribe, or manage billing without exposing your contact details publicly.</p>
+          <p className="hero-link-row"><a href="/">Back to Dashboard</a></p>
+        </section>
+        <section className="panel signup-panel">
+          <h2>Subscription Settings</h2>
+          {error ? <p className="signup-status signup-status-error">{error}</p> : null}
+          {status ? <p className="signup-status signup-status-success">{status}</p> : null}
+          {!subscriber && !error ? <p className="signup-status">Loading subscription settings...</p> : null}
+          {subscriber ? (
+            <div className="signup-form">
+              <p className="signup-status">Managing {accountLabel}. Current status: {subscriber.status}.</p>
+              <label className="signup-field checkbox-field">
+                <input type="checkbox" checked={wantsEmail} disabled={!subscriber.email || saving} onChange={(event) => setWantsEmail(event.currentTarget.checked)} />
+                <span>Email alerts{subscriber.email ? ` to ${subscriber.email}` : ' unavailable'}</span>
+              </label>
+              <label className="signup-field checkbox-field">
+                <input type="checkbox" checked={wantsSms} disabled={!subscriber.phone || saving} onChange={(event) => setWantsSms(event.currentTarget.checked)} />
+                <span>SMS alerts{subscriber.phone ? ` to ${subscriber.phone}` : ' unavailable'}</span>
+              </label>
+              {subscriber.hasStripeSubscription ? (
+                <label className="signup-field checkbox-field">
+                  <input type="checkbox" checked={renewSubscription} disabled={saving} onChange={(event) => setRenewSubscription(event.currentTarget.checked)} />
+                  <span>Renew paid subscription at period end</span>
+                </label>
+              ) : null}
+              <button className="signup-submit" type="button" disabled={saving || (!wantsEmail && !wantsSms)} onClick={() => save('save')}>
+                {saving ? 'Saving...' : 'Save Settings'}
+              </button>
+              <button className="signup-submit secondary-submit" type="button" disabled={saving} onClick={() => save('save', { wantsEmail: false, wantsSms: false })}>
+                Unsubscribe from alerts
+              </button>
+              {canDeleteAccount ? (
+                <button className="signup-submit secondary-submit danger-submit" type="button" disabled={saving} onClick={() => save('delete_account')}>
+                  Cancel manual subscription
+                </button>
+              ) : null}
+              {subscriber.stripeBillingPortalUrl ? (
+                <p className="signup-status"><a href={subscriber.stripeBillingPortalUrl}>Open Stripe billing portal</a></p>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       </section>
     </main>

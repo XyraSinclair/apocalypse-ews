@@ -25,6 +25,46 @@ function notificationHash(env, type, value) {
   return crypto.createHmac('sha256', requireEnv(env, 'NOTIFICATION_HASH_SECRET')).update(`${type}:${value}`).digest('hex');
 }
 
+function subscriberManagementToken(env, subscriber) {
+  const createdAt = subscriber?.created_at || subscriber?.createdAt;
+  if (!subscriber?.id || !createdAt) {
+    throw new HttpError(500, 'Subscriber is missing account management fields.');
+  }
+  return crypto
+    .createHmac('sha256', requireEnv(env, 'NOTIFICATION_HASH_SECRET'))
+    .update(`account_management:${subscriber.id}:${createdAt}`)
+    .digest('hex');
+}
+
+function timingSafeEqualHex(left, right) {
+  const normalizedLeft = String(left || '').toLowerCase();
+  const normalizedRight = String(right || '').toLowerCase();
+  if (!/^[0-9a-f]+$/.test(normalizedLeft) || normalizedLeft.length !== normalizedRight.length) {
+    return false;
+  }
+  const leftBuffer = Buffer.from(normalizedLeft, 'hex');
+  const rightBuffer = Buffer.from(normalizedRight, 'hex');
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function createSubscriberManagementPath(env, subscriber) {
+  const token = subscriberManagementToken(env, subscriber);
+  const params = new URLSearchParams({ subscriber: String(subscriber.id), token });
+  return `/manage?${params.toString()}`;
+}
+
+function createSubscriberManagementUrl(env, subscriber) {
+  const publicUrl = cleanPublicUrl(env.EWS_PUBLIC_URL);
+  if (!publicUrl) {
+    return null;
+  }
+  const baseUrl = publicUrl.endsWith('/') ? publicUrl : `${publicUrl}/`;
+  return new URL(createSubscriberManagementPath(env, subscriber), baseUrl).toString();
+}
+
 function getEncryptionKey(env) {
   const key = Buffer.from(requireEnv(env, 'NOTIFICATION_ENCRYPTION_KEY'), 'base64');
   if (key.length !== 32) {
@@ -92,6 +132,40 @@ function normalizeSignupPayload(payload) {
   return { email, phone };
 }
 
+function normalizeSubscriberId(value) {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new HttpError(400, 'Enter a valid subscriber ID.');
+  }
+  return id;
+}
+
+function getSubscriberById(db, subscriberId) {
+  const id = normalizeSubscriberId(subscriberId);
+  const subscriber = db
+    .prepare(`
+      SELECT *
+      FROM notification_subscribers
+      WHERE id = ?
+    `)
+    .get(id);
+  if (!subscriber) {
+    throw new HttpError(404, 'Subscriber not found.');
+  }
+  return subscriber;
+}
+
+function mapSubscriberResult(env, subscriber, reused = false) {
+  return {
+    id: subscriber.id,
+    emailEnabled: Boolean(subscriber.email_enabled),
+    smsEnabled: Boolean(subscriber.sms_enabled),
+    managementPath: createSubscriberManagementPath(env, subscriber),
+    reused,
+  };
+}
+
+
 function upsertSubscriber(db, payload, env = process.env) {
   const contacts = normalizeSignupPayload(payload);
   const emailHash = contacts.email ? notificationHash(env, 'email', contacts.email) : null;
@@ -131,7 +205,7 @@ function upsertSubscriber(db, payload, env = process.env) {
           updated_at = CURRENT_TIMESTAMP
       WHERE id = @id
     `).run({ ...row, id: existing.id });
-    return { id: existing.id, emailEnabled: Boolean(row.email_enabled), smsEnabled: Boolean(row.sms_enabled), reused: true };
+    return mapSubscriberResult(env, getSubscriberById(db, existing.id), true);
   }
 
   const result = db.prepare(`
@@ -155,17 +229,112 @@ function upsertSubscriber(db, payload, env = process.env) {
       @source
     )
   `).run(row);
-  return { id: result.lastInsertRowid, emailEnabled: Boolean(row.email_enabled), smsEnabled: Boolean(row.sms_enabled), reused: false };
+  return mapSubscriberResult(env, getSubscriberById(db, result.lastInsertRowid), false);
 }
 
 function hydrateSubscriber(env, subscriber) {
   return {
     id: subscriber.id,
+    createdAt: subscriber.created_at,
     email: subscriber.email_enabled ? decryptString(env, subscriber.email_cipher) : null,
     phone: subscriber.sms_enabled ? decryptString(env, subscriber.phone_cipher) : null,
     emailHash: subscriber.email_hash,
     phoneHash: subscriber.phone_hash,
   };
+}
+
+function loadAuthorizedManagedSubscriber(db, env, subscriberId, token) {
+  if (!subscriberId || !token) {
+    throw new HttpError(400, 'Missing account management token.');
+  }
+  const subscriber = getSubscriberById(db, subscriberId);
+  if (!timingSafeEqualHex(token, subscriberManagementToken(env, subscriber))) {
+    throw new HttpError(403, 'Invalid account management token.');
+  }
+  return subscriber;
+}
+
+function phoneCountry(phone) {
+  const parsed = phone ? parsePhoneNumberFromString(phone) : null;
+  return parsed?.country || null;
+}
+
+function mapManagedSubscriber(env, subscriber) {
+  const email = subscriber.email_cipher ? decryptString(env, subscriber.email_cipher) : null;
+  const phone = subscriber.phone_cipher ? decryptString(env, subscriber.phone_cipher) : null;
+  return {
+    id: subscriber.id,
+    status: subscriber.status,
+    source: subscriber.source,
+    accountEmail: email,
+    email,
+    phone,
+    phoneCountry: phoneCountry(phone),
+    smsSupported: Boolean(phone),
+    wantsEmail: Boolean(subscriber.email_enabled),
+    wantsSms: Boolean(subscriber.sms_enabled),
+    currentPeriodEnd: null,
+    stripeCancelAtPeriodEnd: false,
+    hasStripeSubscription: false,
+    stripeBillingPortalUrl: null,
+    managementPath: createSubscriberManagementPath(env, subscriber),
+  };
+}
+
+function readOptionalBoolean(payload, keys) {
+  for (const key of keys) {
+    if (typeof payload?.[key] === 'boolean') {
+      return payload[key];
+    }
+  }
+  return null;
+}
+
+function getManagedSubscriber(db, env, subscriberId, token) {
+  return mapManagedSubscriber(env, loadAuthorizedManagedSubscriber(db, env, subscriberId, token));
+}
+
+function updateManagedSubscriber(db, env, payload) {
+  const subscriber = loadAuthorizedManagedSubscriber(db, env, payload?.subscriber, payload?.token);
+  const action = String(payload?.action || 'save').trim();
+
+  if (action === 'delete_account') {
+    db.prepare(`
+      UPDATE notification_subscribers
+      SET status = 'unsubscribed',
+          email_enabled = 0,
+          sms_enabled = 0,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(subscriber.id);
+    return mapManagedSubscriber(env, getSubscriberById(db, subscriber.id));
+  }
+
+  if (action !== 'save') {
+    throw new HttpError(400, 'Unknown account management action.');
+  }
+
+  const wantsEmail = readOptionalBoolean(payload, ['wantsEmail', 'emailEnabled']);
+  const wantsSms = readOptionalBoolean(payload, ['wantsSms', 'smsEnabled']);
+  const emailEnabled = wantsEmail == null ? Boolean(subscriber.email_enabled) : wantsEmail;
+  const smsEnabled = wantsSms == null ? Boolean(subscriber.sms_enabled) : wantsSms;
+  if (emailEnabled && !subscriber.email_cipher) {
+    throw new HttpError(400, 'This subscription does not have an email address.');
+  }
+  if (smsEnabled && !subscriber.phone_cipher) {
+    throw new HttpError(400, 'This subscription does not have a phone number.');
+  }
+
+  db.prepare(`
+    UPDATE notification_subscribers
+    SET status = ?,
+        email_enabled = ?,
+        sms_enabled = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(emailEnabled || smsEnabled ? 'active' : 'unsubscribed', emailEnabled ? 1 : 0, smsEnabled ? 1 : 0, subscriber.id);
+
+  return mapManagedSubscriber(env, getSubscriberById(db, subscriber.id));
 }
 
 function countActiveSubscribers(db) {
@@ -356,6 +525,25 @@ function hasSentDelivery(db, alertEventId, subscriberId, channel) {
   `).get(alertEventId, subscriberId, channel));
 }
 
+function buildEmailAlertText(env, alert, subscriber) {
+  const alertUrl = cleanPublicUrl(env.EWS_PUBLIC_URL);
+  const managementUrl = createSubscriberManagementUrl(env, subscriber);
+  return [
+    alert.message,
+    alertUrl,
+    managementUrl ? `Manage or unsubscribe: ${managementUrl}` : null,
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildSmsAlertText(env, alert, subscriber) {
+  const managementUrl = createSubscriberManagementUrl(env, subscriber);
+  return [
+    `${alert.title}. ${alert.message}`,
+    managementUrl ? `Manage: ${managementUrl}` : null,
+  ].filter(Boolean).join(' ').slice(0, 800);
+}
+
+
 
 async function dispatchOne(db, env, alert, subscriber, channel, pacer = null) {
   const destination = channel === 'sms' ? subscriber.phone : subscriber.email;
@@ -364,8 +552,8 @@ async function dispatchOne(db, env, alert, subscriber, channel, pacer = null) {
   try {
     if (pacer) await pacer.wait();
     const result = channel === 'sms'
-      ? await sendSms(env, { to: destination, text: `${alert.title}. ${alert.message}`.slice(0, 800) })
-      : await sendEmail(env, { to: destination, subject: alert.title, text: [alert.message, cleanPublicUrl(env.EWS_PUBLIC_URL)].filter(Boolean).join('\n\n') });
+      ? await sendSms(env, { to: destination, text: buildSmsAlertText(env, alert, subscriber) })
+      : await sendEmail(env, { to: destination, subject: alert.title, text: buildEmailAlertText(env, alert, subscriber) });
     recordDelivery(db, {
       alertEventId: alert.id,
       subscriberId: subscriber.id,
@@ -469,10 +657,14 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
 
 module.exports = {
   HttpError,
+  createSubscriberManagementPath,
+  createSubscriberManagementUrl,
   dispatchPendingAlerts,
+  getManagedSubscriber,
   listAlertEvents,
   listTakeoffEvents,
   normalizeEmail,
   normalizePhone,
   upsertSubscriber,
+  updateManagedSubscriber,
 };

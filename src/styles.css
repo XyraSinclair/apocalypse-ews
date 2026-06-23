@@ -525,6 +525,44 @@ h3 {
   font-size: 0.82rem;
 }
 
+.event-signal-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.event-signal-card {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #ccc;
+}
+
+.event-signal-card h3,
+.event-signal-card p {
+  margin: 0;
+}
+
+.event-signal-card dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.event-signal-card dt {
+  color: #333;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+
+.event-signal-card dd {
+  margin: 0;
+  font-weight: 700;
+}
+
+
 .about-copy,
 .faq-list,
 .updates-copy {
@@ -559,6 +597,16 @@ h3 {
   border-radius: 0;
 }
 
+.checkbox-field {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.signup-field.checkbox-field input {
+  width: auto;
+}
+
+
 .signup-field input:focus-visible,
 .signup-submit:focus-visible,
 .emergency-level-trigger:focus-visible,
@@ -576,6 +624,20 @@ h3 {
 }
 
 .signup-submit:hover { background: #e5e5e5; }
+
+.signup-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.secondary-submit {
+  background: #f7f7f7;
+}
+
+.danger-submit {
+  border-color: #7a0000;
+}
+
 
 .signup-status {
   padding: 10px 12px;
@@ -613,7 +675,8 @@ html.emergency-color-scheme body {
 html.emergency-color-scheme .background-wallpaper { filter: invert(1); }
 html.emergency-color-scheme .panel,
 html.emergency-color-scheme .map-hover-card,
-html.emergency-color-scheme .flight-list li {
+html.emergency-color-scheme .flight-list li,
+html.emergency-color-scheme .event-signal-card {
   color: #fff;
   background: #000;
   border-color: #666;
@@ -623,7 +686,7 @@ html.emergency-color-scheme a,
 html.emergency-color-scheme a:visited { color: #ffff00; }
 html.emergency-color-scheme button { color: #fff; background: #101010; border-color: #666; }
 html.emergency-color-scheme .app-shell :is(h1, h2, .chart-subsection-header strong, .map-hover-header strong) { color: red !important; }
-html.emergency-color-scheme :is(.provider-panel .panel-lede, .panel-footnote, .summary-text-block p, .chart-range-copy span, .chart-subsection-header span, .map-hover-header span, .map-hover-grid dt, .map-hover-grid dd, .map-badge, .model-count, .empty-state, .ops-list span, .ops-list time) { color: #fff; }
+html.emergency-color-scheme :is(.provider-panel .panel-lede, .panel-footnote, .summary-text-block p, .chart-range-copy span, .chart-subsection-header span, .map-hover-header span, .map-hover-grid dt, .map-hover-grid dd, .map-badge, .model-count, .empty-state, .ops-list span, .ops-list time, .event-signal-card dt) { color: #fff; }
 html.emergency-color-scheme .map-sphere { fill: #050505; stroke: #666; }
 html.emergency-color-scheme .map-graticule { stroke: #222; }
 html.emergency-color-scheme .map-marker-halo { fill: rgba(255, 255, 0, 0.14); }
@@ -657,6 +720,7 @@ html.emergency-color-scheme .signup-field input { color: #fff; background: #0505
   .map-svg { order: 1; min-height: 340px; }
   .flight-list li,
   .operations-grid,
+  .event-signal-card dl,
   .map-hover-grid { grid-template-columns: 1fr; }
   .model-list li { grid-template-columns: minmax(0, 1fr) max-content; align-items: start; gap: 10px; }
 }
