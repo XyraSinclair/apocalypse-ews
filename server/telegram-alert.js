@@ -2,8 +2,7 @@ const { getMetaValue, setMetaValue } = require("./db");
 const { cleanPublicUrl } = require("./public-url");
 
 const TELEGRAM_ALERT_LAST_SLOT_META_KEY = "telegram_level5_alert_last_slot_key";
-const TELEGRAM_API_BASE_URL = "https://api.telegram.org";
-const DEFAULT_ALERT_URL = "https://ews.kylemcdonald.net/";
+const DEFAULT_ALERT_URL = "";
 
 function normalizeTelegramChannel(value) {
   const trimmed = String(value || "").trim();

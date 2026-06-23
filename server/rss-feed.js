@@ -8,8 +8,7 @@ const {
 const { cleanPublicUrl } = require("./public-url");
 
 const RSS_FEED_ITEMS_META_KEY = "rss_level5_items_v1";
-const MAX_RSS_ITEMS = 100;
-const DEFAULT_RSS_URL = "https://ews.kylemcdonald.net/rss.xml";
+const DEFAULT_RSS_URL = "";
 const EMPTY_FEED_DATE = "Thu, 01 Jan 1970 00:00:00 GMT";
 
 function getRssConfig(env = process.env) {
