@@ -1,5 +1,6 @@
 const crypto = require('node:crypto');
 const { parsePhoneNumberFromString } = require('libphonenumber-js/min');
+const { cleanPublicUrl } = require('./public-url');
 
 const ALERT_DISPATCH_LIMIT = 25;
 const EMAIL_CONCURRENCY = 8;
@@ -305,8 +306,26 @@ function recordDelivery(db, delivery) {
       @error,
       @attemptedAt
     )
+    ON CONFLICT(alert_event_id, subscriber_id, channel) DO UPDATE SET
+      destination_hash = excluded.destination_hash,
+      status = excluded.status,
+      provider_message_id = excluded.provider_message_id,
+      error = excluded.error,
+      attempted_at = excluded.attempted_at
   `).run(delivery);
 }
+
+function hasSentDelivery(db, alertEventId, subscriberId, channel) {
+  return Boolean(db.prepare(`
+    SELECT 1
+    FROM alert_deliveries
+    WHERE alert_event_id = ?
+      AND subscriber_id = ?
+      AND channel = ?
+      AND status = 'sent'
+  `).get(alertEventId, subscriberId, channel));
+}
+
 
 async function dispatchOne(db, env, alert, subscriber, channel, pacer = null) {
   const destination = channel === 'sms' ? subscriber.phone : subscriber.email;
@@ -316,7 +335,7 @@ async function dispatchOne(db, env, alert, subscriber, channel, pacer = null) {
     if (pacer) await pacer.wait();
     const result = channel === 'sms'
       ? await sendSms(env, { to: destination, text: `${alert.title}. ${alert.message}`.slice(0, 800) })
-      : await sendEmail(env, { to: destination, subject: alert.title, text: `${alert.message}\n\n${String(env.EWS_PUBLIC_URL || '').trim()}`.trim() });
+      : await sendEmail(env, { to: destination, subject: alert.title, text: [alert.message, cleanPublicUrl(env.EWS_PUBLIC_URL)].filter(Boolean).join('\n\n') });
     recordDelivery(db, {
       alertEventId: alert.id,
       subscriberId: subscriber.id,
@@ -348,7 +367,7 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
     .prepare(`
       SELECT *
       FROM alert_events
-      WHERE status = 'pending'
+      WHERE status IN ('pending', 'failed', 'partial')
       ORDER BY occurred_at ASC, id ASC
       LIMIT ?
     `)
@@ -360,17 +379,20 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
   for (const alert of alerts) {
     const work = [];
     for (const subscriber of subscribers) {
-      if (subscriber.email) work.push({ subscriber, channel: 'email' });
-      if (subscriber.phone) work.push({ subscriber, channel: 'sms' });
+      if (subscriber.email && !hasSentDelivery(db, alert.id, subscriber.id, 'email')) work.push({ subscriber, channel: 'email' });
+      if (subscriber.phone && !hasSentDelivery(db, alert.id, subscriber.id, 'sms')) work.push({ subscriber, channel: 'sms' });
     }
 
     if (!work.length) {
+      const reason = subscribers.length ? 'all_deliveries_already_sent' : 'no_active_subscribers';
       db.prepare(`
         UPDATE alert_events
-        SET status = 'no_recipients', dispatched_at = CURRENT_TIMESTAMP, dispatch_summary_json = ?
+        SET status = ?, dispatched_at = CURRENT_TIMESTAMP, dispatch_summary_json = ?
         WHERE id = ?
-      `).run(JSON.stringify({ deliveries: 0, reason: 'no_active_subscribers' }), alert.id);
-      summary.noRecipients += 1;
+      `).run(subscribers.length ? 'sent' : 'no_recipients', JSON.stringify({ deliveries: 0, reason }), alert.id);
+      if (!subscribers.length) {
+        summary.noRecipients += 1;
+      }
       continue;
     }
 

@@ -168,6 +168,13 @@ h3 {
   border-color: #900;
 }
 
+.error-copy {
+  color: #000;
+  background: var(--warning-bg);
+  border: 1px solid #999;
+  padding: 8px 10px;
+}
+
 .provider-panel .panel-lede,
 .panel-footnote,
 .summary-text-block p,

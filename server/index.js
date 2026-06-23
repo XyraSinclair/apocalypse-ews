@@ -213,7 +213,7 @@ app.get("/api/takeoffs", (request, response) => {
 app.get("/api/alerts", (request, response) => {
   const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 200);
   response.json({
-    events: readAcrossDashboardDbs(listAlertEvents, "occurredAt", limit),
+    events: listAlertEvents(getDb(), { limit }),
   });
 });
 

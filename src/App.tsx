@@ -179,6 +179,7 @@ type CombinedDashboard = {
   signal: CurrentSignal & SignalMath;
   asOf?: string;
   providerStatus: string;
+  providerWarning?: string | null;
   modelCounts: ModelCount[];
   seats: SeatEstimate;
 };
@@ -196,6 +197,20 @@ type SeatEstimate = {
   knownSeats: number;
   estimatedSeats: number | null;
 };
+
+async function fetchDashboard(kind: CohortKind, baseUrl: string): Promise<[CohortKind, DashboardResponse]> {
+  const url = `${baseUrl}?v=${Math.floor(Date.now() / 300000)}`;
+  const response = await fetch(url, { cache: 'no-store' });
+  const contentType = response.headers.get('content-type') ?? '';
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`${CATEGORY_LABELS[kind]} request failed with ${response.status} ${response.statusText}`);
+  }
+  if (!contentType.includes('json')) {
+    throw new Error(`${CATEGORY_LABELS[kind]} returned ${contentType || 'an unknown content type'}`);
+  }
+  return [kind, JSON.parse(text) as DashboardResponse];
+}
 
 function App() {
   const path = window.location.pathname;
@@ -224,25 +239,26 @@ function DashboardPage() {
       setStatus((current) => (current === 'ready' ? 'ready' : 'loading'));
       setError(null);
       try {
-        const entries = await Promise.all(
-          (Object.entries(DASHBOARD_URLS) as Array<[CohortKind, string]>).map(async ([kind, baseUrl]) => {
-            const url = `${baseUrl}?v=${Math.floor(Date.now() / 300000)}`;
-            const response = await fetch(url, { cache: 'no-store' });
-            const contentType = response.headers.get('content-type') ?? '';
-            const text = await response.text();
-            if (!response.ok) {
-              throw new Error(`${CATEGORY_LABELS[kind]} request failed with ${response.status} ${response.statusText}`);
-            }
-            if (!contentType.includes('json')) {
-              throw new Error(`${CATEGORY_LABELS[kind]} returned ${contentType || 'an unknown content type'}`);
-            }
-            return [kind, JSON.parse(text) as DashboardResponse] as const;
-          }),
+        const businessEntry = await fetchDashboard('business', DASHBOARD_URLS.business);
+        const optionalResults = await Promise.allSettled(
+          (Object.entries(DASHBOARD_URLS) as Array<[CohortKind, string]>)
+            .filter(([kind]) => kind !== 'business')
+            .map(([kind, baseUrl]) => fetchDashboard(kind, baseUrl)),
         );
         if (cancelled) return;
+        const entries = [businessEntry];
+        const optionalErrors: string[] = [];
+        for (const result of optionalResults) {
+          if (result.status === 'fulfilled') {
+            entries.push(result.value);
+          } else {
+            optionalErrors.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
+          }
+        }
         setDashboards(Object.fromEntries(entries) as LoadedDashboards);
         setLastFetchedAt(new Date().toISOString());
         setStatus('ready');
+        setError(optionalErrors.length ? `Optional cohort data unavailable: ${optionalErrors.join('; ')}` : null);
       } catch (loadError) {
         if (cancelled) return;
         setStatus('error');
@@ -418,6 +434,7 @@ function ProviderPanel({ combined, lastFetchedAt }: { combined: CombinedDashboar
         </div>
         <span className="map-badge">{combined.selectedLabels.join(' + ')}</span>
       </div>
+      {combined.providerWarning ? <p className="error-copy">{combined.providerWarning}</p> : null}
       <p className="panel-footnote">Browser refresh: {formatDateTime(lastFetchedAt)}</p>
     </section>
   );
@@ -910,21 +927,40 @@ function combineDashboards(dashboards: LoadedDashboards, selected: SelectedCohor
   const alarmSigmaThreshold = entries.length === 1
     ? finiteNumber(entries[0].dashboard.current?.alarmSigmaThreshold ?? entries[0].dashboard.signals?.composite?.alarmSigmaThreshold, DEFAULT_ALARM_SIGMA)
     : calibrateAlarmThreshold(archive);
-  const computed = computeSignal(actualCount, expectedCount, stdDev, alarmSigmaThreshold, archiveScale);
   const singleCurrent = entries.length === 1 ? entries[0].dashboard.current : undefined;
-  const signal: CurrentSignal & SignalMath = {
-    ...(singleCurrent ?? {}),
-    ...computed,
-    concurrentCount: actualCount,
-    baselineMean: expectedCount,
-    baselineStdDev: stdDev,
-    effectiveBaselineStdDev: computed.effectiveBaselineStdDev,
-    zScore: computed.sigmaShift,
-    rawZScore: computed.rawSigmaShift,
-    varianceAdjustedZScore: computed.varianceAdjustedSigmaShift,
-    emergencyLevel: computed.emergencyLevel,
-    alarmSigmaThreshold,
-  };
+  const singleComposite = entries.length === 1 ? entries[0].dashboard.signals?.composite : undefined;
+  const computed = singleComposite ? null : computeSignal(actualCount, expectedCount, stdDev, alarmSigmaThreshold, archiveScale);
+  const signal: CurrentSignal & SignalMath = singleComposite
+    ? {
+        ...(singleCurrent ?? {}),
+        concurrentCount: finiteNumber(singleComposite.actualConcurrentCount, actualCount),
+        baselineMean: finiteNumber(singleComposite.expectedConcurrentCount, expectedCount),
+        baselineStdDev: finiteNumber(singleComposite.expectedConcurrentStdDev, stdDev),
+        divergence: actualCount - expectedCount,
+        effectiveBaselineStdDev: finiteNumber(singleComposite.effectiveConcurrentStdDev, stdDev),
+        sigmaShift: finiteNumber(singleComposite.sigmaShift, 0),
+        rawSigmaShift: finiteNumber(singleComposite.rawSigmaShift, 0),
+        varianceAdjustedSigmaShift: finiteNumber(singleComposite.varianceAdjustedSigmaShift, 0),
+        zScore: finiteNumber(singleComposite.sigmaShift, 0),
+        rawZScore: finiteNumber(singleComposite.rawSigmaShift, 0),
+        varianceAdjustedZScore: finiteNumber(singleComposite.varianceAdjustedSigmaShift, 0),
+        absoluteExcessWeight: finiteNumber(singleComposite.absoluteExcessWeight, 0),
+        gaugeValue: singleComposite.gaugeValue,
+        emergencyLevel: finiteNumber(singleComposite.emergencyLevel, 1),
+        alarmSigmaThreshold,
+      }
+    : {
+        ...computed!,
+        concurrentCount: actualCount,
+        baselineMean: expectedCount,
+        baselineStdDev: stdDev,
+        effectiveBaselineStdDev: computed!.effectiveBaselineStdDev,
+        zScore: computed!.sigmaShift,
+        rawZScore: computed!.rawSigmaShift,
+        varianceAdjustedZScore: computed!.varianceAdjustedSigmaShift,
+        emergencyLevel: computed!.emergencyLevel,
+        alarmSigmaThreshold,
+      };
 
   const primary = entries[0].dashboard;
   const asOf = entries.map((entry) => entry.dashboard.current?.asOf ?? entry.dashboard.liveStatus?.latestSampledAt).filter((value): value is string => typeof value === 'string' && value.length > 0).sort().at(-1);
@@ -935,6 +971,21 @@ function combineDashboards(dashboards: LoadedDashboards, selected: SelectedCohor
     const matched = live?.matchedCount == null ? 'unknown matches' : `${formatInteger(live.matchedCount)} matches`;
     return `${CATEGORY_LABELS[entry.kind]}: ${live?.providerLabel ?? 'provider unknown'}, ${matched}, last success ${last}`;
   }).join(' · ');
+  const providerWarnings = entries.flatMap((entry) => {
+    const live = entry.dashboard.liveStatus;
+    const warnings: string[] = [];
+    if (live?.lastError) {
+      warnings.push(`${CATEGORY_LABELS[entry.kind]} provider error: ${live.lastError}`);
+    }
+    const sampledAt = Date.parse(live?.latestSampledAt || '');
+    if (Number.isFinite(sampledAt) && Date.now() - sampledAt > 24 * 60 * 60 * 1000) {
+      warnings.push(`${CATEGORY_LABELS[entry.kind]} ADS-B data is older than 24 hours.`);
+    }
+    return warnings;
+  });
+
+  const aircraftForModelSummary = liveAircraft.filter((plane) => plane.cohortKind !== 'untracked');
+  const aircraftForSeatEstimate = liveAircraft.filter((plane) => plane.cohortKind === 'business');
 
   return {
     selectedKinds: entries.map((entry) => entry.kind),
@@ -948,11 +999,12 @@ function combineDashboards(dashboards: LoadedDashboards, selected: SelectedCohor
     expectedCount,
     stdDev,
     alarmSigmaThreshold,
+    providerWarning: providerWarnings[0] ?? null,
     signal,
     asOf,
     providerStatus,
-    modelCounts: countModels(liveAircraft),
-    seats: estimateSeats(liveAircraft),
+    modelCounts: countModels(aircraftForModelSummary),
+    seats: estimateSeats(aircraftForSeatEstimate),
   };
 }
 

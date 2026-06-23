@@ -9,6 +9,7 @@ function parseArgs(argv) {
     db: null,
     snapshot: null,
     cohort: null,
+    eventsDb: null,
     anomalyLevel: Number(process.env.EWS_ANOMALY_ALERT_LEVEL || 5),
     takeoffBatchMin: Number(process.env.EWS_TAKEOFF_BATCH_MIN || 1),
     takeoffAnomalyLevel: Number(process.env.EWS_TAKEOFF_ANOMALY_LEVEL || 4),
@@ -18,6 +19,8 @@ function parseArgs(argv) {
     const value = argv[index];
     if (value === '--db') {
       args.db = argv[++index];
+    } else if (value === '--events-db') {
+      args.eventsDb = argv[++index];
     } else if (value === '--snapshot') {
       args.snapshot = argv[++index];
     } else if (value === '--cohort') {
@@ -34,8 +37,10 @@ function parseArgs(argv) {
   }
 
   if (!args.db || !args.snapshot || !args.cohort) {
-    throw new Error('Usage: node scripts/detect_alert_events.js --db path --snapshot path --cohort id');
+    throw new Error('Usage: node scripts/detect_alert_events.js --db path [--events-db path] --snapshot path --cohort id');
   }
+
+  args.eventsDb ||= args.db;
 
   return args;
 }
@@ -198,12 +203,19 @@ function buildEvents({ db, snapshot, cohort, anomalyLevel, takeoffBatchMin, take
 
 function main() {
   const args = parseArgs(process.argv);
-  const db = new Database(path.resolve(args.db));
+  const sourceDbPath = path.resolve(args.db);
+  const eventsDbPath = path.resolve(args.eventsDb);
+  const sourceDb = new Database(sourceDbPath);
+  const eventsDb = eventsDbPath === sourceDbPath ? sourceDb : new Database(eventsDbPath);
   try {
-    db.exec(fs.readFileSync(path.resolve(__dirname, '..', 'schema.sql'), 'utf8'));
+    const schema = fs.readFileSync(path.resolve(__dirname, '..', 'schema.sql'), 'utf8');
+    sourceDb.exec(schema);
+    if (eventsDb !== sourceDb) {
+      eventsDb.exec(schema);
+    }
     const snapshot = loadSnapshot(path.resolve(args.snapshot));
-    const result = buildEvents({ ...args, db, snapshot });
-    const transaction = db.transaction((events) => events.filter((event) => insertAlertEvent(db, event)).length);
+    const result = buildEvents({ ...args, db: sourceDb, snapshot });
+    const transaction = eventsDb.transaction((events) => events.filter((event) => insertAlertEvent(eventsDb, event)).length);
     const inserted = transaction(result.events);
     console.log(JSON.stringify({
       ok: true,
@@ -213,9 +225,13 @@ function main() {
       takeoffCount: result.takeoffCount,
       candidateEvents: result.events.length,
       insertedEvents: inserted,
+      eventsDb: eventsDbPath,
     }));
   } finally {
-    db.close();
+    if (eventsDb !== sourceDb) {
+      eventsDb.close();
+    }
+    sourceDb.close();
   }
 }
 

@@ -5,6 +5,7 @@ const {
   getEmergencySnapshotSignal,
   getLatestSlotKey,
 } = require("./telegram-alert");
+const { cleanPublicUrl } = require("./public-url");
 
 const RSS_FEED_ITEMS_META_KEY = "rss_level5_items_v1";
 const MAX_RSS_ITEMS = 100;
@@ -13,8 +14,8 @@ const EMPTY_FEED_DATE = "Thu, 01 Jan 1970 00:00:00 GMT";
 
 function getRssConfig(env = process.env) {
   return {
-    siteUrl: String(env.EWS_PUBLIC_URL || DEFAULT_ALERT_URL).trim() || DEFAULT_ALERT_URL,
-    feedUrl: String(env.EWS_RSS_URL || DEFAULT_RSS_URL).trim() || DEFAULT_RSS_URL,
+    siteUrl: cleanPublicUrl(env.EWS_PUBLIC_URL, DEFAULT_ALERT_URL),
+    feedUrl: cleanPublicUrl(env.EWS_RSS_URL, DEFAULT_RSS_URL),
   };
 }
 

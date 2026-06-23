@@ -4,9 +4,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { loadEnvFile } = require("../server/env");
 const { DATA_DIR, ensureDirectories } = require("../server/config");
-const { initDb } = require("../server/db");
+const { getDb, initDb } = require("../server/db");
 const { buildDashboardSnapshot, buildStoredHeatmapStatus } = require("../server/dashboard");
-const { buildEmergencyRssFeedXml, getRssItems, maybeRecordEmergencyLevelRssItem } = require("../server/rss-feed");
+const { listAlertEvents } = require("../server/local-notifications");
+const { buildEmergencyRssFeedXml, getRssConfig, getRssItems, maybeRecordEmergencyLevelRssItem } = require("../server/rss-feed");
 
 function parseArgs(argv) {
   const args = {
@@ -35,6 +36,31 @@ function printHelp() {
   console.log("Usage: node scripts/update_rss_feed.js [--output path] [--dry-run]");
 }
 
+
+function rssItemFromAlertEvent(event, env = process.env) {
+  const config = getRssConfig(env);
+  const publishedAt = new Date(event.occurredAt || event.createdAt || Date.now());
+  return {
+    guid: `ews-alert-${event.id}`,
+    title: event.title,
+    summary: event.message,
+    description: event.message,
+    link: config.siteUrl,
+    pubDate: Number.isFinite(publishedAt.getTime()) ? publishedAt.toUTCString() : new Date().toUTCString(),
+  };
+}
+
+function dedupeRssItems(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = item.guid || item.slotKey || `${item.title}:${item.pubDate}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
 function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
@@ -55,10 +81,12 @@ function main() {
     status: liveStatus,
     dryRun: args.dryRun,
   });
-  const items = getRssItems();
-  const rssXml = buildEmergencyRssFeedXml({
-    items: result.updated && result.item && args.dryRun ? [result.item, ...items] : items,
-  });
+  const items = dedupeRssItems([
+    ...listAlertEvents(getDb(), { limit: 100 }).map((event) => rssItemFromAlertEvent(event)),
+    ...(result.updated && result.item && args.dryRun ? [result.item] : []),
+    ...getRssItems(),
+  ]);
+  const rssXml = buildEmergencyRssFeedXml({ items });
 
   if (args.output) {
     fs.mkdirSync(path.dirname(args.output), { recursive: true });
@@ -69,7 +97,7 @@ function main() {
     JSON.stringify({
       ...result,
       output: args.output,
-      itemCount: items.length + (result.updated && args.dryRun ? 1 : 0),
+      itemCount: items.length,
       emergencyLevel: snapshot.signals?.composite?.emergencyLevel ?? snapshot.current?.emergencyLevel ?? null,
       asOf: snapshot.current?.asOf ?? null,
     }),

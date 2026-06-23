@@ -1,4 +1,5 @@
 const { getMetaValue, setMetaValue } = require("./db");
+const { cleanPublicUrl } = require("./public-url");
 
 const TELEGRAM_ALERT_LAST_SLOT_META_KEY = "telegram_level5_alert_last_slot_key";
 const TELEGRAM_API_BASE_URL = "https://api.telegram.org";
@@ -31,7 +32,7 @@ function getTelegramAlertConfig(env = process.env) {
     token,
     botUsername: String(env.TELEGRAM_BOT_USERNAME || "").trim() || null,
     channel,
-    alertUrl: String(env.EWS_PUBLIC_URL || DEFAULT_ALERT_URL).trim() || DEFAULT_ALERT_URL,
+    alertUrl: cleanPublicUrl(env.EWS_PUBLIC_URL, DEFAULT_ALERT_URL),
   };
 }
 
