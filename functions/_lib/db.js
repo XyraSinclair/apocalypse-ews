@@ -80,6 +80,11 @@ async function queryRows(env, sql, params = []) {
 function nowIso() {
   return new Date().toISOString();
 }
+function isUniqueConstraintError(error) {
+  const message = String(error?.message || error || "");
+  return /UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE|D1_ERROR.*UNIQUE/i.test(message);
+}
+
 
 function unixSecondsToIso(value) {
   const numericValue = Number(value || 0);
@@ -142,6 +147,76 @@ async function firstByContactHashes(env, emailHash, phoneHash, accountEmailHash 
     )
     .bind(...params)
     .first();
+}
+
+async function billableSubscribersByContactHashes(env, emailHash, phoneHash, accountEmailHash = null, excludeId = null) {
+  if (!emailHash && !phoneHash && !accountEmailHash) {
+    return [];
+  }
+
+  const clauses = [];
+  const params = [];
+  if (emailHash) {
+    clauses.push("email_hash = ?");
+    params.push(emailHash);
+  }
+  if (accountEmailHash) {
+    clauses.push("account_email_hash = ?");
+    params.push(accountEmailHash);
+  }
+  if (phoneHash) {
+    clauses.push("phone_hash = ?");
+    params.push(phoneHash);
+  }
+
+  const rows = await getDb(env)
+    .prepare(
+      `
+        SELECT *
+        FROM notification_signups
+        WHERE (${clauses.join(" OR ")})
+          AND status IN (?, ?)
+          AND (? IS NULL OR id <> ?)
+        ORDER BY
+          CASE status WHEN 'active' THEN 0 WHEN 'past_due' THEN 1 ELSE 2 END,
+          updated_at DESC
+      `,
+    )
+    .bind(...params, SUBSCRIBER_STATUS.ACTIVE, SUBSCRIBER_STATUS.PAST_DUE, excludeId, excludeId)
+    .all();
+  return rows.results || rows || [];
+}
+
+function choosePastDueSubscriberForCheckout(matches, { emailHash, phoneHash, accountEmailHash }) {
+  const pastDueMatches = matches.filter((match) => match.status === SUBSCRIBER_STATUS.PAST_DUE);
+  return (
+    pastDueMatches.find((match) => emailHash && match.email_hash === emailHash) ||
+    pastDueMatches.find((match) => accountEmailHash && match.account_email_hash === accountEmailHash) ||
+    pastDueMatches.find((match) => phoneHash && match.phone_hash === phoneHash) ||
+    null
+  );
+}
+
+function hasOtherBillableContactHash(matches, selectedId, column, value) {
+  return Boolean(value && matches.some((match) => match.id !== selectedId && match[column] === value));
+}
+
+function buildPastDueActivationValues(existing, matches, values) {
+  const emailClaimedByOther = hasOtherBillableContactHash(matches, existing.id, "email_hash", values.emailHash);
+  const accountEmailClaimedByOther = hasOtherBillableContactHash(
+    matches,
+    existing.id,
+    "account_email_hash",
+    values.accountEmailHash,
+  );
+  return {
+    emailCipher: emailClaimedByOther ? existing.email_cipher : values.emailCipher,
+    emailHash: emailClaimedByOther ? existing.email_hash : values.emailHash,
+    accountEmailCipher: accountEmailClaimedByOther ? existing.account_email_cipher : values.accountEmailCipher,
+    accountEmailHash: accountEmailClaimedByOther ? existing.account_email_hash : values.accountEmailHash,
+    accountEmailSource: accountEmailClaimedByOther ? existing.account_email_source : values.accountEmailSource,
+    wantsEmail: emailClaimedByOther ? Number(existing.wants_email || 0) : values.wantsEmail,
+  };
 }
 
 export async function createPendingSignup(env, contacts, requestContext = {}) {
@@ -374,6 +449,81 @@ export async function anonymizeExpiredPendingSignups(env, options = {}) {
     redactedCount: result.meta?.changes || 0,
   };
 }
+async function linkExistingActiveSubscriberToCheckout(env, existingId, checkoutSession) {
+  const timestamp = nowIso();
+  await getDb(env)
+    .prepare(
+      `
+        UPDATE notification_signups
+        SET
+          stripe_customer_id = COALESCE(?, stripe_customer_id),
+          stripe_subscription_id = COALESCE(?, stripe_subscription_id),
+          stripe_checkout_session_id = ?,
+          checkout_completed_at = ?,
+          updated_at = ?
+        WHERE id = ?
+          AND status = ?
+      `,
+    )
+    .bind(
+      checkoutSession.customer || null,
+      checkoutSession.subscription || null,
+      checkoutSession.id || null,
+      timestamp,
+      timestamp,
+      existingId,
+      SUBSCRIBER_STATUS.ACTIVE,
+    )
+    .run();
+  await cancelPendingSubscriberByCheckout(env, checkoutSession);
+  return existingId;
+}
+
+
+async function activateExistingPastDueSubscriberFromCheckout(env, existingId, checkoutSession, values) {
+  const timestamp = nowIso();
+  await getDb(env)
+    .prepare(
+      `
+        UPDATE notification_signups
+        SET
+          status = ?,
+          email_cipher = ?,
+          email_hash = ?,
+          account_email_cipher = ?,
+          account_email_hash = ?,
+          account_email_source = ?,
+          wants_email = ?,
+          stripe_customer_id = ?,
+          stripe_subscription_id = ?,
+          stripe_checkout_session_id = ?,
+          checkout_completed_at = ?,
+          contact_redacted_at = NULL,
+          updated_at = ?
+        WHERE id = ?
+          AND status = ?
+      `,
+    )
+    .bind(
+      SUBSCRIBER_STATUS.ACTIVE,
+      values.emailCipher,
+      values.emailHash,
+      values.accountEmailCipher,
+      values.accountEmailHash,
+      values.accountEmailSource,
+      values.wantsEmail,
+      checkoutSession.customer || null,
+      checkoutSession.subscription || null,
+      checkoutSession.id || null,
+      timestamp,
+      timestamp,
+      existingId,
+      SUBSCRIBER_STATUS.PAST_DUE,
+    )
+    .run();
+  await cancelPendingSubscriberByCheckout(env, checkoutSession);
+  return existingId;
+}
 
 export async function activateSubscriberFromCheckout(env, checkoutSession) {
   const signupId = checkoutSession.metadata?.signup_id || checkoutSession.client_reference_id || null;
@@ -416,42 +566,74 @@ export async function activateSubscriberFromCheckout(env, checkoutSession) {
     accountEmailSource = "stripe";
   }
 
-  await db
-    .prepare(
-      `
-        UPDATE notification_signups
-        SET
-          status = ?,
-          email_cipher = ?,
-          email_hash = ?,
-          account_email_cipher = ?,
-          account_email_hash = ?,
-          account_email_source = ?,
-          wants_email = ?,
-          stripe_customer_id = ?,
-          stripe_subscription_id = ?,
-          stripe_checkout_session_id = ?,
-          checkout_completed_at = ?,
-          updated_at = ?
-        WHERE id = ?
-      `,
-    )
-    .bind(
-      SUBSCRIBER_STATUS.ACTIVE,
-      emailCipher,
+  try {
+    await db
+      .prepare(
+        `
+          UPDATE notification_signups
+          SET
+            status = ?,
+            email_cipher = ?,
+            email_hash = ?,
+            account_email_cipher = ?,
+            account_email_hash = ?,
+            account_email_source = ?,
+            wants_email = ?,
+            stripe_customer_id = ?,
+            stripe_subscription_id = ?,
+            stripe_checkout_session_id = ?,
+            checkout_completed_at = ?,
+            updated_at = ?
+          WHERE id = ?
+        `,
+      )
+      .bind(
+        SUBSCRIBER_STATUS.ACTIVE,
+        emailCipher,
+        emailHash,
+        accountEmailCipher,
+        accountEmailHash,
+        accountEmailSource,
+        wantsEmail,
+        checkoutSession.customer || null,
+        checkoutSession.subscription || null,
+        sessionId,
+        nowIso(),
+        nowIso(),
+        subscriber.id,
+      )
+      .run();
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) {
+      throw error;
+    }
+    const matches = await billableSubscribersByContactHashes(env, emailHash, subscriber.phone_hash, accountEmailHash, subscriber.id);
+    const activeSubscriber = matches.find((match) => match.status === SUBSCRIBER_STATUS.ACTIVE);
+    if (activeSubscriber) {
+      return linkExistingActiveSubscriberToCheckout(env, activeSubscriber.id, checkoutSession);
+    }
+    const pastDueSubscriber = choosePastDueSubscriberForCheckout(matches, {
       emailHash,
-      accountEmailCipher,
+      phoneHash: subscriber.phone_hash,
       accountEmailHash,
-      accountEmailSource,
-      wantsEmail,
-      checkoutSession.customer || null,
-      checkoutSession.subscription || null,
-      sessionId,
-      nowIso(),
-      nowIso(),
-      subscriber.id,
-    )
-    .run();
+    });
+    if (pastDueSubscriber) {
+      return activateExistingPastDueSubscriberFromCheckout(
+        env,
+        pastDueSubscriber.id,
+        checkoutSession,
+        buildPastDueActivationValues(pastDueSubscriber, matches, {
+          emailCipher,
+          emailHash,
+          accountEmailCipher,
+          accountEmailHash,
+          accountEmailSource,
+          wantsEmail,
+        }),
+      );
+    }
+    throw error;
+  }
 
   return subscriber.id;
 }
@@ -493,6 +675,71 @@ export async function cancelPendingSubscriberByCheckout(env, checkoutSession) {
   return result.meta?.changes || 0;
 }
 
+async function cancelPendingSubscriberById(env, subscriberId) {
+  const timestamp = nowIso();
+  const result = await getDb(env)
+    .prepare(
+      `
+        UPDATE notification_signups
+        SET
+          status = ?,
+          email_cipher = NULL,
+          email_hash = NULL,
+          account_email_cipher = NULL,
+          account_email_hash = NULL,
+          account_email_source = NULL,
+          phone_cipher = NULL,
+          phone_hash = NULL,
+          phone_country = NULL,
+          sms_consent_ip_hash = NULL,
+          sms_consent_user_agent_hash = NULL,
+          checkout_url = NULL,
+          canceled_at = ?,
+          contact_redacted_at = COALESCE(contact_redacted_at, ?),
+          updated_at = ?
+        WHERE id = ?
+          AND status = ?
+      `,
+    )
+    .bind(SUBSCRIBER_STATUS.CANCELED, timestamp, timestamp, timestamp, subscriberId, SUBSCRIBER_STATUS.PENDING)
+    .run();
+
+  return result.meta?.changes || 0;
+}
+
+async function linkExistingSubscriberToSubscription(env, existingId, subscription, nextStatus) {
+  await getDb(env)
+    .prepare(
+      `
+        UPDATE notification_signups
+        SET
+          status = ?,
+          stripe_customer_id = COALESCE(?, stripe_customer_id),
+          stripe_subscription_id = ?,
+          current_period_end = ?,
+          canceled_at = ?,
+          stripe_cancel_at_period_end = ?,
+          updated_at = ?
+        WHERE id = ?
+          AND status IN (?, ?)
+      `,
+    )
+    .bind(
+      nextStatus,
+      subscription.customer || null,
+      subscription.id,
+      unixSecondsToIso(getSubscriptionCurrentPeriodEnd(subscription)),
+      nextStatus === SUBSCRIBER_STATUS.CANCELED ? nowIso() : null,
+      subscription.cancel_at_period_end ? 1 : 0,
+      nowIso(),
+      existingId,
+      SUBSCRIBER_STATUS.ACTIVE,
+      SUBSCRIBER_STATUS.PAST_DUE,
+    )
+    .run();
+  return existingId;
+}
+
 export async function updateSubscriberFromSubscription(env, subscription) {
   const subscriptionId = subscription.id || null;
   if (!subscriptionId) {
@@ -500,13 +747,14 @@ export async function updateSubscriberFromSubscription(env, subscription) {
   }
 
   const db = getDb(env);
+  let subscriber = await db
+    .prepare("SELECT * FROM notification_signups WHERE stripe_subscription_id = ?")
+    .bind(subscriptionId)
+    .first();
   const signupId = subscription.metadata?.signup_id || null;
-  const subscriber = signupId
-    ? await db.prepare("SELECT * FROM notification_signups WHERE id = ?").bind(signupId).first()
-    : await db
-        .prepare("SELECT * FROM notification_signups WHERE stripe_subscription_id = ?")
-        .bind(subscriptionId)
-        .first();
+  if (!subscriber && signupId) {
+    subscriber = await db.prepare("SELECT * FROM notification_signups WHERE id = ?").bind(signupId).first();
+  }
 
   if (!subscriber) {
     return null;
@@ -520,32 +768,58 @@ export async function updateSubscriberFromSubscription(env, subscription) {
         ? SUBSCRIBER_STATUS.CANCELED
         : SUBSCRIBER_STATUS.PAST_DUE;
 
-  await db
-    .prepare(
-      `
-        UPDATE notification_signups
-        SET
-          status = ?,
-          stripe_customer_id = COALESCE(?, stripe_customer_id),
-          stripe_subscription_id = ?,
-          current_period_end = ?,
-          canceled_at = ?,
-          stripe_cancel_at_period_end = ?,
-          updated_at = ?
-        WHERE id = ?
-      `,
-    )
-    .bind(
-      nextStatus,
-      subscription.customer || null,
-      subscriptionId,
-      unixSecondsToIso(getSubscriptionCurrentPeriodEnd(subscription)),
-      nextStatus === SUBSCRIBER_STATUS.CANCELED ? nowIso() : null,
-      subscription.cancel_at_period_end ? 1 : 0,
-      nowIso(),
+  try {
+    await db
+      .prepare(
+        `
+          UPDATE notification_signups
+          SET
+            status = ?,
+            stripe_customer_id = COALESCE(?, stripe_customer_id),
+            stripe_subscription_id = ?,
+            current_period_end = ?,
+            canceled_at = ?,
+            stripe_cancel_at_period_end = ?,
+            updated_at = ?
+          WHERE id = ?
+        `,
+      )
+      .bind(
+        nextStatus,
+        subscription.customer || null,
+        subscriptionId,
+        unixSecondsToIso(getSubscriptionCurrentPeriodEnd(subscription)),
+        nextStatus === SUBSCRIBER_STATUS.CANCELED ? nowIso() : null,
+        subscription.cancel_at_period_end ? 1 : 0,
+        nowIso(),
+        subscriber.id,
+      )
+      .run();
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) {
+      throw error;
+    }
+    const matches = await billableSubscribersByContactHashes(
+      env,
+      subscriber.email_hash,
+      subscriber.phone_hash,
+      subscriber.account_email_hash,
       subscriber.id,
-    )
-    .run();
+    );
+    const existing =
+      matches.find((match) => match.status === SUBSCRIBER_STATUS.ACTIVE) ||
+      choosePastDueSubscriberForCheckout(matches, {
+        emailHash: subscriber.email_hash,
+        phoneHash: subscriber.phone_hash,
+        accountEmailHash: subscriber.account_email_hash,
+      });
+    if (!existing) {
+      throw error;
+    }
+    await linkExistingSubscriberToSubscription(env, existing.id, subscription, nextStatus);
+    await cancelPendingSubscriberById(env, subscriber.id);
+    return existing.id;
+  }
 
   return subscriber.id;
 }
@@ -1410,6 +1684,15 @@ export async function beginAlertRecordSend(env, alertId, options = {}) {
           UPDATE notification_alerts
           SET
             status = 'processing',
+            subscriber_count = CASE WHEN status = 'completed_with_errors' THEN 0 ELSE subscriber_count END,
+            email_sent_count = CASE WHEN status = 'completed_with_errors' THEN 0 ELSE email_sent_count END,
+            sms_sent_count = CASE WHEN status = 'completed_with_errors' THEN 0 ELSE sms_sent_count END,
+            error_count = CASE WHEN status = 'completed_with_errors' THEN 0 ELSE error_count END,
+            fanout_after_created_at = CASE WHEN status = 'completed_with_errors' THEN '' ELSE fanout_after_created_at END,
+            fanout_after_id = CASE WHEN status = 'completed_with_errors' THEN '' ELSE fanout_after_id END,
+            fanout_batch_count = CASE WHEN status = 'completed_with_errors' THEN 0 ELSE fanout_batch_count END,
+            fanout_completed_at = CASE WHEN status = 'completed_with_errors' THEN NULL ELSE fanout_completed_at END,
+            sent_at = CASE WHEN status = 'completed_with_errors' THEN NULL ELSE sent_at END,
             fanout_lease_token = COALESCE(?, fanout_lease_token),
             fanout_lease_expires_at = COALESCE(?, fanout_lease_expires_at),
             updated_at = CURRENT_TIMESTAMP
@@ -1621,6 +1904,7 @@ export async function getProcessingAlertRecords(env, { limit = 10 } = {}) {
 
 export async function recordDelivery(env, delivery) {
   const messageTextCipher = await encryptString(env, delivery.messageText || null);
+  const timestamp = nowIso();
   await getDb(env)
     .prepare(
       `
@@ -1658,8 +1942,8 @@ export async function recordDelivery(env, delivery) {
       delivery.error ? String(delivery.error).slice(0, 1000) : null,
       messageTextCipher,
       delivery.subject ? String(delivery.subject).slice(0, 500) : null,
-      nowIso(),
-      nowIso(),
+      timestamp,
+      timestamp,
     )
     .run();
 }

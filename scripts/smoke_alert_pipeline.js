@@ -172,6 +172,7 @@ function assertDeployEnvFileLoading(tempRoot) {
     'TELNYX_PUBLIC_KEY=smoke-telnyx-public-key',
     'TELNYX_NUMBER=+14155552671',
     'SENDGRID_WEBHOOK_PUBLIC_KEY=smoke-sendgrid-webhook-public-key',
+    'SENDGRID_WEBHOOK_URL=https://alerts.example.test/api/sendgrid/webhook',
     'VITE_DASHBOARD_URL=https://alerts.example.test/dashboard.json',
     'VITE_MILITARY_DASHBOARD_URL=https://alerts.example.test/military-dashboard.json',
     'VITE_UNTRACKED_DASHBOARD_URL=https://alerts.example.test/untracked-dashboard.json',
@@ -243,6 +244,32 @@ async function assertPagesPipelineSmokeScript(token) {
       });
       return;
     }
+    if (url.pathname === '/api/admin/test-alert' && request.method === 'GET') {
+      sendJson(response, 200, {
+        ok: true,
+        deliveries: [
+          {
+            alert_id: 'smoke-admin-test',
+            channel: 'email',
+            delivery_status: 'sent',
+            provider_message_id: 'sg-smoke-message',
+            provider_status: 'processed',
+            delivery_created_at: '2026-06-23T00:00:00.000Z',
+            delivery_updated_at: '2026-06-23T00:00:05.000Z',
+          },
+          {
+            alert_id: 'smoke-admin-test',
+            channel: 'sms',
+            delivery_status: 'delivered',
+            provider_message_id: 'telnyx-smoke-message',
+            provider_status: 'delivered',
+            delivery_created_at: '2026-06-23T00:00:00.000Z',
+            delivery_updated_at: '2026-06-23T00:00:05.000Z',
+          },
+        ],
+      });
+      return;
+    }
     if (url.pathname === '/api/alerts') {
       sendJson(response, 200, { events: [{ id: 'alert-smoke' }] });
       return;
@@ -277,7 +304,8 @@ async function assertPagesPipelineSmokeScript(token) {
     assert(payload.requireTestDelivery === true, 'Pages smoke script did not record test-delivery requirement.');
     assert(payload.testDelivery?.emailSentCount === 1, 'Pages smoke script did not verify the test email delivery.');
     assert(payload.testDelivery?.smsSentCount === 1, 'Pages smoke script did not verify the test SMS delivery.');
-    assert(payload.testDelivery?.evidence === 'provider_api_acceptance', 'Pages smoke script did not label provider acceptance evidence.');
+    assert(payload.testDelivery?.evidence === 'provider_webhook_status', 'Pages smoke script did not require provider webhook status evidence.');
+    assert(payload.testDelivery?.webhookDeliveryCount === 2, 'Pages smoke script did not verify both provider webhook statuses.');
     assert(testAlertPosts === 1, 'Pages smoke script did not call the admin test-alert endpoint exactly once.');
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -493,6 +521,18 @@ async function assertLocalDispatchSkipsRawTakeoffTelemetry() {
     JSON.stringify({ signalFamily: 'takeoff_rate' }),
     'pending',
   );
+  insertAlert.run(
+    'takeoff_rate_anomaly',
+    'critical',
+    'global_business_jet',
+    'local-dispatch-active-processing',
+    '2026-06-23T00:02:00.000Z',
+    'Active processing takeoff-rate anomaly',
+    'Active processing takeoff-rate anomaly message',
+    JSON.stringify({ signalFamily: 'takeoff_rate' }),
+    'processing',
+  );
+  db.prepare("UPDATE alert_events SET dispatched_at = CURRENT_TIMESTAMP WHERE event_key = 'local-dispatch-active-processing'").run();
 
   const originalFetch = globalThis.fetch;
   const providerRequests = [];
@@ -504,11 +544,13 @@ async function assertLocalDispatchSkipsRawTakeoffTelemetry() {
     const summary = await dispatchPendingAlerts(db, env, { limit: 10 });
     assert(summary.alerts === 1, 'Local dispatch did not limit work to alertable events.');
     assert(providerRequests.length === 1, 'Local dispatch sent raw telemetry or skipped the alertable anomaly.');
-    const statuses = db.prepare('SELECT kind, status FROM alert_events ORDER BY kind ASC').all();
-    const rawBatch = statuses.find((event) => event.kind === 'takeoff_batch');
-    const rateAnomaly = statuses.find((event) => event.kind === 'takeoff_rate_anomaly');
+    const statuses = db.prepare('SELECT kind, event_key, status FROM alert_events ORDER BY kind ASC, event_key ASC').all();
+    const rawBatch = statuses.find((event) => event.event_key === 'local-dispatch-batch');
+    const rateAnomaly = statuses.find((event) => event.event_key === 'local-dispatch-rate');
+    const activeProcessing = statuses.find((event) => event.event_key === 'local-dispatch-active-processing');
     assert(rawBatch?.status === 'observed', 'Local dispatch did not demote raw takeoff batch telemetry.');
     assert(rateAnomaly?.status === 'sent', 'Local dispatch did not send the alertable takeoff-rate anomaly.');
+    assert(activeProcessing?.status === 'processing', 'Local dispatch reclaimed an active processing alert without a stale lease.');
   } finally {
     globalThis.fetch = originalFetch;
     db.close();
@@ -633,6 +675,7 @@ async function assertPagesPipelineStatus(token) {
     SENDGRID_API_KEY: 'smoke-sendgrid-key',
     SENDGRID_FROM_EMAIL: 'alerts@example.test',
     SENDGRID_WEBHOOK_PUBLIC_KEY: 'smoke-sendgrid-webhook-public-key',
+    SENDGRID_WEBHOOK_URL: 'https://alerts.example.test/api/sendgrid/webhook',
     TELNYX_API_KEY: 'smoke-telnyx-key',
     TELNYX_MESSAGING_PROFILE_ID: 'smoke-profile-id',
     TELNYX_PUBLIC_KEY: 'smoke-public-key',
@@ -992,6 +1035,34 @@ async function assertAlertEventEndpointFailureStatus(token) {
     assert(response.status === 502, `Alert event endpoint returned ${response.status}, not 502, for failed fanout.`);
     assert(payload.ok === false, 'Alert event endpoint did not report ok=false for failed fanout.');
     assert(payload.results?.[0]?.ok === false, 'Alert event endpoint did not preserve the failed fanout result.');
+    const skipResponse = await onRequestPost({
+      request: new Request('https://alerts.example.test/api/internal/alert-events', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          event: {
+            eventKey: 'smoke-raw-takeoff-batch',
+            kind: 'takeoff_batch',
+            cohort: 'global_business_jet',
+            title: 'Raw takeoff telemetry',
+            message: 'Raw takeoff telemetry message',
+            severity: 'watch',
+            level: 1,
+            occurredAt: '2026-06-23T00:00:00.000Z',
+          },
+        }),
+      }),
+      env,
+    });
+    const skipPayload = await skipResponse.json();
+    assert(skipResponse.status === 200, `Non-alertable event returned ${skipResponse.status}: ${JSON.stringify(skipPayload)}`);
+    assert(skipPayload.ok === true, 'Non-alertable event did not return ok=true.');
+    assert(skipPayload.results?.[0]?.reason === 'non_alertable_event_kind', 'Non-alertable event was not skipped before fanout.');
+    const rawAlertCount = db.prepare("SELECT COUNT(*) AS count FROM notification_alerts WHERE kind = 'takeoff_batch'").get().count;
+    assert(rawAlertCount === 0, 'Non-alertable raw telemetry created a notification alert record.');
   } finally {
     globalThis.fetch = originalFetch;
     db.close();
@@ -1146,12 +1217,18 @@ async function assertSingleTakeoffDuringConcurrentAnomalySuppressed() {
       baselineMean: 10,
       zScore: 4,
       emergencyLevel: 4,
+      modelReady: true,
+      weeklyBaselineSampleCount: 336,
+      requiredHistorySampleCount: 336,
     },
     signals: {
       composite: {
         emergencyLevel: 4,
         sigmaShift: 4,
         expectedConcurrentCount: 10,
+        modelReady: true,
+        weeklyBaselineSampleCount: 336,
+        requiredHistorySampleCount: 336,
       },
     },
   });
@@ -1174,6 +1251,180 @@ async function assertSingleTakeoffDuringConcurrentAnomalySuppressed() {
   db.close();
 }
 
+async function assertConcurrentAnomalyRequiresReadyBaseline() {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-concurrent-readiness-'));
+  const dbPath = path.join(tempRoot, 'ews.sqlite');
+  const snapshotPath = path.join(tempRoot, 'dashboard.json');
+  const db = new Database(dbPath);
+  db.exec(fs.readFileSync(path.join(ROOT_DIR, 'schema.sql'), 'utf8'));
+  const observedAt = '2026-06-23T12:00:00.000Z';
+  const insertTakeoff = db.prepare(`
+    INSERT INTO takeoff_events (
+      cohort,
+      hex,
+      registration,
+      label,
+      source,
+      observed_at,
+      previous_observed_at,
+      altitude_ft,
+      ground_speed_kt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (let index = 0; index < 3; index += 1) {
+    insertTakeoff.run(
+      'global_business_jet',
+      `abc12${index}`,
+      `N12${index}`,
+      `Sparse Current ${index}`,
+      'smoke',
+      observedAt,
+      '2026-06-23T11:30:00.000Z',
+      1600 + index,
+      180 + index,
+    );
+  }
+  writeJson(snapshotPath, {
+    current: {
+      asOf: observedAt,
+      concurrentCount: 70,
+      baselineMean: 10,
+      zScore: 8,
+      emergencyLevel: 5,
+      modelReady: false,
+      weeklyBaselineSampleCount: 1,
+      requiredHistorySampleCount: 336,
+    },
+    signals: {
+      composite: {
+        emergencyLevel: 5,
+        sigmaShift: 8,
+        expectedConcurrentCount: 10,
+        modelReady: false,
+        weeklyBaselineSampleCount: 1,
+        requiredHistorySampleCount: 336,
+      },
+    },
+  });
+
+  await execNode([
+    'scripts/detect_alert_events.js',
+    '--db',
+    dbPath,
+    '--snapshot',
+    snapshotPath,
+    '--cohort',
+    'global_business_jet',
+    '--anomaly-level',
+    '5',
+    '--takeoff-batch-min',
+    '3',
+    '--takeoff-anomaly-level',
+    '4',
+  ]);
+  const alerts = db.prepare('SELECT kind, status FROM alert_events ORDER BY kind ASC').all();
+  assert(alerts.length === 1 && alerts[0].kind === 'takeoff_batch' && alerts[0].status === 'observed', 'Underpowered concurrent baseline should only emit observed takeoff telemetry.');
+  db.close();
+}
+
+
+
+async function assertAlertEventBridgePosts(dbPath, token, statusPath) {
+  const alertEventKey = 'bridge-post-smoke-event';
+  const db = new Database(dbPath);
+  db.prepare(`
+    INSERT INTO alert_events (
+      kind,
+      severity,
+      cohort,
+      event_key,
+      occurred_at,
+      title,
+      message,
+      payload_json,
+      status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(event_key) DO NOTHING
+  `).run(
+    'takeoff_rate_anomaly',
+    'critical',
+    'global_business_jet',
+    alertEventKey,
+    '2026-06-23T00:30:00.000Z',
+    'Bridge post smoke',
+    'Bridge post smoke message',
+    JSON.stringify({ emergencyLevel: 4, takeoffCount: 9, signalFamily: 'takeoff_rate' }),
+    'pending',
+  );
+  db.close();
+
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  let receivedPayload = null;
+  let receivedAuth = null;
+  const server = http.createServer((request, response) => {
+    const requestUrl = new URL(request.url, baseUrl);
+    if (request.method !== 'POST' || requestUrl.pathname !== '/api/internal/alert-events') {
+      sendJson(response, 404, { error: 'not found' });
+      return;
+    }
+    receivedAuth = request.headers.authorization || '';
+    const chunks = [];
+    request.on('data', (chunk) => {
+      chunks.push(chunk);
+    });
+    request.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8');
+      receivedPayload = JSON.parse(text);
+      sendJson(response, 200, {
+        ok: true,
+        results: receivedPayload.events.map((event) => ({ ok: true, eventKey: event.eventKey })),
+      });
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  try {
+    const bridgeRun = await execNode(
+      [
+        'scripts/bridge_alert_events.js',
+        '--db',
+        dbPath,
+        '--limit',
+        '5',
+        '--url',
+        `${baseUrl}/api/internal/alert-events`,
+        '--status-path',
+        statusPath,
+      ],
+      { env: { ...process.env, INTERNAL_ALERT_TOKEN: token } },
+    );
+    const bridgeOutput = JSON.parse(bridgeRun.stdout.trim());
+    const bridgeStatus = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+    assert(receivedAuth === `Bearer ${token}`, 'Bridge did not authenticate with the configured internal token.');
+    assert(receivedPayload?.source === 'local_refresh', 'Bridge did not identify the local refresh source.');
+    assert(Array.isArray(receivedPayload?.events), 'Bridge did not post an events array.');
+    assert(receivedPayload.events.some((event) => event.eventKey === alertEventKey), 'Bridge did not post the queued alert event.');
+    assert(bridgeOutput.ok === true && bridgeOutput.skipped === false, 'Bridge success run did not report ok=true.');
+    assert(bridgeOutput.postedEvents >= 1, 'Bridge success run did not report posted events.');
+    assert(bridgeStatus.ok === true && bridgeStatus.skipped === false, 'Bridge status file did not persist successful posting.');
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+}
 
 async function main() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-alert-smoke-'));
@@ -1210,6 +1461,7 @@ async function main() {
     SENDGRID_API_KEY: 'smoke-sendgrid-key',
     SENDGRID_FROM_EMAIL: 'alerts@example.test',
     SENDGRID_WEBHOOK_PUBLIC_KEY: 'smoke-sendgrid-webhook-public-key',
+    SENDGRID_WEBHOOK_URL: 'https://alerts.example.test/api/sendgrid/webhook',
     TELNYX_API_KEY: 'smoke-telnyx-key',
     TELNYX_NUMBER: '+14155552671',
     TELEGRAM_BOT_TOKEN: 'smoke-telegram-token',
@@ -1271,6 +1523,8 @@ async function main() {
     const alertsFeed = await waitForJson(`${baseUrl}/alerts.json`);
     assert(alertsFeed.payload.events.length === 1, 'Alerts JSON route did not return the published event.');
 
+
+    await assertAlertEventBridgePosts(dbPath, token, path.join(tempRoot, 'bridge-post-status.json'));
     const bridgeRun = await execNode(
       ['scripts/bridge_alert_events.js', '--db', dbPath, '--limit', '1', '--url', '', '--status-path', bridgeStatusPath],
       { env: { ...process.env, EWS_ALERT_EVENTS_WEBHOOK_URL: '', INTERNAL_ALERT_TOKEN: token } },
@@ -1284,6 +1538,7 @@ async function main() {
     await assertPagesPipelineStatus(token);
     await assertTakeoffRateDetection();
     await assertSingleTakeoffDuringConcurrentAnomalySuppressed();
+    await assertConcurrentAnomalyRequiresReadyBaseline();
     await assertPagesPipelineSmokeScript(token);
     await assertManualSubscriberValidation();
     await assertSendGridWebhookDeliveryStatus();

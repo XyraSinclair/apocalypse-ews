@@ -36,6 +36,7 @@ const DEFAULT_RENEWAL_REMINDER_DAYS_BEFORE = 30;
 const DEFAULT_RENEWAL_REMINDER_BATCH_LIMIT = 100;
 const DEFAULT_RENEWAL_REMINDER_CONCURRENCY = 4;
 const DEFAULT_ALERT_FANOUT_LEASE_MS = 30 * 60 * 1000;
+const ALERTABLE_EVENT_KINDS = new Set(["statistical_anomaly", "takeoff_anomaly", "takeoff_rate_anomaly"]);
 const RENEWAL_REMINDER_KIND = "renewal_reminder";
 const RENEWAL_REMINDER_SOURCE = "scheduled_renewal_reminder";
 const RENEWAL_REMINDER_SUBJECT_PREFIX = "Your Apocalypse EWS subscription renews on";
@@ -628,6 +629,7 @@ async function sendAlertToSubscribers(
     concurrency = 1,
     smsMinIntervalMs = 0,
     updateRecord = true,
+    renewFanoutLease = null,
   },
 ) {
   const summary = {
@@ -682,6 +684,9 @@ async function sendAlertToSubscribers(
       }
 
       subscriberSummary.emailEligibleCount += 1;
+      if (renewFanoutLease) {
+        await renewFanoutLease();
+      }
       const result = await sendDelivery(env, {
         alertId,
         subscriberId: hydrated.id,
@@ -701,6 +706,9 @@ async function sendAlertToSubscribers(
     if (hydrated.wantsSms && hydrated.phone && safelyIsSupportedSmsPhone(hydrated.phone)) {
       subscriberSummary.smsEligibleCount += 1;
       await smsPacer.wait();
+      if (renewFanoutLease) {
+        await renewFanoutLease();
+      }
       const result = await sendDelivery(env, {
         alertId,
         subscriberId: hydrated.id,
@@ -805,6 +813,28 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
   };
   let afterCreatedAt = String(options.afterCreatedAt || "");
   let afterId = String(options.afterId || "");
+  let lastLeaseRenewedAt = 0;
+  const renewIntervalMs = Math.max(1000, Math.floor(Number(options.leaseMs || DEFAULT_ALERT_FANOUT_LEASE_MS) / 3));
+  async function renewFanoutLease(force = false) {
+    if (!options.alertId || !options.leaseToken) {
+      return;
+    }
+    if (!force && Date.now() - lastLeaseRenewedAt < renewIntervalMs) {
+      return;
+    }
+    const progressUpdated = await updateAlertFanoutProgress(
+      env,
+      options.alertId,
+      { subscriberCount: 0, emailSentCount: 0, smsSentCount: 0, errorCount: 0, batchCount: 0 },
+      { afterCreatedAt, afterId },
+      "processing",
+      nextAlertFanoutLease(options.leaseToken, options.leaseMs),
+    );
+    if (!progressUpdated) {
+      throw new Error(`Alert fanout lease lost before sending batch for ${options.alertId}.`);
+    }
+    lastLeaseRenewedAt = Date.now();
+  }
 
   while (summary.batchCount < maxBatches) {
     const subscribers = await getActiveSubscriberBatch(env, { afterCreatedAt, afterId, limit: batchSize });
@@ -813,9 +843,17 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
       break;
     }
     const lastSubscriber = subscribers[subscribers.length - 1];
-    afterCreatedAt = String(lastSubscriber.created_at || "");
-    afterId = String(lastSubscriber.id || "");
-    const batchSummary = await sendAlertToSubscribers(env, { ...options, subscribers, updateRecord: false });
+    const nextAfterCreatedAt = String(lastSubscriber.created_at || "");
+    const nextAfterId = String(lastSubscriber.id || "");
+    await renewFanoutLease(true);
+    const batchSummary = await sendAlertToSubscribers(env, {
+      ...options,
+      subscribers,
+      updateRecord: false,
+      renewFanoutLease,
+    });
+    afterCreatedAt = nextAfterCreatedAt;
+    afterId = nextAfterId;
     mergeAlertSummaries(summary, batchSummary);
     summary.batchCount += 1;
     const progressUpdated = await updateAlertFanoutProgress(
@@ -1409,6 +1447,16 @@ export async function continueAlertFanoutBatch(env, { limit = 10 } = {}) {
 
 export async function sendAlertEventNotifications(env, rawEvent, { source = "alert_event_bridge" } = {}) {
   const event = normalizeExternalAlertEvent(rawEvent);
+  if (!ALERTABLE_EVENT_KINDS.has(event.kind)) {
+    return {
+      ok: true,
+      sent: false,
+      reason: "non_alertable_event_kind",
+      kind: event.kind,
+      cohort: event.cohort,
+      eventKey: event.eventKey,
+    };
+  }
   const alertId = externalAlertRecordId(event);
   const messageText = formatExternalAlertMessage(env, event);
   const smsMessageText = formatExternalAlertSms(event);

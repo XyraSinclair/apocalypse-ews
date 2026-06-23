@@ -126,7 +126,7 @@ export async function onRequestPost({ request, env }) {
   try {
     const rawBody = await request.text();
     if (!hasTelnyxWebhookVerificationKey(env)) {
-      return telnyxWebhookResponse({ ignored: true, reason: "missing_telnyx_public_key" });
+      throw new HttpError(503, "Telnyx webhook verification is not configured.");
     }
 
     await verifyTelnyxWebhook(request, env, rawBody);

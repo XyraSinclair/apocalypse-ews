@@ -139,7 +139,7 @@ function hasTelnyxDeliveryStatusPath() {
 }
 
 function hasSendGridDeliveryStatusPath() {
-  return hasHttpsEnv("SENDGRID_WEBHOOK_URL") || hasHttpsEnv("APP_BASE_URL") || hasHttpsEnv("EWS_PUBLIC_URL");
+  return hasHttpsEnv("SENDGRID_WEBHOOK_URL");
 }
 
 function hasBase64EncodedBytes(value, byteLength) {

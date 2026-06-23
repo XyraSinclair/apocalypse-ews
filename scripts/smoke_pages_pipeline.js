@@ -77,6 +77,46 @@ async function readJson(url, options = {}) {
   const payload = text ? JSON.parse(text) : null;
   return { response, payload, text };
 }
+const WEBHOOK_EVIDENCE_STATUSES = new Set(['sent', 'delivered', 'failed', 'undelivered', 'unconfirmed']);
+
+function hasWebhookStatusEvidence(delivery) {
+  return Boolean(
+    delivery?.provider_message_id &&
+      delivery?.provider_status &&
+      WEBHOOK_EVIDENCE_STATUSES.has(String(delivery.delivery_status || '').trim()) &&
+      delivery.delivery_created_at &&
+      delivery.delivery_updated_at &&
+      delivery.delivery_updated_at !== delivery.delivery_created_at,
+  );
+}
+
+async function pollTestDeliveryEvidence(alertId, requestedChannels) {
+  const startedAt = Date.now();
+  let latestDeliveries = [];
+  while (Date.now() - startedAt < 180_000) {
+    const { response, payload, text } = await readJson(`${targetUrl}/api/admin/test-alert?limit=100`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert(response.ok, `Delivery history returned HTTP ${response.status}: ${text}`);
+    latestDeliveries = Array.isArray(payload?.deliveries) ? payload.deliveries : [];
+    const matchingDeliveries = latestDeliveries.filter((delivery) => delivery.alert_id === alertId);
+    const observedChannels = new Set(
+      matchingDeliveries
+        .filter(hasWebhookStatusEvidence)
+        .map((delivery) => delivery.channel),
+    );
+    if (requestedChannels.every((channel) => observedChannels.has(channel))) {
+      return matchingDeliveries.filter((delivery) => requestedChannels.includes(delivery.channel));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  const latestChannels = latestDeliveries
+    .filter((delivery) => delivery.alert_id === alertId)
+    .map((delivery) => `${delivery.channel}:${delivery.delivery_status}:${delivery.provider_status || 'no_provider_status'}`)
+    .join(', ');
+  throw new Error(`Timed out waiting for provider webhook status evidence for ${alertId}: ${latestChannels || 'no matching deliveries'}.`);
+}
+
 
 async function expectPublicJson(pathname, itemKey) {
   const { response, payload, text } = await readJson(`${targetUrl}${pathname}`);
@@ -159,13 +199,24 @@ async function main() {
     if (testPhone) {
       assert(Number(testPayload.smsSentCount || 0) > 0, 'Test alert did not send an SMS.');
     }
+    if (requireTestDelivery) {
+      assert(testPayload.alertId, 'Test alert did not return an alertId for webhook evidence polling.');
+    }
+    const requestedChannels = [
+      testEmail ? 'email' : null,
+      testPhone ? 'sms' : null,
+    ].filter(Boolean);
+    const webhookDeliveries = requireTestDelivery
+      ? await pollTestDeliveryEvidence(testPayload.alertId, requestedChannels)
+      : [];
     testDelivery = {
       ok: true,
       alertId: testPayload.alertId || null,
       emailSentCount: Number(testPayload.emailSentCount || 0),
       smsSentCount: Number(testPayload.smsSentCount || 0),
       errorCount: Number(testPayload.errorCount || 0),
-      evidence: 'provider_api_acceptance',
+      evidence: requireTestDelivery ? 'provider_webhook_status' : 'provider_api_acceptance',
+      webhookDeliveryCount: webhookDeliveries.length,
     };
   }
 

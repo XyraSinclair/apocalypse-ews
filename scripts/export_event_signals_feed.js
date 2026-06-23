@@ -8,11 +8,13 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 const PUBLISHED_DIR = path.join(DATA_DIR, 'published');
 const MAIN_DB = process.env.EWS_DB_PATH || path.join(DATA_DIR, 'ews-main.sqlite');
+const MILITARY_DB = process.env.EWS_MILITARY_DB_PATH || path.join(DATA_DIR, 'ews-military.sqlite');
+const UNTRACKED_DB = process.env.EWS_UNTRACKED_DB_PATH || path.join(DATA_DIR, 'ews-untracked.sqlite');
 const RESEARCH_JSON = path.join(ROOT_DIR, 'localized_event_signal_research.json');
 const SNAPSHOT_FILES = [
-  { fileName: 'dashboard.json', fallbackCohort: 'global_business_jet', label: 'Business jet cohort' },
-  { fileName: 'military-dashboard.json', fallbackCohort: 'global_military_aircraft', label: 'Military aircraft cohort' },
-  { fileName: 'untracked-dashboard.json', fallbackCohort: 'non_icao_untracked', label: 'Untracked aircraft cohort' },
+  { fileName: 'dashboard.json', dbPath: MAIN_DB, fallbackCohort: 'global_business_jet', label: 'Business jet cohort' },
+  { fileName: 'military-dashboard.json', dbPath: MILITARY_DB, fallbackCohort: 'global_military_aircraft', label: 'Military aircraft cohort' },
+  { fileName: 'untracked-dashboard.json', dbPath: UNTRACKED_DB, fallbackCohort: 'non_icao_untracked', label: 'Untracked aircraft cohort' },
 ];
 const ALERT_SIGNAL_KINDS = new Set(['statistical_anomaly', 'takeoff_anomaly', 'takeoff_rate_anomaly']);
 
@@ -33,21 +35,57 @@ function formatCohortLabel(snapshot, fallback) {
   return snapshot?.cohort?.sourceLabel || snapshot?.cohort?.source || fallback;
 }
 
+function latestConcurrentSampledAt(dbPath) {
+  if (!fs.existsSync(dbPath)) {
+    throw new Error(`Current signal source database is missing: ${dbPath}`);
+  }
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const row = db.prepare('SELECT MAX(sampled_at) AS latestSampledAt FROM concurrent_metrics').get();
+    return row?.latestSampledAt || null;
+  } finally {
+    db.close();
+  }
+}
+
+function assertSnapshotFresh(snapshotPath, snapshot, dbPath) {
+  const current = snapshot.current || {};
+  const composite = snapshot.signals?.composite || {};
+  const observedAt = current.asOf || composite.asOf || snapshot.liveStatus?.latestSampledAt || null;
+  if (!observedAt) {
+    throw new Error(`Current signal snapshot has no observation timestamp: ${snapshotPath}`);
+  }
+  const latestSampledAt = latestConcurrentSampledAt(dbPath);
+  if (!latestSampledAt) {
+    throw new Error(`Current signal source database has no concurrent_metrics rows: ${dbPath}`);
+  }
+  const observedMs = Date.parse(observedAt);
+  const latestMs = Date.parse(latestSampledAt);
+  if (!Number.isFinite(observedMs) || !Number.isFinite(latestMs)) {
+    throw new Error(`Current signal freshness comparison has invalid timestamps: ${snapshotPath}`);
+  }
+  if (observedMs !== latestMs) {
+    throw new Error(`Current signal snapshot timestamp mismatch: ${snapshotPath} observes ${observedAt}, database latest is ${latestSampledAt}.`);
+  }
+  return observedAt;
+}
+
 function recordsFromCurrentSnapshots() {
-  return SNAPSHOT_FILES.flatMap(({ fileName, fallbackCohort, label }) => {
+  return SNAPSHOT_FILES.map(({ fileName, dbPath, fallbackCohort, label }) => {
     const snapshotPath = path.join(PUBLISHED_DIR, fileName);
-    if (!fs.existsSync(snapshotPath)) return [];
+    if (!fs.existsSync(snapshotPath)) {
+      throw new Error(`Current signal snapshot is missing: ${snapshotPath}`);
+    }
     const snapshot = parseJson(fs.readFileSync(snapshotPath, 'utf8'), {});
     const current = snapshot.current || {};
     const composite = snapshot.signals?.composite || {};
-    const observedAt = current.asOf || composite.asOf || snapshot.liveStatus?.latestSampledAt || snapshot.snapshotGeneratedAt || null;
-    if (!observedAt) return [];
+    const observedAt = assertSnapshotFresh(snapshotPath, snapshot, dbPath);
     const cohort = snapshot.cohort?.source || fallbackCohort;
     const emergencyLevel = Number(composite.emergencyLevel ?? current.emergencyLevel ?? 1);
     const actualConcurrentCount = Number(composite.actualConcurrentCount ?? current.concurrentCount ?? 0);
     const expectedConcurrentCount = Number(composite.expectedConcurrentCount ?? current.baselineMean ?? 0);
     const sigmaShift = Number(composite.sigmaShift ?? current.zScore ?? 0);
-    return [{
+    return {
       id: `current:${cohort}`,
       source: 'current_dashboard_snapshot',
       event: `${formatCohortLabel(snapshot, label)} current anomaly monitor`,
@@ -71,7 +109,7 @@ function recordsFromCurrentSnapshots() {
       provenance: `${cohort}: current concurrent-count monitor vs rolling baseline.`,
       status: 'current',
       alertEventKey: null,
-    }];
+    };
   });
 }
 

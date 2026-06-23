@@ -354,6 +354,7 @@ def parse_non_icao_metric_heatmap(filename):
     observation_count = 0
     airborne_observation_count = 0
     peak_airborne_unique_hex_count = 0
+    peak_airborne_sampled_at = None
 
     while index < len(points):
         now = int(points_u[index + 2]) / 1000 + int(points_u[index + 1]) * 4294967.296
@@ -391,17 +392,21 @@ def parse_non_icao_metric_heatmap(filename):
 
             index += 4
 
-        peak_airborne_unique_hex_count = max(peak_airborne_unique_hex_count, len(slice_airborne_hexes))
+        if len(slice_airborne_hexes) > peak_airborne_unique_hex_count:
+            peak_airborne_unique_hex_count = len(slice_airborne_hexes)
+            peak_airborne_sampled_at = sampled_at
 
     if sampled_at is None:
         return None, None
 
     sampled_at_iso = sampled_at.isoformat()
+    peak_airborne_sampled_at_iso = (peak_airborne_sampled_at or sampled_at).isoformat()
     return sampled_at, {
         "sampled_at": sampled_at_iso,
         "unique_hex_count": len(unique_hexes),
         "airborne_unique_hex_count": len(airborne_unique_hexes),
         "peak_airborne_unique_hex_count": peak_airborne_unique_hex_count,
+        "peak_airborne_sampled_at": peak_airborne_sampled_at_iso,
         "observation_count": observation_count,
         "airborne_observation_count": airborne_observation_count,
         "message_type_counts_json": json.dumps(dict(sorted(message_type_counts.items())), separators=(",", ":")),
@@ -445,6 +450,12 @@ def upsert_dashboard_concurrent_metric(connection, metric_row):
         "peak_airborne_unique_hex_count",
         metric_row["airborne_unique_hex_count"],
     )
+    concurrent_sampled_at = metric_row.get("peak_airborne_sampled_at") or metric_row["sampled_at"]
+    if concurrent_sampled_at != metric_row["sampled_at"]:
+        connection.execute(
+            "DELETE FROM concurrent_metrics WHERE sampled_at = ?",
+            (metric_row["sampled_at"],),
+        )
     connection.execute(
         """
         INSERT INTO concurrent_metrics (sampled_at, concurrent_count)
@@ -452,7 +463,7 @@ def upsert_dashboard_concurrent_metric(connection, metric_row):
         ON CONFLICT(sampled_at) DO UPDATE SET
           concurrent_count = excluded.concurrent_count
         """,
-        (metric_row["sampled_at"], concurrent_count),
+        (concurrent_sampled_at, concurrent_count),
     )
 
 
@@ -476,6 +487,7 @@ def ingest_file(connection, cache_path, metrics_only=False, write_concurrent_met
             "cache_path": str(cache_path),
             "airborne_unique_hex_count": metric_row["airborne_unique_hex_count"],
             "peak_airborne_unique_hex_count": metric_row["peak_airborne_unique_hex_count"],
+            "peak_airborne_sampled_at": metric_row["peak_airborne_sampled_at"],
         }
 
     sampled_at, summaries = parse_non_icao_heatmap(cache_path)
@@ -542,14 +554,20 @@ def ingest_file(connection, cache_path, metrics_only=False, write_concurrent_met
         )
 
     metric_row = build_metric_row(sampled_at_iso, summaries)
+    dashboard_metric_row = metric_row
+    if write_concurrent_metrics:
+        _, parsed_dashboard_metric_row = parse_non_icao_metric_heatmap(cache_path)
+        dashboard_metric_row = parsed_dashboard_metric_row or metric_row
     insert_non_icao_metric_row(connection, metric_row)
     if write_concurrent_metrics:
-        upsert_dashboard_concurrent_metric(connection, metric_row)
+        upsert_dashboard_concurrent_metric(connection, dashboard_metric_row)
 
     return len(summaries), sum(summary["observation_count"] for summary in summaries), {
         "sampled_at": sampled_at_iso,
         "cache_path": str(cache_path),
         "airborne_unique_hex_count": metric_row["airborne_unique_hex_count"],
+        "peak_airborne_unique_hex_count": dashboard_metric_row.get("peak_airborne_unique_hex_count"),
+        "peak_airborne_sampled_at": dashboard_metric_row.get("peak_airborne_sampled_at"),
     }
 
 

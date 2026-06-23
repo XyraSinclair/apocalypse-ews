@@ -68,7 +68,7 @@ export async function onRequestPost({ request, env }) {
   try {
     const rawBodyBytes = new Uint8Array(await request.arrayBuffer());
     if (!hasSendGridWebhookVerificationKey(env)) {
-      return sendGridWebhookResponse({ ignored: true, reason: "missing_sendgrid_webhook_public_key" });
+      throw new HttpError(503, "SendGrid webhook verification is not configured.");
     }
 
     await verifySendGridWebhook(request, env, rawBodyBytes);

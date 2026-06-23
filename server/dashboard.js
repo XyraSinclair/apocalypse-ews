@@ -1509,7 +1509,9 @@ function buildWeeklyBaselinePrediction(referenceIso, concurrentCount, state) {
     (expectedConcurrentStdDev * calendarRatio) ** 2 +
       (expectedConcurrentCount * calendarRatioStdDev) ** 2,
   );
-  const modelReady = Boolean(slotStats?.sampleCount);
+  const modelReady =
+    state.weeklyBaselineSampleCount >= CONCURRENT_MIN_HISTORY_SAMPLES &&
+    Boolean(slotStats?.sampleCount);
   const divergence = modelReady ? fallbackCount - scaledExpectedConcurrentCount : 0;
   const sigmaShift =
     modelReady && scaledExpectedConcurrentStdDev ? divergence / scaledExpectedConcurrentStdDev : 0;
@@ -1560,6 +1562,10 @@ function buildWeeklyBaselinePrediction(referenceIso, concurrentCount, state) {
     expectedConcurrentCount: modelReady ? scaledExpectedConcurrentCount : fallbackCount,
     expectedConcurrentStdDev: modelReady ? scaledExpectedConcurrentStdDev : 0,
     weeklySampleCount: slotStats?.sampleCount ?? 0,
+    historySampleCount: state.historySampleCount,
+    baselineHistorySampleCount: state.baselineHistorySampleCount,
+    weeklyBaselineSampleCount: state.weeklyBaselineSampleCount,
+    requiredHistorySampleCount: CONCURRENT_MIN_HISTORY_SAMPLES,
     calendarLearningResidual: 0,
     sigmaShift,
     divergence,
@@ -2106,15 +2112,21 @@ function buildDashboardPayload({
       varianceAdjustedZScore: currentModel.compositeSignal.varianceAdjustedSigmaShift,
       absoluteExcessWeight: currentModel.compositeSignal.absoluteExcessWeight,
       gaugeValue: currentModel.compositeSignal.gaugeValue,
-      alertLevel: currentModel.compositeSignal.alertLevel,
-      emergencyLevel: currentModel.compositeSignal.emergencyLevel,
+      modelReady: currentModel.modelReady === true,
+      alertLevel: currentModel.modelReady === true ? currentModel.compositeSignal.alertLevel : "normal",
+      emergencyLevel: currentModel.modelReady === true ? currentModel.compositeSignal.emergencyLevel : 1,
       alarmSigmaThreshold: currentModel.alarmSigmaThreshold,
       elevatedSigmaThreshold: currentModel.elevatedSigmaThreshold,
+      historySampleCount: currentModel.historySampleCount,
+      baselineHistorySampleCount: currentModel.baselineHistorySampleCount,
+      weeklyBaselineSampleCount: currentModel.weeklyBaselineSampleCount,
+      requiredHistorySampleCount: currentModel.requiredHistorySampleCount,
     },
     signals: {
       composite: {
         asOf: referenceIso,
         actualConcurrentCount: concurrentCount,
+        modelReady: currentModel.modelReady === true,
         expectedConcurrentCount: currentModel.expectedConcurrentCount,
         expectedConcurrentStdDev: currentModel.expectedConcurrentStdDev,
         effectiveConcurrentStdDev:
@@ -2157,11 +2169,15 @@ function buildDashboardPayload({
         weeklySampleCount: currentModel.weeklySampleCount,
         timeOfDaySampleCount: currentModel.timeOfDaySampleCount,
         timeOfWeekSampleCount: currentModel.timeOfWeekSampleCount,
+        historySampleCount: currentModel.historySampleCount,
+        baselineHistorySampleCount: currentModel.baselineHistorySampleCount,
+        weeklyBaselineSampleCount: currentModel.weeklyBaselineSampleCount,
+        requiredHistorySampleCount: currentModel.requiredHistorySampleCount,
         timeOfWeekBlendWeight: currentModel.timeOfWeekBlendWeight,
         sigmaShift: currentModel.compositeSignal.sigmaShift,
         gaugeValue: currentModel.compositeSignal.gaugeValue,
-        alertLevel: currentModel.compositeSignal.alertLevel,
-        emergencyLevel: currentModel.compositeSignal.emergencyLevel,
+        alertLevel: currentModel.modelReady === true ? currentModel.compositeSignal.alertLevel : "normal",
+        emergencyLevel: currentModel.modelReady === true ? currentModel.compositeSignal.emergencyLevel : 1,
         alarmSigmaThreshold: currentModel.alarmSigmaThreshold,
         elevatedSigmaThreshold: currentModel.elevatedSigmaThreshold,
       },

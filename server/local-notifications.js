@@ -548,15 +548,72 @@ function buildSmsAlertText(env, alert, subscriber) {
 
 
 
-async function dispatchOne(db, env, alert, subscriber, channel, pacer = null) {
+function createProcessingLease(db, alertId, initialStamp) {
+  let stamp = initialStamp;
+  return {
+    renew() {
+      const nextStamp = new Date().toISOString();
+      const result = db.prepare(`
+        UPDATE alert_events
+        SET dispatched_at = ?
+        WHERE id = ?
+          AND status = 'processing'
+          AND dispatched_at = ?
+      `).run(nextStamp, alertId, stamp);
+      if (result.changes !== 1) {
+        return false;
+      }
+      stamp = nextStamp;
+      return true;
+    },
+    stamp() {
+      return stamp;
+    },
+  };
+}
+
+function startProcessingLeaseHeartbeat(renewProcessing, intervalMs) {
+  if (!renewProcessing) {
+    return () => {};
+  }
+  let timer = setInterval(() => {
+    if (!renewProcessing()) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return () => {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+}
+
+async function dispatchOne(db, env, alert, subscriber, channel, pacer = null, renewProcessing = null, leaseHeartbeatMs = 20_000) {
   const destination = channel === 'sms' ? subscriber.phone : subscriber.email;
   const destinationHash = channel === 'sms' ? subscriber.phoneHash : subscriber.emailHash;
   const attemptedAt = new Date().toISOString();
   try {
-    if (pacer) await pacer.wait();
-    const result = channel === 'sms'
-      ? await sendSms(env, { to: destination, text: buildSmsAlertText(env, alert, subscriber) })
-      : await sendEmail(env, { to: destination, subject: alert.title, text: buildEmailAlertText(env, alert, subscriber) });
+    if (renewProcessing && !renewProcessing()) {
+      return { ok: false, skipped: true, channel, error: 'alert_processing_claim_lost' };
+    }
+    if (pacer) {
+      await pacer.wait();
+      if (renewProcessing && !renewProcessing()) {
+        return { ok: false, skipped: true, channel, error: 'alert_processing_claim_lost' };
+      }
+    }
+    const stopHeartbeat = startProcessingLeaseHeartbeat(renewProcessing, leaseHeartbeatMs);
+    let result;
+    try {
+      result = channel === 'sms'
+        ? await sendSms(env, { to: destination, text: buildSmsAlertText(env, alert, subscriber) })
+        : await sendEmail(env, { to: destination, subject: alert.title, text: buildEmailAlertText(env, alert, subscriber) });
+    } finally {
+      stopHeartbeat();
+    }
     recordDelivery(db, {
       alertEventId: alert.id,
       subscriberId: subscriber.id,
@@ -591,16 +648,50 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
     WHERE status IN ('pending', 'failed', 'partial')
       AND kind NOT IN (${alertableKindPlaceholders})
   `).run(...ALERTABLE_EVENT_KINDS);
-  const alerts = db
+
+  const maxAlerts = Math.min(Math.max(Number(limit) || ALERT_DISPATCH_LIMIT, 1), 100);
+  const staleProcessingMs = Math.max(Number(env.ALERT_PROCESSING_STALE_MS || 30 * 60 * 1000), 60 * 1000);
+  const leaseHeartbeatMs = Math.max(5000, Math.min(30000, Math.floor(staleProcessingMs / 3)));
+  const staleProcessingBeforeEpoch = Math.floor((Date.now() - staleProcessingMs) / 1000);
+  const candidates = db
     .prepare(`
       SELECT *
       FROM alert_events
-      WHERE status IN ('pending', 'failed', 'partial')
+      WHERE (
+          status IN ('pending', 'failed', 'partial')
+          OR (
+            status = 'processing'
+            AND CAST(COALESCE(strftime('%s', dispatched_at), '0') AS INTEGER) <= ?
+          )
+        )
         AND kind IN (${alertableKindPlaceholders})
       ORDER BY occurred_at ASC, id ASC
       LIMIT ?
     `)
-    .all(...ALERTABLE_EVENT_KINDS, Math.min(Math.max(Number(limit) || ALERT_DISPATCH_LIMIT, 1), 100));
+    .all(staleProcessingBeforeEpoch, ...ALERTABLE_EVENT_KINDS, maxAlerts);
+  const claimAlert = db.prepare(`
+    UPDATE alert_events
+    SET status = 'processing',
+        dispatched_at = ?
+    WHERE id = ?
+      AND kind IN (${alertableKindPlaceholders})
+      AND (
+        status IN ('pending', 'failed', 'partial')
+        OR (
+          status = 'processing'
+          AND CAST(COALESCE(strftime('%s', dispatched_at), '0') AS INTEGER) <= ?
+        )
+      )
+  `);
+  const alerts = [];
+  for (const candidate of candidates) {
+    const processingLeaseStamp = new Date().toISOString();
+    const claim = claimAlert.run(processingLeaseStamp, candidate.id, ...ALERTABLE_EVENT_KINDS, staleProcessingBeforeEpoch);
+    if (claim.changes === 1) {
+      alerts.push({ ...candidate, status: 'processing', processingLeaseStamp });
+    }
+  }
+
   const subscriberCount = countActiveSubscribers(db);
   const subscriberBatchSize = Math.min(Math.max(Number(env.ALERT_SUBSCRIBER_BATCH_SIZE) || 500, 1), 5000);
   const summary = { alerts: alerts.length, subscribers: subscriberCount, deliveries: 0, sent: 0, failed: 0, noRecipients: 0 };
@@ -612,8 +703,12 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
     let totalFailed = 0;
     let totalDeliveries = 0;
     let attemptedWork = false;
+    const lease = createProcessingLease(db, alert.id, alert.processingLeaseStamp);
 
     while (true) {
+      if (!lease.renew()) {
+        break;
+      }
       const subscribers = getActiveSubscriberBatch(db, env, { afterId, limit: subscriberBatchSize });
       if (!subscribers.length) {
         break;
@@ -631,7 +726,7 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
 
       attemptedWork = true;
       const results = await mapWithConcurrency(work, EMAIL_CONCURRENCY, ({ subscriber, channel }) =>
-        dispatchOne(db, env, alert, subscriber, channel, channel === 'sms' ? smsPacer : null),
+        dispatchOne(db, env, alert, subscriber, channel, channel === 'sms' ? smsPacer : null, () => lease.renew(), leaseHeartbeatMs),
       );
       const sent = results.filter((result) => result.ok).length;
       const failed = results.length - sent;
@@ -649,7 +744,9 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
         UPDATE alert_events
         SET status = ?, dispatched_at = CURRENT_TIMESTAMP, dispatch_summary_json = ?
         WHERE id = ?
-      `).run(subscriberCount ? 'sent' : 'no_recipients', JSON.stringify({ deliveries: 0, reason }), alert.id);
+          AND status = 'processing'
+          AND dispatched_at = ?
+      `).run(subscriberCount ? 'sent' : 'no_recipients', JSON.stringify({ deliveries: 0, reason }), alert.id, lease.stamp());
       if (!subscriberCount) {
         summary.noRecipients += 1;
       }
@@ -660,7 +757,9 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
       UPDATE alert_events
       SET status = ?, dispatched_at = CURRENT_TIMESTAMP, dispatch_summary_json = ?
       WHERE id = ?
-    `).run(totalFailed === 0 ? 'sent' : totalSent > 0 ? 'partial' : 'failed', JSON.stringify({ deliveries: totalDeliveries, sent: totalSent, failed: totalFailed }), alert.id);
+        AND status = 'processing'
+        AND dispatched_at = ?
+    `).run(totalFailed === 0 ? 'sent' : totalSent > 0 ? 'partial' : 'failed', JSON.stringify({ deliveries: totalDeliveries, sent: totalSent, failed: totalFailed }), alert.id, lease.stamp());
   }
 
   return summary;

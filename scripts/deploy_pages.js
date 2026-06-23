@@ -9,12 +9,12 @@ const {
   validateMaintenanceWranglerConfig,
   validateWranglerConfig,
 } = require("./_deploy_env");
+const { copyPublishedAssets } = require("./copy_published_assets");
 
 const env = getEnvWithDotEnv();
 const publicUrl = env.EWS_PUBLIC_URL || "https://ews.kylemcdonald.net/";
 const projectName = env.CLOUDFLARE_PAGES_PROJECT || "apocalypse-ews";
 const distDir = path.join(REPO_ROOT, "dist");
-const publishedDir = path.join(REPO_ROOT, "data", "published");
 const MAINTENANCE_WORKER_SECRET_NAMES = [
   "APP_BASE_URL",
   "EWS_PUBLIC_URL",
@@ -71,19 +71,6 @@ function getCommitHash() {
   return result.stdout.trim();
 }
 
-function copyPublishedAssets() {
-  if (!fs.existsSync(publishedDir)) {
-    throw new Error(`Published data directory does not exist: ${publishedDir}`);
-  }
-  fs.mkdirSync(distDir, { recursive: true });
-  for (const fileName of fs.readdirSync(publishedDir)) {
-    if (!fileName.endsWith(".json")) {
-      continue;
-    }
-    fs.copyFileSync(path.join(publishedDir, fileName), path.join(distDir, fileName));
-  }
-  console.log(`Copied published JSON assets into ${distDir}.`);
-}
 
 function applyD1Migrations(databaseName) {
   run("npx", ["wrangler", "d1", "migrations", "apply", databaseName, "--remote"]);

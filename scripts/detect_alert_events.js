@@ -5,6 +5,7 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 
 const DEFAULT_TAKEOFF_RATE_MIN_DAYS = 7;
+const DEFAULT_CONCURRENT_MIN_HISTORY_SAMPLES = 7 * 48;
 
 function envNumber(name, fallback = null) {
   return process.env[name] === undefined ? fallback : Number(process.env[name]);
@@ -77,6 +78,34 @@ function finiteNumber(value, fallback = 0) {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : fallback;
 }
+function hasReadyConcurrentBaseline(snapshot) {
+  const current = snapshot.current || {};
+  const composite = snapshot.signals?.composite || {};
+  const explicitModelReady = composite.modelReady ?? current.modelReady;
+  const sampleCount = finiteNumber(
+    composite.weeklyBaselineSampleCount ??
+      composite.baselineHistorySampleCount ??
+      current.weeklyBaselineSampleCount ??
+      current.baselineHistorySampleCount ??
+      composite.historySampleCount ??
+      current.historySampleCount,
+    0,
+  );
+  const requiredSampleCount = Math.max(
+    1,
+    finiteNumber(
+      composite.requiredHistorySampleCount ?? current.requiredHistorySampleCount,
+      DEFAULT_CONCURRENT_MIN_HISTORY_SAMPLES,
+    ),
+  );
+  return {
+    ready: explicitModelReady === true && sampleCount >= requiredSampleCount,
+    modelReady: explicitModelReady === true,
+    sampleCount,
+    requiredSampleCount,
+  };
+}
+
 
 function parseIso(value, label) {
   const parsed = new Date(value);
@@ -342,6 +371,7 @@ function buildEvents({
   const concurrentCount = finiteNumber(snapshot.current?.concurrentCount);
   const expectedCount = finiteNumber(snapshot.current?.baselineMean ?? snapshot.signals?.composite?.expectedConcurrentCount);
   const zScore = finiteNumber(snapshot.current?.zScore ?? snapshot.signals?.composite?.sigmaShift);
+  const concurrentBaseline = hasReadyConcurrentBaseline(snapshot);
   const takeoffWindow = getTakeoffEvents(db, cohort, occurredAt, takeoffWindowMinutes);
   const takeoffs = takeoffWindow.takeoffs;
   const takeoffRateStats = getTakeoffRateStats(db, cohort, occurredAt, {
@@ -417,7 +447,7 @@ function buildEvents({
     });
   }
 
-  if (emergencyLevel >= anomalyLevel) {
+  if (concurrentBaseline.ready && emergencyLevel >= anomalyLevel) {
     events.push({
       kind: 'statistical_anomaly',
       severity: severityForLevel(emergencyLevel),
@@ -434,12 +464,15 @@ function buildEvents({
         concurrentCount,
         expectedCount,
         zScore,
+        concurrentModelReady: concurrentBaseline.modelReady,
+        concurrentSampleCount: concurrentBaseline.sampleCount,
+        concurrentRequiredSampleCount: concurrentBaseline.requiredSampleCount,
       }),
       status: 'pending',
     });
   }
 
-  if (takeoffs.length >= takeoffBatchMin && emergencyLevel >= takeoffAnomalyLevel) {
+  if (concurrentBaseline.ready && takeoffs.length >= takeoffBatchMin && emergencyLevel >= takeoffAnomalyLevel) {
     events.push({
       kind: 'takeoff_anomaly',
       severity: severityForLevel(emergencyLevel),
@@ -460,6 +493,9 @@ function buildEvents({
         concurrentCount,
         expectedCount,
         zScore,
+        concurrentModelReady: concurrentBaseline.modelReady,
+        concurrentSampleCount: concurrentBaseline.sampleCount,
+        concurrentRequiredSampleCount: concurrentBaseline.requiredSampleCount,
         aircraft,
       }),
       status: 'pending',
@@ -475,6 +511,9 @@ function buildEvents({
     takeoffRateSampleDayCount: takeoffRateStats.sampleDayCount,
     takeoffRateRequiredSampleCount: takeoffRateStats.requiredSampleCount,
     takeoffRateRequiredDayCount: takeoffRateStats.requiredDayCount,
+    concurrentModelReady: concurrentBaseline.modelReady,
+    concurrentSampleCount: concurrentBaseline.sampleCount,
+    concurrentRequiredSampleCount: concurrentBaseline.requiredSampleCount,
     emergencyLevel,
     occurredAt,
     windowStart: takeoffWindow.windowStart,

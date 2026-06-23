@@ -23,6 +23,7 @@ const REQUIRED_DEPLOY_ENV_VARS = [
   "EWS_PUBLIC_URL",
   ...REQUIRED_PROVIDER_ENV_VARS,
   "SENDGRID_WEBHOOK_PUBLIC_KEY",
+  "SENDGRID_WEBHOOK_URL",
   "EWS_ALERT_EVENTS_WEBHOOK_URL",
   "EWS_SMOKE_TEST_EMAIL",
   "EWS_SMOKE_TEST_PHONE",
@@ -169,6 +170,20 @@ function validateAlertEventsWebhookUrl(value) {
 
   return null;
 }
+function validateSendGridWebhookUrl(value) {
+  const urlError = validateHttpsPublicUrl("SENDGRID_WEBHOOK_URL", value);
+  if (urlError) {
+    return urlError;
+  }
+
+  const url = new URL(value);
+  if (url.pathname !== "/api/sendgrid/webhook") {
+    return "SENDGRID_WEBHOOK_URL must point at /api/sendgrid/webhook.";
+  }
+
+  return null;
+}
+
 
 function validateNotificationEncryptionKey(value) {
   if (!value) {
@@ -319,6 +334,9 @@ function validateDeployEnv(env) {
     missingNames.has("EWS_ALERT_EVENTS_WEBHOOK_URL")
       ? null
       : validateAlertEventsWebhookUrl(env.EWS_ALERT_EVENTS_WEBHOOK_URL),
+    missingNames.has("SENDGRID_WEBHOOK_URL")
+      ? null
+      : validateSendGridWebhookUrl(env.SENDGRID_WEBHOOK_URL),
     missingNames.has("NOTIFICATION_ENCRYPTION_KEY")
       ? null
       : validateNotificationEncryptionKey(env.NOTIFICATION_ENCRYPTION_KEY),

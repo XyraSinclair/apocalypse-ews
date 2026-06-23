@@ -8,7 +8,7 @@
     "dev": "concurrently -k -n server,client -c blue,magenta \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "node --watch server/index.js",
     "dev:client": "vite --host 127.0.0.1",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/copy_published_assets.js",
     "preview": "vite preview --host 127.0.0.1",
     "start": "node server/index.js",
     "seed:demo": "python3 scripts/seed_demo_data.py",
