@@ -13,6 +13,8 @@ const publicUrl = env.EWS_PUBLIC_URL || "https://ews.kylemcdonald.net/";
 const projectName = env.CLOUDFLARE_PAGES_PROJECT || "apocalypse-ews";
 const distDir = path.join(REPO_ROOT, "dist");
 const publishedDir = path.join(REPO_ROOT, "data", "published");
+const wranglerConfigPath = path.join(REPO_ROOT, "wrangler.toml");
+
 
 
 function run(command, args, options = {}) {
@@ -56,6 +58,20 @@ function copyPublishedAssets() {
   }
   console.log(`Copied published JSON assets into ${distDir}.`);
 }
+function assertWranglerConfig() {
+  if (!fs.existsSync(wranglerConfigPath)) {
+    throw new Error("wrangler.toml is required for Pages deploys; copy wrangler.example.toml and set the D1 database_id.");
+  }
+
+  const configText = fs.readFileSync(wranglerConfigPath, "utf8");
+  if (!/binding\s*=\s*\"EWS_NOTIFY_DB\"/.test(configText)) {
+    throw new Error("wrangler.toml must bind the EWS_NOTIFY_DB D1 database.");
+  }
+  if (/replace-with-cloudflare-d1-database-id/.test(configText)) {
+    throw new Error("wrangler.toml still contains the placeholder D1 database_id.");
+  }
+}
+
 
 async function restoreCurrentRss() {
   const rssUrl = env.EWS_RSS_URL || new URL("/rss.xml", publicUrl).toString();
@@ -85,6 +101,7 @@ async function main() {
     process.exit(1);
   }
 
+  assertWranglerConfig();
   run("npm", ["run", "build"]);
   copyPublishedAssets();
   await restoreCurrentRss();
