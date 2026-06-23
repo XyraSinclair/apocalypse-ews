@@ -266,6 +266,21 @@ def normalize_altitude(value):
 
     return int(value)
 
+def get_cohort_source(connection):
+    return get_meta(connection, "cohort_source") or "tracked_aircraft"
+
+
+def load_previous_live_snapshot(connection):
+    rows = connection.execute(
+        """
+        SELECT hex, observed_at, is_airborne
+        FROM live_snapshot
+        WHERE source = ?
+        """,
+        (SOURCE,),
+    ).fetchall()
+    return {row["hex"]: row for row in rows}
+
 
 def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=False):
     sampled_at_iso = latest_slice.timestamp.isoformat()
@@ -273,6 +288,10 @@ def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=
     snapshot_rows = []
     observation_rows = []
     airborne_hexes = set()
+    cohort = get_cohort_source(connection)
+    previous_live_snapshot = load_previous_live_snapshot(connection) if replace_live_snapshot else {}
+    has_previous_live_snapshot = bool(previous_live_snapshot)
+    takeoff_rows = []
 
     for telemetry in latest_slice.telemetry:
         hex_value = telemetry.hex.lower()
@@ -316,6 +335,25 @@ def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=
                     "is_airborne": 1,
                 }
             )
+            previous_row = previous_live_snapshot.get(hex_value)
+            was_previously_airborne = bool(previous_row and previous_row["is_airborne"])
+            if has_previous_live_snapshot and not was_previously_airborne:
+                takeoff_rows.append(
+                    {
+                        "cohort": cohort,
+                        "hex": hex_value,
+                        "registration": tracked_entry.get("registration"),
+                        "label": tracked_entry.get("label") or tracked_entry.get("registration") or hex_value.upper(),
+                        "source": SOURCE,
+                        "observed_at": sampled_at_iso,
+                        "previous_observed_at": previous_row["observed_at"] if previous_row else None,
+                        "lat": latitude,
+                        "lon": longitude,
+                        "altitude_ft": altitude_ft,
+                        "ground_speed_kt": ground_speed_kt,
+                        "track": None,
+                    }
+                )
 
     if replace_live_snapshot:
         connection.execute("DELETE FROM live_snapshot WHERE source != 'demo'")
@@ -352,6 +390,39 @@ def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=
             )
             """,
             snapshot_rows,
+        )
+    if takeoff_rows:
+        connection.executemany(
+            """
+            INSERT INTO takeoff_events (
+              cohort,
+              hex,
+              registration,
+              label,
+              source,
+              observed_at,
+              previous_observed_at,
+              lat,
+              lon,
+              altitude_ft,
+              ground_speed_kt,
+              track
+            ) VALUES (
+              :cohort,
+              :hex,
+              :registration,
+              :label,
+              :source,
+              :observed_at,
+              :previous_observed_at,
+              :lat,
+              :lon,
+              :altitude_ft,
+              :ground_speed_kt,
+              :track
+            )
+            """,
+            takeoff_rows,
         )
 
     if observation_rows:
@@ -397,6 +468,7 @@ def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=
         "matched_count": len(snapshot_rows),
         "airborne_count": len(airborne_hexes),
         "concurrent_count": len(airborne_hexes),
+        "takeoff_count": len(takeoff_rows),
     }
 
 
@@ -439,6 +511,7 @@ def main():
                         "matchedCount": summary["matched_count"],
                         "airborneCount": summary["airborne_count"],
                         "concurrentCount": summary["concurrent_count"],
+                        "takeoffCount": 0,
                     }
                 )
             )
@@ -493,6 +566,7 @@ def main():
                     "matchedCount": latest_result["matched_count"],
                     "airborneCount": latest_result["airborne_count"],
                     "concurrentCount": latest_result["concurrent_count"],
+                    "takeoffCount": latest_result["takeoff_count"],
                 }
             ),
         )
@@ -511,6 +585,7 @@ def main():
                     "matchedCount": latest_result["matched_count"],
                     "airborneCount": latest_result["airborne_count"],
                     "concurrentCount": latest_result["concurrent_count"],
+                    "takeoffCount": latest_result["takeoff_count"],
                 }
             )
         )

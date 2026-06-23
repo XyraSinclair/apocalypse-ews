@@ -6,6 +6,7 @@ const { loadEnvFile } = require("./env");
 const { CLIENT_DIST_DIR, DATA_DIR, readWatchlist } = require("./config");
 const {
   initDb,
+  getDb,
   getMetaValue,
   setMetaValue,
   upsertTrackedAircraft,
@@ -15,6 +16,12 @@ const { createHeatmapCacheRefresher } = require("./heatmap-cache");
 const { buildDashboardSnapshot } = require("./dashboard");
 const { maybeSendEmergencyLevelTelegramAlert } = require("./telegram-alert");
 const { buildEmergencyRssFeedXml, maybeRecordEmergencyLevelRssItem } = require("./rss-feed");
+const {
+  HttpError,
+  listAlertEvents,
+  listTakeoffEvents,
+  upsertSubscriber,
+} = require("./local-notifications");
 
 loadEnvFile();
 
@@ -171,6 +178,26 @@ app.get("/api/cohort", (_request, response) => {
   response.json(getTrackingSummary());
 });
 
+app.get("/api/takeoffs", (request, response) => {
+  response.json({
+    events: listTakeoffEvents(getDb(), { limit: request.query.limit }),
+  });
+});
+
+app.get("/api/alerts", (request, response) => {
+  response.json({
+    events: listAlertEvents(getDb(), { limit: request.query.limit }),
+  });
+});
+
+app.post("/api/notifications/signup", (request, response) => {
+  const subscriber = upsertSubscriber(getDb(), request.body, process.env);
+  response.json({
+    ok: true,
+    subscriber,
+  });
+});
+
 app.get("/api/dashboard", (_request, response) => {
   const snapshot = dashboardSnapshotManager.getSnapshot();
   if (!snapshot) {
@@ -205,6 +232,13 @@ app.get(["/rss.xml", "/feed.xml"], (_request, response) => {
     .type("application/rss+xml")
     .set("Cache-Control", "public, max-age=300")
     .send(buildEmergencyRssFeedXml());
+});
+
+app.use((error, _request, response, _next) => {
+  const status = error instanceof HttpError ? error.status : 500;
+  response.status(status).json({
+    error: error.message || "Unexpected server error.",
+  });
 });
 
 if (fs.existsSync(CLIENT_DIST_DIR)) {

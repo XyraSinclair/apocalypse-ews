@@ -128,6 +128,28 @@ type Aircraft = {
   markerId?: string;
 };
 
+type AlertEvent = {
+  id: number;
+  kind: string;
+  severity: string;
+  cohort: string;
+  occurredAt: string;
+  title: string;
+  message: string;
+  status: string;
+};
+
+type TakeoffEvent = {
+  id: number;
+  cohort: string;
+  hex: string;
+  registration?: string | null;
+  label?: string | null;
+  observedAt: string;
+  altitudeFt?: number | null;
+  groundSpeedKt?: number | null;
+};
+
 type LoadedDashboards = Partial<Record<CohortKind, DashboardResponse>>;
 type SelectedCohorts = Record<CohortKind, boolean>;
 
@@ -186,6 +208,9 @@ function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(null);
   const [emergencyTheme, setEmergencyTheme] = useState(false);
+  const [alertEvents, setAlertEvents] = useState<AlertEvent[]>([]);
+  const [takeoffEvents, setTakeoffEvents] = useState<TakeoffEvent[]>([]);
+  const [operationsError, setOperationsError] = useState<string | null>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle('emergency-color-scheme', emergencyTheme);
@@ -226,6 +251,36 @@ function DashboardPage() {
 
     load();
     const interval = window.setInterval(load, 5 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadOperations() {
+      setOperationsError(null);
+      try {
+        const [alertsResponse, takeoffsResponse] = await Promise.all([
+          fetch('/api/alerts?limit=8', { cache: 'no-store' }),
+          fetch('/api/takeoffs?limit=8', { cache: 'no-store' }),
+        ]);
+        if (!alertsResponse.ok) throw new Error(`Alert event request failed with ${alertsResponse.status}`);
+        if (!takeoffsResponse.ok) throw new Error(`Takeoff event request failed with ${takeoffsResponse.status}`);
+        const [alertsPayload, takeoffsPayload] = await Promise.all([alertsResponse.json(), takeoffsResponse.json()]);
+        if (cancelled) return;
+        setAlertEvents(Array.isArray(alertsPayload.events) ? alertsPayload.events : []);
+        setTakeoffEvents(Array.isArray(takeoffsPayload.events) ? takeoffsPayload.events : []);
+      } catch (loadError) {
+        if (cancelled) return;
+        setOperationsError(loadError instanceof Error ? loadError.message : String(loadError));
+      }
+    }
+
+    loadOperations();
+    const interval = window.setInterval(loadOperations, 5 * 60 * 1000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -277,6 +332,7 @@ function DashboardPage() {
 
       <section className="secondary-grid">
         <ModelList models={combined.modelCounts} />
+        <OperationsPanel alerts={alertEvents} takeoffs={takeoffEvents} error={operationsError} />
       </section>
 
       <AboutPanel selectedLabels={combined.selectedLabels} />
@@ -633,6 +689,52 @@ function ModelList({ models }: { models: ModelCount[] }) {
   );
 }
 
+function OperationsPanel({ alerts, takeoffs, error }: { alerts: AlertEvent[]; takeoffs: TakeoffEvent[]; error: string | null }) {
+  return (
+    <section className="panel operations-panel">
+      <div className="panel-header">
+        <h2>Alert Operations</h2>
+        <span className="map-badge">{formatInteger(alerts.length)} queued</span>
+      </div>
+      {error ? <p className="signup-status signup-status-error">{error}</p> : null}
+      <div className="operations-grid">
+        <div>
+          <h3>Recent alert events</h3>
+          {alerts.length ? (
+            <ol className="ops-list">
+              {alerts.map((alert) => (
+                <li key={alert.id}>
+                  <strong>{alert.title}</strong>
+                  <span>{alert.kind} · {alert.severity} · {alert.status}</span>
+                  <time>{formatDateTime(alert.occurredAt)}</time>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="empty-state">No alert events have been queued yet.</p>
+          )}
+        </div>
+        <div>
+          <h3>Recent takeoff detections</h3>
+          {takeoffs.length ? (
+            <ol className="ops-list">
+              {takeoffs.map((takeoff) => (
+                <li key={takeoff.id}>
+                  <strong>{takeoff.label || takeoff.registration || takeoff.hex}</strong>
+                  <span>{takeoff.cohort} · {formatNullableNumber(takeoff.altitudeFt, 0)} ft · {formatNullableNumber(takeoff.groundSpeedKt, 0)} kt</span>
+                  <time>{formatDateTime(takeoff.observedAt)}</time>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="empty-state">No takeoff transitions have been recorded for the current refresh window.</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function AboutPanel({ selectedLabels }: { selectedLabels: string[] }) {
   return (
     <section className="panel about-panel">
@@ -697,8 +799,9 @@ function SignupPage() {
   const [phone, setPhone] = useState('');
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
     setStatus(null);
@@ -716,9 +819,28 @@ function SignupPage() {
       setError('Enter a phone number with country code if SMS alerts are desired.');
       return;
     }
-    const saved = { email: trimmedEmail || null, phone: trimmedPhone || null, createdAt: new Date().toISOString() };
-    window.localStorage.setItem('ews-notification-request', JSON.stringify(saved));
-    setStatus('Notification preference saved locally. Wire Stripe checkout and delivery credentials before using this in production.');
+
+    setSubmitting(true);
+    try {
+      const response = await fetch('/api/notifications/signup', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: trimmedEmail || null, phone: trimmedPhone || null }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || `Signup failed with HTTP ${response.status}`);
+      }
+      window.localStorage.setItem(
+        'ews-notification-request',
+        JSON.stringify({ email: trimmedEmail || null, phone: trimmedPhone || null, createdAt: new Date().toISOString() }),
+      );
+      setStatus('Notification subscription saved on the backend. You will receive queued takeoff and anomaly alerts when delivery credentials are configured.');
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Notification signup failed.');
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -744,7 +866,7 @@ function SignupPage() {
               <span>Phone number</span>
               <input type="tel" name="phone" placeholder="+1 415 555 2671" value={phone} onChange={(event) => setPhone(event.currentTarget.value)} />
             </label>
-            <button className="signup-submit" type="submit">Sign Up</button>
+            <button className="signup-submit" type="submit" disabled={submitting}>{submitting ? 'Saving...' : 'Sign Up'}</button>
           </form>
         </section>
       </section>

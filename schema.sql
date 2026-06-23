@@ -119,6 +119,85 @@ CREATE TABLE IF NOT EXISTS live_snapshot (
   source TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS takeoff_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cohort TEXT NOT NULL,
+  hex TEXT NOT NULL,
+  registration TEXT,
+  label TEXT,
+  source TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  previous_observed_at TEXT,
+  lat REAL,
+  lon REAL,
+  altitude_ft REAL,
+  ground_speed_kt REAL,
+  track REAL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(cohort, hex, observed_at, source) ON CONFLICT IGNORE
+);
+
+CREATE INDEX IF NOT EXISTS idx_takeoff_events_observed_at
+  ON takeoff_events (observed_at);
+
+CREATE INDEX IF NOT EXISTS idx_takeoff_events_cohort_time
+  ON takeoff_events (cohort, observed_at);
+
+CREATE TABLE IF NOT EXISTS alert_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  cohort TEXT NOT NULL,
+  event_key TEXT NOT NULL UNIQUE,
+  occurred_at TEXT NOT NULL,
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  dispatched_at TEXT,
+  dispatch_summary_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_events_status_created
+  ON alert_events (status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_alert_events_kind_time
+  ON alert_events (kind, occurred_at);
+
+CREATE TABLE IF NOT EXISTS notification_subscribers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  status TEXT NOT NULL DEFAULT 'active',
+  email_hash TEXT UNIQUE,
+  phone_hash TEXT UNIQUE,
+  email_cipher TEXT,
+  phone_cipher TEXT,
+  email_enabled INTEGER NOT NULL DEFAULT 0,
+  sms_enabled INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT 'local_api',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_subscribers_status
+  ON notification_subscribers (status);
+
+CREATE TABLE IF NOT EXISTS alert_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alert_event_id INTEGER NOT NULL,
+  subscriber_id INTEGER NOT NULL,
+  channel TEXT NOT NULL,
+  destination_hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  provider_message_id TEXT,
+  error TEXT,
+  attempted_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(alert_event_id, subscriber_id, channel) ON CONFLICT IGNORE,
+  FOREIGN KEY(alert_event_id) REFERENCES alert_events(id),
+  FOREIGN KEY(subscriber_id) REFERENCES notification_subscribers(id)
+);
+
 CREATE TABLE IF NOT EXISTS ingestion_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_type TEXT NOT NULL,

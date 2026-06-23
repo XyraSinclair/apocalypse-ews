@@ -144,7 +144,8 @@ h3 {
 .loading-panel,
 .error-panel,
 .provider-panel,
-.signup-panel {
+.signup-panel,
+.operations-panel {
   padding: 16px;
 }
 
@@ -482,6 +483,41 @@ h3 {
   border: 1px solid #ccc;
 }
 
+.operations-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.operations-grid h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.ops-list {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.ops-list li {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid #ccc;
+  background: #fff;
+}
+
+.ops-list span,
+.ops-list time {
+  color: #333;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+
 .about-copy,
 .faq-list,
 .updates-copy {
@@ -580,7 +616,7 @@ html.emergency-color-scheme a,
 html.emergency-color-scheme a:visited { color: #ffff00; }
 html.emergency-color-scheme button { color: #fff; background: #101010; border-color: #666; }
 html.emergency-color-scheme .app-shell :is(h1, h2, .chart-subsection-header strong, .map-hover-header strong) { color: red !important; }
-html.emergency-color-scheme :is(.provider-panel .panel-lede, .panel-footnote, .summary-text-block p, .chart-range-copy span, .chart-subsection-header span, .map-hover-header span, .map-hover-grid dt, .map-hover-grid dd, .map-badge, .model-count, .empty-state) { color: #fff; }
+html.emergency-color-scheme :is(.provider-panel .panel-lede, .panel-footnote, .summary-text-block p, .chart-range-copy span, .chart-subsection-header span, .map-hover-header span, .map-hover-grid dt, .map-hover-grid dd, .map-badge, .model-count, .empty-state, .ops-list span, .ops-list time) { color: #fff; }
 html.emergency-color-scheme .map-sphere { fill: #050505; stroke: #666; }
 html.emergency-color-scheme .map-graticule { stroke: #222; }
 html.emergency-color-scheme .map-marker-halo { fill: rgba(255, 255, 0, 0.14); }
@@ -607,11 +643,13 @@ html.emergency-color-scheme .signup-field input { color: #fff; background: #0505
   .loading-panel,
   .error-panel,
   .provider-panel,
-  .signup-panel { padding: 12px; }
+  .signup-panel,
+  .operations-panel { padding: 12px; }
   .map-frame { display: grid; gap: 12px; min-height: auto; }
   .map-hover-card { position: static; order: 2; width: 100%; }
   .map-svg { order: 1; min-height: 340px; }
   .flight-list li,
+  .operations-grid,
   .map-hover-grid { grid-template-columns: 1fr; }
   .model-list li { grid-template-columns: minmax(0, 1fr) max-content; align-items: start; gap: 10px; }
 }

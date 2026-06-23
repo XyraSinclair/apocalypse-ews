@@ -143,6 +143,36 @@ function exportSnapshots() {
   ]);
 }
 
+function detectAlertEvents() {
+  run('node', [
+    'scripts/detect_alert_events.js',
+    '--db',
+    MAIN_DB,
+    '--snapshot',
+    path.join(PUBLISHED_DIR, 'dashboard.json'),
+    '--cohort',
+    'global_business_jet',
+  ]);
+  run('node', [
+    'scripts/detect_alert_events.js',
+    '--db',
+    MILITARY_DB,
+    '--snapshot',
+    path.join(PUBLISHED_DIR, 'military-dashboard.json'),
+    '--cohort',
+    'global_military_aircraft',
+  ]);
+  run('node', [
+    'scripts/detect_alert_events.js',
+    '--db',
+    UNTRACKED_DB,
+    '--snapshot',
+    path.join(PUBLISHED_DIR, 'untracked-dashboard.json'),
+    '--cohort',
+    'non_icao_untracked',
+  ]);
+}
+
 function updateAlerts() {
   if (skipAlerts) {
     return;
@@ -150,6 +180,9 @@ function updateAlerts() {
 
   run('node', ['scripts/update_rss_feed.js'], { env: { EWS_DB_PATH: MAIN_DB } });
   run('node', ['scripts/send_telegram_alert.js'], { env: { EWS_DB_PATH: MAIN_DB } });
+  run('node', ['scripts/dispatch_alert_events.js', '--db', MAIN_DB]);
+  run('node', ['scripts/dispatch_alert_events.js', '--db', MILITARY_DB]);
+  run('node', ['scripts/dispatch_alert_events.js', '--db', UNTRACKED_DB]);
 }
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -157,4 +190,5 @@ ensureMainCohort();
 ensureMilitaryCohort();
 refreshLiveData();
 exportSnapshots();
+detectAlertEvents();
 updateAlerts();

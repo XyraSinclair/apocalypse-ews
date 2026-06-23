@@ -611,6 +611,7 @@ def parse_latest_non_icao_snapshot(cache_path):
 
     latest_sampled_at = None
     peak_rows = []
+    peak_sampled_at = None
 
     while index < len(points):
         now = int(points_u[index + 2]) / 1000 + int(points_u[index + 1]) * 4294967.296
@@ -662,18 +663,63 @@ def parse_latest_non_icao_snapshot(cache_path):
 
         latest_sampled_at = sampled_at
         if len(rows_by_hex) > len(peak_rows):
+            peak_sampled_at = sampled_at
             peak_rows = sorted(rows_by_hex.values(), key=lambda row: row["hex"])
 
     if latest_sampled_at is None:
         return None, []
 
-    return latest_sampled_at.isoformat(), peak_rows
+    return (peak_sampled_at or latest_sampled_at).isoformat(), peak_rows
+
+
+def load_previous_live_snapshot(connection):
+    rows = connection.execute(
+        """
+        SELECT hex, observed_at, is_airborne
+        FROM live_snapshot
+        WHERE source = 'adsbx_heatmap'
+        """
+    ).fetchall()
+    return {row["hex"]: row for row in rows}
+
+
+def build_takeoff_rows(snapshot_rows, previous_live_snapshot):
+    if not previous_live_snapshot:
+        return []
+
+    takeoff_rows = []
+    for row in snapshot_rows:
+        previous_row = previous_live_snapshot.get(row["hex"])
+        was_previously_airborne = bool(previous_row and previous_row["is_airborne"])
+        if was_previously_airborne:
+            continue
+
+        takeoff_rows.append(
+            {
+                "cohort": "non_icao_untracked",
+                "hex": row["hex"],
+                "registration": row["registration"],
+                "label": row["label"],
+                "source": row["source"],
+                "observed_at": row["observed_at"],
+                "previous_observed_at": previous_row["observed_at"] if previous_row else None,
+                "lat": row["lat"],
+                "lon": row["lon"],
+                "altitude_ft": row["altitude_ft"],
+                "ground_speed_kt": row["ground_speed_kt"],
+                "track": row["track"],
+            }
+        )
+
+    return takeoff_rows
 
 
 def replace_live_snapshot(connection, cache_path):
     sampled_at_iso, snapshot_rows = parse_latest_non_icao_snapshot(cache_path)
     if sampled_at_iso is None:
         return None
+    previous_live_snapshot = load_previous_live_snapshot(connection)
+    takeoff_rows = build_takeoff_rows(snapshot_rows, previous_live_snapshot)
 
     connection.execute("DELETE FROM live_snapshot WHERE source != 'demo'")
     if snapshot_rows:
@@ -707,6 +753,39 @@ def replace_live_snapshot(connection, cache_path):
             """,
             snapshot_rows,
         )
+    if takeoff_rows:
+        connection.executemany(
+            """
+            INSERT INTO takeoff_events (
+              cohort,
+              hex,
+              registration,
+              label,
+              source,
+              observed_at,
+              previous_observed_at,
+              lat,
+              lon,
+              altitude_ft,
+              ground_speed_kt,
+              track
+            ) VALUES (
+              :cohort,
+              :hex,
+              :registration,
+              :label,
+              :source,
+              :observed_at,
+              :previous_observed_at,
+              :lat,
+              :lon,
+              :altitude_ft,
+              :ground_speed_kt,
+              :track
+            )
+            """,
+            takeoff_rows,
+        )
 
     set_meta(connection, "cohort_source", "non_icao_untracked")
     set_meta(connection, "adsbx_heatmap_sampled_at", sampled_at_iso)
@@ -725,10 +804,12 @@ def replace_live_snapshot(connection, cache_path):
         "matchedCount": len(snapshot_rows),
         "airborneCount": len(snapshot_rows),
         "concurrentCount": len(snapshot_rows),
+        "takeoffCount": len(takeoff_rows),
     }))
     return {
         "sampled_at": sampled_at_iso,
         "snapshot_rows": len(snapshot_rows),
+        "takeoff_count": len(takeoff_rows),
     }
 
 
@@ -893,6 +974,7 @@ def main():
                     if latest_parsed_file
                     else 0,
                     "liveSnapshotCount": live_snapshot["snapshot_rows"] if live_snapshot else 0,
+                    "takeoffCount": live_snapshot["takeoff_count"] if live_snapshot else 0,
                 }
             )
         )
