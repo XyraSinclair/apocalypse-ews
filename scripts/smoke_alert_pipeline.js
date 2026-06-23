@@ -399,16 +399,120 @@ async function assertAlertProcessingStaleReclaim() {
     new Date().toISOString(),
     new Date().toISOString(),
   );
+  db.prepare(`
+    INSERT INTO notification_alerts (
+      id,
+      kind,
+      source,
+      message_text,
+      status,
+      fanout_lease_token,
+      fanout_lease_expires_at,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'alert-active-lease-processing',
+    'takeoff_rate_anomaly',
+    'smoke',
+    'Active lease processing alert',
+    'processing',
+    'active-lease-token',
+    new Date(Date.now() + 600_000).toISOString(),
+    '2026-06-23T00:00:00.000Z',
+    '2026-06-23T00:00:00.000Z',
+  );
   const env = { EWS_NOTIFY_DB: createD1Adapter(db) };
   assert(
     await beginAlertRecordSend(env, 'alert-stale-processing', { statuses: ['processing'], staleMs: 60_000 }),
     'Stale processing alert was not reclaimable.',
   );
   assert(
+    !(await beginAlertRecordSend(env, 'alert-active-lease-processing', {
+      statuses: ['processing'],
+      staleMs: 60_000,
+      fanoutLeaseToken: 'replacement-lease-token',
+      fanoutLeaseExpiresAt: new Date(Date.now() + 600_000).toISOString(),
+    })),
+    'Processing alert with an active fanout lease was incorrectly reclaimable.',
+  );
+  const activeLease = db.prepare('SELECT fanout_lease_token FROM notification_alerts WHERE id = ?').get('alert-active-lease-processing');
+  assert(activeLease.fanout_lease_token === 'active-lease-token', 'Active fanout lease token was overwritten.');
+  assert(
     !(await beginAlertRecordSend(env, 'alert-fresh-processing', { statuses: ['processing'], staleMs: 60_000 })),
     'Fresh processing alert was incorrectly reclaimable.',
   );
   db.close();
+}
+
+async function assertLocalDispatchSkipsRawTakeoffTelemetry() {
+  const { dispatchPendingAlerts, upsertSubscriber } = require(path.join(ROOT_DIR, 'server', 'local-notifications'));
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-local-dispatch-')), 'ews.sqlite');
+  const db = new Database(dbPath);
+  db.exec(fs.readFileSync(path.join(ROOT_DIR, 'schema.sql'), 'utf8'));
+  const env = {
+    EWS_PUBLIC_URL: 'https://alerts.example.test/',
+    NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
+    NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
+    SENDGRID_API_KEY: 'smoke-sendgrid-key',
+    SENDGRID_FROM_EMAIL: 'alerts@example.test',
+  };
+  upsertSubscriber(db, { email: 'fanout@example.test', wantsEmail: true }, env);
+  const insertAlert = db.prepare(`
+    INSERT INTO alert_events (
+      kind,
+      severity,
+      cohort,
+      event_key,
+      occurred_at,
+      title,
+      message,
+      payload_json,
+      status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  insertAlert.run(
+    'takeoff_batch',
+    'watch',
+    'global_business_jet',
+    'local-dispatch-batch',
+    '2026-06-23T00:00:00.000Z',
+    'Raw takeoff batch',
+    'Raw takeoff batch message',
+    JSON.stringify({ signalFamily: 'takeoff_batch' }),
+    'pending',
+  );
+  insertAlert.run(
+    'takeoff_rate_anomaly',
+    'critical',
+    'global_business_jet',
+    'local-dispatch-rate',
+    '2026-06-23T00:01:00.000Z',
+    'Takeoff-rate anomaly',
+    'Takeoff-rate anomaly message',
+    JSON.stringify({ signalFamily: 'takeoff_rate' }),
+    'pending',
+  );
+
+  const originalFetch = globalThis.fetch;
+  const providerRequests = [];
+  globalThis.fetch = async (url, options) => {
+    providerRequests.push({ url: String(url), body: JSON.parse(options.body) });
+    return new Response('', { status: 202, headers: { 'x-message-id': 'local-dispatch-smoke' } });
+  };
+  try {
+    const summary = await dispatchPendingAlerts(db, env, { limit: 10 });
+    assert(summary.alerts === 1, 'Local dispatch did not limit work to alertable events.');
+    assert(providerRequests.length === 1, 'Local dispatch sent raw telemetry or skipped the alertable anomaly.');
+    const statuses = db.prepare('SELECT kind, status FROM alert_events ORDER BY kind ASC').all();
+    const rawBatch = statuses.find((event) => event.kind === 'takeoff_batch');
+    const rateAnomaly = statuses.find((event) => event.kind === 'takeoff_rate_anomaly');
+    assert(rawBatch?.status === 'observed', 'Local dispatch did not demote raw takeoff batch telemetry.');
+    assert(rateAnomaly?.status === 'sent', 'Local dispatch did not send the alertable takeoff-rate anomaly.');
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
 }
 
 async function assertResumableAlertFanout() {
@@ -1185,6 +1289,7 @@ async function main() {
     await assertSendGridWebhookDeliveryStatus();
     await assertClaimAlertRecordIsIdempotent();
     await assertAlertProcessingStaleReclaim();
+    await assertLocalDispatchSkipsRawTakeoffTelemetry();
     await assertAlertEventEndpointFailureStatus(token);
     console.log(JSON.stringify({ ok: true, baseUrl, tempRoot }));
   } finally {

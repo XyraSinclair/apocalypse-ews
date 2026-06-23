@@ -1431,16 +1431,19 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
     return prepared.response;
   }
 
-  const summary = await continueAlertRecordFanout(env, {
-    id: alertId,
-    kind: event.kind,
-    message_text: messageText,
-    sms_message_text: smsMessageText,
-    subject: event.title,
-    fanout_after_created_at: "",
-    fanout_after_id: "",
-    error_count: 0,
-  }, { token: prepared.leaseToken, leaseMs: prepared.leaseMs });
+  const alertRecord = await getAlertRecordById(env, alertId);
+  if (!alertRecord) {
+    return {
+      ok: false,
+      sent: false,
+      reason: "alert_record_missing_after_claim",
+      alertId,
+      kind: event.kind,
+      cohort: event.cohort,
+    };
+  }
+
+  const summary = await continueAlertRecordFanout(env, alertRecord, { token: prepared.leaseToken, leaseMs: prepared.leaseMs });
 
   return {
     ...summary,

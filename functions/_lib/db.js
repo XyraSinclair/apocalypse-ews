@@ -1429,6 +1429,7 @@ export async function beginAlertRecordSend(env, alertId, options = {}) {
   }
 
   const staleBeforeEpoch = Math.floor((Date.now() - staleMs) / 1000);
+  const nowEpoch = Math.floor(Date.now() / 1000);
   const stale = await getDb(env)
     .prepare(
       `
@@ -1441,9 +1442,13 @@ export async function beginAlertRecordSend(env, alertId, options = {}) {
         WHERE id = ?
           AND status = 'processing'
           AND CAST(COALESCE(strftime('%s', updated_at), '0') AS INTEGER) <= ?
+          AND (
+            fanout_lease_expires_at IS NULL
+            OR CAST(COALESCE(strftime('%s', fanout_lease_expires_at), '0') AS INTEGER) <= ?
+          )
       `,
     )
-    .bind(fanoutLeaseToken, fanoutLeaseExpiresAtValue, alertId, staleBeforeEpoch)
+    .bind(fanoutLeaseToken, fanoutLeaseExpiresAtValue, alertId, staleBeforeEpoch, nowEpoch)
     .run();
 
   return insertedRowCount(stale) > 0;

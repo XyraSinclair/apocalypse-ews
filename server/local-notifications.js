@@ -5,6 +5,8 @@ const { cleanPublicUrl } = require('./public-url');
 const ALERT_DISPATCH_LIMIT = 25;
 const EMAIL_CONCURRENCY = 8;
 const SMS_MIN_INTERVAL_MS = 250;
+const ALERTABLE_EVENT_KINDS = ['statistical_anomaly', 'takeoff_anomaly', 'takeoff_rate_anomaly'];
+
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -582,15 +584,23 @@ async function dispatchOne(db, env, alert, subscriber, channel, pacer = null) {
 }
 
 async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISPATCH_LIMIT } = {}) {
+  const alertableKindPlaceholders = ALERTABLE_EVENT_KINDS.map(() => '?').join(', ');
+  db.prepare(`
+    UPDATE alert_events
+    SET status = 'observed'
+    WHERE status IN ('pending', 'failed', 'partial')
+      AND kind NOT IN (${alertableKindPlaceholders})
+  `).run(...ALERTABLE_EVENT_KINDS);
   const alerts = db
     .prepare(`
       SELECT *
       FROM alert_events
       WHERE status IN ('pending', 'failed', 'partial')
+        AND kind IN (${alertableKindPlaceholders})
       ORDER BY occurred_at ASC, id ASC
       LIMIT ?
     `)
-    .all(Math.min(Math.max(Number(limit) || ALERT_DISPATCH_LIMIT, 1), 100));
+    .all(...ALERTABLE_EVENT_KINDS, Math.min(Math.max(Number(limit) || ALERT_DISPATCH_LIMIT, 1), 100));
   const subscriberCount = countActiveSubscribers(db);
   const subscriberBatchSize = Math.min(Math.max(Number(env.ALERT_SUBSCRIBER_BATCH_SIZE) || 500, 1), 5000);
   const summary = { alerts: alerts.length, subscribers: subscriberCount, deliveries: 0, sent: 0, failed: 0, noRecipients: 0 };
