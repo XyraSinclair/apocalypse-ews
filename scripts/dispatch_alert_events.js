@@ -5,6 +5,26 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 const { dispatchPendingAlerts } = require('../server/local-notifications');
 
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+
+  for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#') || !trimmed.includes('=')) {
+      continue;
+    }
+    const [key, ...valueParts] = trimmed.split('=');
+    if (!process.env[key]) {
+      process.env[key] = valueParts.join('=');
+    }
+  }
+}
+
+loadEnvFile('/etc/apocalypse-ews.env');
+loadEnvFile(path.join(__dirname, '..', '.env'));
+
 function parseArgs(argv) {
   const args = {
     db: process.env.EWS_DB_PATH || path.join(__dirname, '..', 'data', 'ews-main.sqlite'),
