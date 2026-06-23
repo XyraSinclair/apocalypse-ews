@@ -4,6 +4,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Database = require('better-sqlite3');
 
+const DEFAULT_TAKEOFF_RATE_MIN_DAYS = 7;
+
+function envNumber(name, fallback = null) {
+  return process.env[name] === undefined ? fallback : Number(process.env[name]);
+}
+
 function parseArgs(argv) {
   const args = {
     db: null,
@@ -15,7 +21,8 @@ function parseArgs(argv) {
     takeoffAnomalyLevel: Number(process.env.EWS_TAKEOFF_ANOMALY_LEVEL || 4),
     takeoffWindowMinutes: Number(process.env.EWS_TAKEOFF_WINDOW_MINUTES || 30),
     takeoffRateLookbackDays: Number(process.env.EWS_TAKEOFF_RATE_LOOKBACK_DAYS || 28),
-    takeoffRateMinSamples: Number(process.env.EWS_TAKEOFF_RATE_MIN_SAMPLES || 48),
+    takeoffRateMinSamples: envNumber('EWS_TAKEOFF_RATE_MIN_SAMPLES'),
+    takeoffRateMinDays: envNumber('EWS_TAKEOFF_RATE_MIN_DAYS', DEFAULT_TAKEOFF_RATE_MIN_DAYS),
     takeoffRateMinCount: Number(process.env.EWS_TAKEOFF_RATE_MIN_COUNT || 3),
     takeoffRateZScore: Number(process.env.EWS_TAKEOFF_RATE_Z_SCORE || 3.5),
   };
@@ -44,6 +51,8 @@ function parseArgs(argv) {
       args.takeoffRateMinSamples = Number(argv[++index]);
     } else if (value === '--takeoff-rate-min-count') {
       args.takeoffRateMinCount = Number(argv[++index]);
+    } else if (value === '--takeoff-rate-min-days') {
+      args.takeoffRateMinDays = Number(argv[++index]);
     } else if (value === '--takeoff-rate-z-score') {
       args.takeoffRateZScore = Number(argv[++index]);
     } else {
@@ -121,6 +130,11 @@ function getTakeoffWindow(observedAt, windowMinutes) {
   };
 }
 
+function defaultTakeoffRateMinSamples(windowMinutes) {
+  const safeWindowMinutes = Math.max(1, Number(windowMinutes) || 30);
+  return Math.ceil((DEFAULT_TAKEOFF_RATE_MIN_DAYS * 24 * 60) / safeWindowMinutes);
+}
+
 function severityForLevel(level) {
   if (level >= 5) return 'critical';
   if (level >= 4) return 'high';
@@ -153,7 +167,8 @@ function updateExistingEvent(db, existing, event) {
       severity = @severity,
       title = @title,
       message = @message,
-      payload_json = @payloadJson
+      payload_json = @payloadJson,
+      status = @status
     WHERE id = @id
   `).run({ ...event, id: existing.id });
 }
@@ -253,14 +268,30 @@ function getTakeoffRateStats(db, cohort, observedAt, options) {
     bucketCounts.set(bucket, Number(bucketCounts.get(bucket) || 0) + Number(row.takeoffCount || 0));
   }
   const counts = Array.from(bucketCounts.values());
+  const sampleDays = new Set(rows.map((row) => parseIso(row.sampledAt, 'sampledAt').toISOString().slice(0, 10)));
   const expectedTakeoffCount = mean(counts);
   const takeoffStdDev = stdDev(counts, expectedTakeoffCount);
   const effectiveTakeoffStdDev = Math.max(takeoffStdDev, 1);
-  const modelReady = counts.length >= Math.max(1, Number(options.takeoffRateMinSamples) || 1);
+  const requiredSampleCount = Math.max(
+    defaultTakeoffRateMinSamples(options.takeoffWindowMinutes),
+    Number(options.takeoffRateMinSamples) || 0,
+    1,
+  );
+  const requiredDayCount = Math.max(
+    1,
+    Math.min(
+      Math.max(1, Math.floor(Number(options.takeoffRateLookbackDays) || 1)),
+      Math.floor(Number(options.takeoffRateMinDays) || DEFAULT_TAKEOFF_RATE_MIN_DAYS),
+    ),
+  );
+  const modelReady = counts.length >= requiredSampleCount && sampleDays.size >= requiredDayCount;
   return {
     model: 'takeoff-rate-window-baseline',
     modelReady,
     sampleCount: counts.length,
+    sampleDayCount: sampleDays.size,
+    requiredSampleCount,
+    requiredDayCount,
     lookbackStart,
     lookbackDays: options.takeoffRateLookbackDays,
     expectedTakeoffCount,
@@ -298,6 +329,7 @@ function buildEvents({
   takeoffWindowMinutes,
   takeoffRateLookbackDays,
   takeoffRateMinSamples,
+  takeoffRateMinDays,
   takeoffRateMinCount,
   takeoffRateZScore,
 }) {
@@ -316,6 +348,7 @@ function buildEvents({
     takeoffWindowMinutes,
     takeoffRateLookbackDays,
     takeoffRateMinSamples,
+    takeoffRateMinDays,
   });
   const takeoffRateZ = (takeoffs.length - takeoffRateStats.expectedTakeoffCount) / takeoffRateStats.effectiveTakeoffStdDev;
   const aircraft = compactAircraftList(takeoffs);
@@ -340,7 +373,7 @@ function buildEvents({
         takeoffCount: takeoffs.length,
         aircraft,
       }),
-      status: 'pending',
+      status: 'observed',
     });
   }
 
@@ -373,6 +406,9 @@ function buildEvents({
         takeoffRateZScoreThreshold: takeoffRateZScore,
         takeoffRateMinCount,
         sampleCount: takeoffRateStats.sampleCount,
+        sampleDayCount: takeoffRateStats.sampleDayCount,
+        requiredSampleCount: takeoffRateStats.requiredSampleCount,
+        requiredDayCount: takeoffRateStats.requiredDayCount,
         lookbackStart: takeoffRateStats.lookbackStart,
         lookbackDays: takeoffRateStats.lookbackDays,
         aircraft,
@@ -403,7 +439,7 @@ function buildEvents({
     });
   }
 
-  if (takeoffs.length > 0 && emergencyLevel >= takeoffAnomalyLevel) {
+  if (takeoffs.length >= takeoffBatchMin && emergencyLevel >= takeoffAnomalyLevel) {
     events.push({
       kind: 'takeoff_anomaly',
       severity: severityForLevel(emergencyLevel),
@@ -436,6 +472,9 @@ function buildEvents({
     takeoffRateZScore: takeoffRateZ,
     takeoffRateModelReady: takeoffRateStats.modelReady,
     takeoffRateSampleCount: takeoffRateStats.sampleCount,
+    takeoffRateSampleDayCount: takeoffRateStats.sampleDayCount,
+    takeoffRateRequiredSampleCount: takeoffRateStats.requiredSampleCount,
+    takeoffRateRequiredDayCount: takeoffRateStats.requiredDayCount,
     emergencyLevel,
     occurredAt,
     windowStart: takeoffWindow.windowStart,
@@ -469,6 +508,9 @@ function main() {
       takeoffCount: result.takeoffCount,
       takeoffRateModelReady: result.takeoffRateModelReady,
       takeoffRateSampleCount: result.takeoffRateSampleCount,
+      takeoffRateSampleDayCount: result.takeoffRateSampleDayCount,
+      takeoffRateRequiredSampleCount: result.takeoffRateRequiredSampleCount,
+      takeoffRateRequiredDayCount: result.takeoffRateRequiredDayCount,
       takeoffRateZScore: result.takeoffRateZScore,
       candidateEvents: result.events.length,
       insertedEvents: inserted,

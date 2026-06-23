@@ -6,7 +6,7 @@ import {
   getAlertRecordById,
   getRenewalReminderCandidates,
   getActiveSubscriberBatch,
-  getProcessingAlertRecords,
+  claimProcessingAlertRecords,
   getMetaValue,
   getSubscriberById,
   hasSuccessfulDelivery,
@@ -35,6 +35,7 @@ const DEFAULT_LEVEL5_SMS_MIN_INTERVAL_MS = 250;
 const DEFAULT_RENEWAL_REMINDER_DAYS_BEFORE = 30;
 const DEFAULT_RENEWAL_REMINDER_BATCH_LIMIT = 100;
 const DEFAULT_RENEWAL_REMINDER_CONCURRENCY = 4;
+const DEFAULT_ALERT_FANOUT_LEASE_MS = 30 * 60 * 1000;
 const RENEWAL_REMINDER_KIND = "renewal_reminder";
 const RENEWAL_REMINDER_SOURCE = "scheduled_renewal_reminder";
 const RENEWAL_REMINDER_SUBJECT_PREFIX = "Your Apocalypse EWS subscription renews on";
@@ -756,6 +757,32 @@ function getAlertEventMaxBatchesPerInvocation(env) {
   return getPositiveIntegerEnv(env, "ALERT_EVENT_MAX_BATCHES_PER_INVOCATION", 1, { min: 1, max: 100 });
 }
 
+function getAlertFanoutLeaseMs(env) {
+  return getPositiveIntegerEnv(env, "ALERT_FANOUT_LEASE_MS", DEFAULT_ALERT_FANOUT_LEASE_MS, {
+    min: 60 * 1000,
+    max: 24 * 60 * 60 * 1000,
+  });
+}
+
+function createAlertFanoutLease(env) {
+  const leaseMs = getAlertFanoutLeaseMs(env);
+  return {
+    token: crypto.randomUUID(),
+    expiresAt: new Date(Date.now() + leaseMs).toISOString(),
+    leaseMs,
+  };
+}
+
+function nextAlertFanoutLease(leaseToken, leaseMs) {
+  if (!leaseToken) {
+    return {};
+  }
+  return {
+    token: leaseToken,
+    expiresAt: new Date(Date.now() + leaseMs).toISOString(),
+  };
+}
+
 function getAlertFanoutSubject(record) {
   return String(record.subject || record.message_text || "Apocalypse EWS alert").slice(0, 500);
 }
@@ -791,13 +818,17 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
     const batchSummary = await sendAlertToSubscribers(env, { ...options, subscribers, updateRecord: false });
     mergeAlertSummaries(summary, batchSummary);
     summary.batchCount += 1;
-    await updateAlertFanoutProgress(
+    const progressUpdated = await updateAlertFanoutProgress(
       env,
       options.alertId,
       { ...batchSummary, batchCount: 1 },
       { afterCreatedAt, afterId },
       "processing",
+      nextAlertFanoutLease(options.leaseToken, options.leaseMs),
     );
+    if (!progressUpdated) {
+      throw new Error(`Alert fanout lease lost before recording progress for ${options.alertId}.`);
+    }
     if (subscribers.length < batchSize) {
       summary.complete = true;
       break;
@@ -807,15 +838,30 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
   if (summary.complete) {
     const totalErrorCount = Number(options.initialErrorCount || 0) + Number(summary.errorCount || 0);
     summary.status = totalErrorCount > 0 ? "completed_with_errors" : "sent";
-    await updateAlertFanoutProgress(
+    const progressUpdated = await updateAlertFanoutProgress(
       env,
       options.alertId,
       { subscriberCount: 0, emailSentCount: 0, smsSentCount: 0, errorCount: 0, batchCount: 0 },
       { afterCreatedAt: "", afterId: "" },
       summary.status,
+      { token: options.leaseToken || null },
     );
+    if (!progressUpdated) {
+      throw new Error(`Alert fanout lease lost before completing ${options.alertId}.`);
+    }
   } else {
     summary.status = "processing";
+    const progressUpdated = await updateAlertFanoutProgress(
+      env,
+      options.alertId,
+      { subscriberCount: 0, emailSentCount: 0, smsSentCount: 0, errorCount: 0, batchCount: 0 },
+      { afterCreatedAt, afterId },
+      "processing",
+      { token: options.leaseToken || null, release: true },
+    );
+    if (!progressUpdated) {
+      throw new Error(`Alert fanout lease lost before queueing ${options.alertId}.`);
+    }
   }
 
   return summary;
@@ -1232,17 +1278,24 @@ export async function sendRenewalReminderBatch(env, options = {}) {
 
 async function prepareClaimedAlertForSend(env, alertId, claim) {
   if (claim.inserted) {
-    return null;
+    return {
+      ready: true,
+      leaseToken: claim.fanoutLeaseToken || null,
+      leaseMs: getAlertFanoutLeaseMs(env),
+    };
   }
 
   const existing = await getAlertRecordById(env, alertId);
   if (existing?.status === "sent") {
     return {
-      ok: true,
-      sent: false,
-      reason: "already_recorded",
-      alertId,
-      status: existing.status,
+      ready: false,
+      response: {
+        ok: true,
+        sent: false,
+        reason: "already_recorded",
+        alertId,
+        status: existing.status,
+      },
     };
   }
   if (existing?.status === "processing") {
@@ -1250,33 +1303,63 @@ async function prepareClaimedAlertForSend(env, alertId, claim) {
       min: 60 * 1000,
       max: 24 * 60 * 60 * 1000,
     });
-    if (await beginAlertRecordSend(env, alertId, { statuses: ["processing"], staleMs })) {
-      return null;
+    const lease = createAlertFanoutLease(env);
+    if (
+      await beginAlertRecordSend(env, alertId, {
+        statuses: ["processing"],
+        staleMs,
+        fanoutLeaseToken: lease.token,
+        fanoutLeaseExpiresAt: lease.expiresAt,
+      })
+    ) {
+      return {
+        ready: true,
+        leaseToken: lease.token,
+        leaseMs: lease.leaseMs,
+      };
     }
     return {
-      ok: true,
-      sent: false,
-      reason: "already_processing",
-      alertId,
-      status: existing.status,
+      ready: false,
+      response: {
+        ok: true,
+        sent: false,
+        reason: "already_processing",
+        alertId,
+        status: existing.status,
+      },
     };
   }
 
-  if (existing && (await beginAlertRecordSend(env, alertId))) {
-    return null;
+  if (existing) {
+    const lease = createAlertFanoutLease(env);
+    if (
+      await beginAlertRecordSend(env, alertId, {
+        fanoutLeaseToken: lease.token,
+        fanoutLeaseExpiresAt: lease.expiresAt,
+      })
+    ) {
+      return {
+        ready: true,
+        leaseToken: lease.token,
+        leaseMs: lease.leaseMs,
+      };
+    }
   }
 
   const latest = await getAlertRecordById(env, alertId);
   return {
-    ok: false,
-    sent: false,
-    reason: latest ? "alert_record_not_claimed" : "alert_record_missing",
-    alertId,
-    status: latest?.status || null,
+    ready: false,
+    response: {
+      ok: false,
+      sent: false,
+      reason: latest ? "alert_record_not_claimed" : "alert_record_missing",
+      alertId,
+      status: latest?.status || null,
+    },
   };
 }
 
-async function continueAlertRecordFanout(env, alertRecord) {
+async function continueAlertRecordFanout(env, alertRecord, lease = {}) {
   const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
   const concurrency = getLevel5NotificationConcurrency(env);
   const summary = await sendAlertToActiveSubscriberBatches(env, {
@@ -1291,6 +1374,8 @@ async function continueAlertRecordFanout(env, alertRecord) {
     afterId: alertRecord.fanout_after_id || "",
     maxBatches: getAlertEventMaxBatchesPerInvocation(env),
     initialErrorCount: Number(alertRecord.error_count || 0),
+    leaseToken: lease.token || alertRecord.fanout_lease_token || null,
+    leaseMs: lease.leaseMs || getAlertFanoutLeaseMs(env),
   });
 
   return {
@@ -1306,10 +1391,14 @@ async function continueAlertRecordFanout(env, alertRecord) {
 }
 
 export async function continueAlertFanoutBatch(env, { limit = 10 } = {}) {
-  const records = await getProcessingAlertRecords(env, { limit });
+  const leaseMs = getAlertFanoutLeaseMs(env);
+  const records = await claimProcessingAlertRecords(env, { limit, leaseMs });
   const results = [];
   for (const record of records) {
-    results.push(await continueAlertRecordFanout(env, record));
+    results.push(await continueAlertRecordFanout(env, record, {
+      token: record.fanout_lease_token,
+      leaseMs,
+    }));
   }
   return {
     ok: results.every((result) => result.ok),
@@ -1323,6 +1412,7 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
   const alertId = externalAlertRecordId(event);
   const messageText = formatExternalAlertMessage(env, event);
   const smsMessageText = formatExternalAlertSms(event);
+  const lease = createAlertFanoutLease(env);
   const claim = await claimAlertRecord(env, {
     id: alertId,
     kind: event.kind,
@@ -1333,10 +1423,12 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
     subject: event.title,
     smsMessageText,
     status: "processing",
+    fanoutLeaseToken: lease.token,
+    fanoutLeaseExpiresAt: lease.expiresAt,
   });
-  const skip = await prepareClaimedAlertForSend(env, alertId, claim);
-  if (skip) {
-    return skip;
+  const prepared = await prepareClaimedAlertForSend(env, alertId, claim);
+  if (!prepared.ready) {
+    return prepared.response;
   }
 
   const summary = await continueAlertRecordFanout(env, {
@@ -1348,7 +1440,7 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
     fanout_after_created_at: "",
     fanout_after_id: "",
     error_count: 0,
-  });
+  }, { token: prepared.leaseToken, leaseMs: prepared.leaseMs });
 
   return {
     ...summary,
@@ -1385,6 +1477,7 @@ export async function maybeSendLevel5Notifications(env, snapshot, { source = "sc
   const messageText = formatEmergencyNotification(snapshot, { alertUrl: getAlertUrl(env) });
   const smsMessageText = formatEmergencyNotification(snapshot, { includeAlertUrl: false });
   const alertId = `level5:${slotKey || "unknown"}`;
+  const lease = createAlertFanoutLease(env);
   const claim = await claimAlertRecord(env, {
     id: alertId,
     kind: "level5",
@@ -1393,11 +1486,13 @@ export async function maybeSendLevel5Notifications(env, snapshot, { source = "sc
     slotKey,
     messageText,
     status: "processing",
+    fanoutLeaseToken: lease.token,
+    fanoutLeaseExpiresAt: lease.expiresAt,
   });
-  const skip = await prepareClaimedAlertForSend(env, alertId, claim);
-  if (skip) {
+  const prepared = await prepareClaimedAlertForSend(env, alertId, claim);
+  if (!prepared.ready) {
     return {
-      ...skip,
+      ...prepared.response,
       emergencyLevel,
       slotKey,
     };
@@ -1413,6 +1508,8 @@ export async function maybeSendLevel5Notifications(env, snapshot, { source = "sc
     emailContentFactory: (subscriber, managementUrl) => getLevel5EmailContent(env, snapshot, subscriber, managementUrl),
     concurrency,
     smsMinIntervalMs,
+    leaseToken: prepared.leaseToken,
+    leaseMs: prepared.leaseMs,
   });
   const deliveredCount = Number(summary.emailSentCount || 0) + Number(summary.smsSentCount || 0);
   if (summary.errorCount === 0 && deliveredCount > 0) {

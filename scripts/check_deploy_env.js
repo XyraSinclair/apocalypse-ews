@@ -4,6 +4,7 @@ const {
   getEnvWithDotEnv,
   validateDeployEnv,
   validateWranglerConfig,
+  validateMaintenanceWranglerConfig,
 } = require("./_deploy_env");
 
 function parseArgs(argv) {
@@ -32,7 +33,8 @@ const args = parseArgs(process.argv);
 const env = getEnvWithDotEnv(process.env, { envFiles: getDeployEnvFiles(args.envFiles) });
 const envErrors = validateDeployEnv(env);
 const wrangler = validateWranglerConfig();
-const errors = [...envErrors, ...wrangler.errors];
+const maintenanceWrangler = validateMaintenanceWranglerConfig();
+const errors = [...envErrors, ...wrangler.errors, ...maintenanceWrangler.errors];
 
 for (const name of REQUIRED_DEPLOY_ENV_VARS) {
   console.log(`${name}=${env[name] ? "set" : "missing"}`);
@@ -40,6 +42,8 @@ for (const name of REQUIRED_DEPLOY_ENV_VARS) {
 
 console.log(`wrangler.toml=${wrangler.ok ? "ready" : "incomplete"}`);
 console.log(`EWS_NOTIFY_DB=${wrangler.d1DatabaseName ? wrangler.d1DatabaseName : "missing"}`);
+console.log(`wrangler.maintenance.toml=${maintenanceWrangler.ok ? "ready" : "incomplete"}`);
+console.log(`EWS_NOTIFY_DB_MAINTENANCE=${maintenanceWrangler.d1DatabaseName ? maintenanceWrangler.d1DatabaseName : "missing"}`);
 
 if (errors.length) {
   console.error("Deployment environment is incomplete:");

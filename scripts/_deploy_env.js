@@ -37,6 +37,7 @@ const REQUIRED_WRANGLER_VARS = [
 const SERVICE_ENV_PATH = "/etc/apocalypse-ews.env";
 const PROJECT_ENV_PATH = path.join(REPO_ROOT, ".env");
 const WRANGLER_CONFIG_PATH = path.join(REPO_ROOT, "wrangler.toml");
+const MAINTENANCE_WRANGLER_CONFIG_PATH = path.join(REPO_ROOT, "wrangler.maintenance.toml");
 const DEFAULT_DEPLOY_ENV_FILES = [SERVICE_ENV_PATH, PROJECT_ENV_PATH];
 
 function parseDotEnvValue(value) {
@@ -256,6 +257,45 @@ function validateWranglerConfig(filePath = WRANGLER_CONFIG_PATH) {
   return { ok: errors.length === 0, d1DatabaseName, vars, errors };
 }
 
+function validateMaintenanceWranglerConfig(filePath = MAINTENANCE_WRANGLER_CONFIG_PATH) {
+  const errors = [];
+  let d1DatabaseName = "";
+  if (!fs.existsSync(filePath)) {
+    return {
+      ok: false,
+      d1DatabaseName,
+      errors: ["wrangler.maintenance.toml is required to resume queued alert fanout."],
+    };
+  }
+
+  const configText = fs.readFileSync(filePath, "utf8");
+  if (!getTomlString(configText, "name")) {
+    errors.push("wrangler.maintenance.toml must set name.");
+  }
+  if (getTomlString(configText, "main") !== "workers/notification-maintenance.js") {
+    errors.push("wrangler.maintenance.toml main must be workers/notification-maintenance.js.");
+  }
+  if (!/\bcrons\s*=\s*\[[^\]]+\]/.test(configText)) {
+    errors.push("wrangler.maintenance.toml must configure a scheduled cron trigger.");
+  }
+
+  const d1Block = getD1DatabaseBlock(configText);
+  if (!d1Block) {
+    errors.push("wrangler.maintenance.toml must bind the EWS_NOTIFY_DB D1 database.");
+  } else {
+    d1DatabaseName = getTomlString(d1Block, "database_name");
+    const databaseId = getTomlString(d1Block, "database_id");
+    if (!d1DatabaseName) {
+      errors.push("wrangler.maintenance.toml EWS_NOTIFY_DB must set database_name.");
+    }
+    if (!databaseId || databaseId === "replace-with-cloudflare-d1-database-id") {
+      errors.push("wrangler.maintenance.toml EWS_NOTIFY_DB must set a real database_id.");
+    }
+  }
+
+  return { ok: errors.length === 0, d1DatabaseName, errors };
+}
+
 
 
 
@@ -299,6 +339,7 @@ module.exports = {
   SERVICE_ENV_PATH,
   PROJECT_ENV_PATH,
   WRANGLER_CONFIG_PATH,
+  MAINTENANCE_WRANGLER_CONFIG_PATH,
   DEFAULT_DEPLOY_ENV_FILES,
   getDeployEnvFiles,
   getEnvWithDotEnv,
@@ -307,4 +348,5 @@ module.exports = {
   validateDashboardEnv,
   validateDeployEnv,
   validateWranglerConfig,
+  validateMaintenanceWranglerConfig,
 };

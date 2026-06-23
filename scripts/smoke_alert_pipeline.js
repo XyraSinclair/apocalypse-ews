@@ -156,6 +156,7 @@ function assertDeployEnvFileLoading(tempRoot) {
   const {
     getEnvWithDotEnv,
     validateDeployEnv,
+    validateMaintenanceWranglerConfig,
   } = require('./_deploy_env');
   const envPath = path.join(tempRoot, 'deploy.env');
   fs.writeFileSync(envPath, [
@@ -182,6 +183,7 @@ function assertDeployEnvFileLoading(tempRoot) {
   const env = getEnvWithDotEnv({}, { envFiles: [envPath] });
   assert(env.CLOUDFLARE_API_TOKEN === 'smoke-cloudflare-token', 'Deploy env loader did not read the explicit env file.');
   assert(validateDeployEnv(env).length === 0, 'Deploy env validation rejected the explicit env file.');
+  assert(validateMaintenanceWranglerConfig().ok, 'Maintenance wrangler config is not deploy-ready.');
 }
 
 function sendJson(response, status, payload) {
@@ -292,15 +294,15 @@ async function assertClaimAlertRecordIsIdempotent() {
             return {
               async run() {
                 if (/INSERT OR IGNORE INTO notification_alerts/i.test(sql)) {
-                  const [id, kind, source, level, slotKey, messageText, subject, smsMessageText, status, createdAt] = params;
+                  const [id, kind, source, level, slotKey, messageText, subject, smsMessageText, status, fanoutLeaseToken, fanoutLeaseExpiresAt, createdAt] = params;
                   if (inserted.has(id)) {
                     return { meta: { changes: 0 } };
                   }
-                  inserted.set(id, { id, kind, source, level, slot_key: slotKey, message_text: messageText, subject, sms_message_text: smsMessageText, status, created_at: createdAt });
+                  inserted.set(id, { id, kind, source, level, slot_key: slotKey, message_text: messageText, subject, sms_message_text: smsMessageText, status, fanout_lease_token: fanoutLeaseToken, fanout_lease_expires_at: fanoutLeaseExpiresAt, created_at: createdAt });
                   return { meta: { changes: 1 } };
                 }
                 if (/UPDATE notification_alerts/i.test(sql) && /status = 'processing'/i.test(sql)) {
-                  const [id, ...statuses] = params;
+                  const [fanoutLeaseToken, fanoutLeaseExpiresAt, id, ...statuses] = params;
                   const existing = inserted.get(id);
                   if (!existing || !statuses.includes(existing.status)) {
                     return { meta: { changes: 0 } };
@@ -428,6 +430,7 @@ async function assertResumableAlertFanout() {
     SENDGRID_FROM_EMAIL: 'alerts@example.test',
     LEVEL5_SUBSCRIBER_BATCH_SIZE: '2',
     ALERT_EVENT_MAX_BATCHES_PER_INVOCATION: '1',
+    ALERT_FANOUT_LEASE_MS: '1800000',
     LEVEL5_NOTIFICATION_CONCURRENCY: '4',
     EWS_NOTIFY_DB: createD1Adapter(db),
   };
@@ -487,20 +490,22 @@ async function assertResumableAlertFanout() {
     assert(first.status === 'processing' && first.queued === true, 'Initial resumable fanout did not leave the alert queued.');
     assert(first.emailSentCount === 2, 'Initial resumable fanout did not send exactly one bounded batch.');
     assert(sendCount === 2, 'Initial resumable fanout sent the wrong number of provider requests.');
-    const afterFirst = db.prepare('SELECT status, subscriber_count, email_sent_count, fanout_after_id FROM notification_alerts WHERE id = ?').get('alert_event:resumable-fanout-smoke');
+    const afterFirst = db.prepare('SELECT status, subscriber_count, email_sent_count, fanout_after_id, fanout_lease_token, fanout_lease_expires_at FROM notification_alerts WHERE id = ?').get('alert_event:resumable-fanout-smoke');
     assert(afterFirst.status === 'processing', 'Bounded fanout did not persist processing status.');
     assert(afterFirst.subscriber_count === 2 && afterFirst.email_sent_count === 2, 'Bounded fanout did not persist first-batch counts.');
     assert(afterFirst.fanout_after_id === 'sub-fanout-1', 'Bounded fanout did not persist the subscriber cursor.');
+    assert(afterFirst.fanout_lease_token === null && afterFirst.fanout_lease_expires_at === null, 'Bounded fanout did not release its lease for the maintenance worker.');
 
     const continued = await continueAlertFanoutBatch(env, { limit: 5 });
     assert(continued.processed === 1, 'Fanout continuation did not process the queued alert.');
     assert(continued.results?.[0]?.status === 'sent', 'Fanout continuation did not complete the queued alert.');
     assert(sendCount === 3, 'Fanout continuation sent the wrong number of provider requests.');
-    const afterContinue = db.prepare('SELECT status, subscriber_count, email_sent_count, fanout_after_id, fanout_completed_at FROM notification_alerts WHERE id = ?').get('alert_event:resumable-fanout-smoke');
+    const afterContinue = db.prepare('SELECT status, subscriber_count, email_sent_count, fanout_after_id, fanout_completed_at, fanout_lease_token, fanout_lease_expires_at FROM notification_alerts WHERE id = ?').get('alert_event:resumable-fanout-smoke');
     assert(afterContinue.status === 'sent', 'Fanout continuation did not persist sent status.');
     assert(afterContinue.subscriber_count === 3 && afterContinue.email_sent_count === 3, 'Fanout continuation did not persist cumulative counts.');
     assert(afterContinue.fanout_after_id === '', 'Fanout continuation did not clear the cursor after completion.');
     assert(afterContinue.fanout_completed_at, 'Fanout continuation did not persist a completion timestamp.');
+    assert(afterContinue.fanout_lease_token === null && afterContinue.fanout_lease_expires_at === null, 'Fanout continuation did not clear its lease after completion.');
   } finally {
     globalThis.fetch = originalFetch;
     db.close();
@@ -912,10 +917,10 @@ async function assertTakeoffRateDetection() {
       ground_speed_kt
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  for (let index = 1; index <= 48; index += 1) {
+  for (let index = 1; index <= 337; index += 1) {
     const sampledAt = new Date(observedAtMs - (index * halfHourMs)).toISOString();
     insertMetric.run(sampledAt, 10);
-    if (index % 16 === 0) {
+    if (index % 56 === 0) {
       insertTakeoff.run(
         'global_business_jet',
         `abc${String(index).padStart(3, '0')}`,
@@ -973,23 +978,95 @@ async function assertTakeoffRateDetection() {
     '--takeoff-rate-min-count',
     '3',
     '--takeoff-rate-min-samples',
-    '24',
+    '336',
+    '--takeoff-rate-min-days',
+    '7',
     '--takeoff-rate-z-score',
     '3',
   ]);
   const output = JSON.parse(run.stdout.trim());
   assert(output.takeoffRateModelReady === true, 'Takeoff-rate detector did not report a ready baseline.');
-  assert(output.takeoffRateSampleCount >= 24, 'Takeoff-rate detector did not use the historical sample window.');
+  assert(output.takeoffRateSampleCount >= 336, 'Takeoff-rate detector did not use a week-long historical sample window.');
+  assert(output.takeoffRateSampleDayCount >= 7, 'Takeoff-rate detector did not require distinct-day history.');
+  assert(output.takeoffRateRequiredSampleCount >= 336, 'Takeoff-rate detector advertised too few required samples.');
+  assert(output.takeoffRateRequiredDayCount >= 7, 'Takeoff-rate detector advertised too few required days.');
   assert(output.takeoffRateZScore >= 3, 'Takeoff-rate detector did not compute an anomalous z-score.');
-  const alerts = db.prepare('SELECT kind, payload_json AS payloadJson FROM alert_events ORDER BY kind ASC').all();
+  const alerts = db.prepare('SELECT kind, status, payload_json AS payloadJson FROM alert_events ORDER BY kind ASC').all();
   const kinds = alerts.map((event) => event.kind);
-  assert(kinds.includes('takeoff_batch'), 'Takeoff detector did not create a batch alert.');
+  const batchAlert = alerts.find((event) => event.kind === 'takeoff_batch');
+  assert(batchAlert?.status === 'observed', 'Takeoff batch telemetry should not be pending alert fanout.');
   assert(kinds.includes('takeoff_rate_anomaly'), 'Takeoff detector did not create a takeoff-rate anomaly alert.');
+  assert(alerts.find((event) => event.kind === 'takeoff_rate_anomaly')?.status === 'pending', 'Takeoff-rate anomaly was not queued for alert fanout.');
   assert(!kinds.includes('statistical_anomaly'), 'Takeoff detector emitted a concurrent statistical anomaly without an elevated level.');
   const ratePayload = JSON.parse(alerts.find((event) => event.kind === 'takeoff_rate_anomaly').payloadJson);
   assert(ratePayload.windowStart && ratePayload.windowEnd, 'Takeoff-rate anomaly did not include window bounds.');
   assert(ratePayload.signalFamily === 'takeoff_rate', 'Takeoff-rate anomaly did not include the signal family.');
   assert(ratePayload.takeoffCount === 5, 'Takeoff-rate anomaly recorded the wrong takeoff count.');
+  db.close();
+}
+
+async function assertSingleTakeoffDuringConcurrentAnomalySuppressed() {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-single-takeoff-'));
+  const dbPath = path.join(tempRoot, 'ews.sqlite');
+  const snapshotPath = path.join(tempRoot, 'dashboard.json');
+  const db = new Database(dbPath);
+  db.exec(fs.readFileSync(path.join(ROOT_DIR, 'schema.sql'), 'utf8'));
+  const observedAt = '2026-06-23T12:00:00.000Z';
+  db.prepare(`
+    INSERT INTO takeoff_events (
+      cohort,
+      hex,
+      registration,
+      label,
+      source,
+      observed_at,
+      previous_observed_at,
+      altitude_ft,
+      ground_speed_kt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'global_business_jet',
+    'abc123',
+    'N123',
+    'Single Current',
+    'smoke',
+    observedAt,
+    '2026-06-23T11:30:00.000Z',
+    1600,
+    180,
+  );
+  writeJson(snapshotPath, {
+    current: {
+      asOf: observedAt,
+      concurrentCount: 40,
+      baselineMean: 10,
+      zScore: 4,
+      emergencyLevel: 4,
+    },
+    signals: {
+      composite: {
+        emergencyLevel: 4,
+        sigmaShift: 4,
+        expectedConcurrentCount: 10,
+      },
+    },
+  });
+
+  await execNode([
+    'scripts/detect_alert_events.js',
+    '--db',
+    dbPath,
+    '--snapshot',
+    snapshotPath,
+    '--cohort',
+    'global_business_jet',
+    '--takeoff-batch-min',
+    '3',
+    '--takeoff-anomaly-level',
+    '4',
+  ]);
+  const alerts = db.prepare('SELECT kind FROM alert_events ORDER BY kind ASC').all();
+  assert(alerts.length === 0, 'Single takeoff during a concurrent anomaly should not create an alert event.');
   db.close();
 }
 
@@ -1102,6 +1179,7 @@ async function main() {
     await assertResumableAlertFanout();
     await assertPagesPipelineStatus(token);
     await assertTakeoffRateDetection();
+    await assertSingleTakeoffDuringConcurrentAnomalySuppressed();
     await assertPagesPipelineSmokeScript(token);
     await assertManualSubscriberValidation();
     await assertSendGridWebhookDeliveryStatus();

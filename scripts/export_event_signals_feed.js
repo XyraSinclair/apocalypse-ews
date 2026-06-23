@@ -9,10 +9,70 @@ const DATA_DIR = path.join(ROOT_DIR, 'data');
 const PUBLISHED_DIR = path.join(DATA_DIR, 'published');
 const MAIN_DB = process.env.EWS_DB_PATH || path.join(DATA_DIR, 'ews-main.sqlite');
 const RESEARCH_JSON = path.join(ROOT_DIR, 'localized_event_signal_research.json');
+const SNAPSHOT_FILES = [
+  { fileName: 'dashboard.json', fallbackCohort: 'global_business_jet', label: 'Business jet cohort' },
+  { fileName: 'military-dashboard.json', fallbackCohort: 'global_military_aircraft', label: 'Military aircraft cohort' },
+  { fileName: 'untracked-dashboard.json', fallbackCohort: 'non_icao_untracked', label: 'Untracked aircraft cohort' },
+];
+const ALERT_SIGNAL_KINDS = new Set(['statistical_anomaly', 'takeoff_anomaly', 'takeoff_rate_anomaly']);
+
 
 function parseJson(value, fallback = null) {
   if (!value) return fallback;
   return JSON.parse(value);
+}
+
+function severityForLevel(level) {
+  if (level >= 5) return 'critical';
+  if (level >= 4) return 'high';
+  if (level >= 3) return 'elevated';
+  return 'watch';
+}
+
+function formatCohortLabel(snapshot, fallback) {
+  return snapshot?.cohort?.sourceLabel || snapshot?.cohort?.source || fallback;
+}
+
+function recordsFromCurrentSnapshots() {
+  return SNAPSHOT_FILES.flatMap(({ fileName, fallbackCohort, label }) => {
+    const snapshotPath = path.join(PUBLISHED_DIR, fileName);
+    if (!fs.existsSync(snapshotPath)) return [];
+    const snapshot = parseJson(fs.readFileSync(snapshotPath, 'utf8'), {});
+    const current = snapshot.current || {};
+    const composite = snapshot.signals?.composite || {};
+    const observedAt = current.asOf || composite.asOf || snapshot.liveStatus?.latestSampledAt || snapshot.snapshotGeneratedAt || null;
+    if (!observedAt) return [];
+    const cohort = snapshot.cohort?.source || fallbackCohort;
+    const emergencyLevel = Number(composite.emergencyLevel ?? current.emergencyLevel ?? 1);
+    const actualConcurrentCount = Number(composite.actualConcurrentCount ?? current.concurrentCount ?? 0);
+    const expectedConcurrentCount = Number(composite.expectedConcurrentCount ?? current.baselineMean ?? 0);
+    const sigmaShift = Number(composite.sigmaShift ?? current.zScore ?? 0);
+    return [{
+      id: `current:${cohort}`,
+      source: 'current_dashboard_snapshot',
+      event: `${formatCohortLabel(snapshot, label)} current anomaly monitor`,
+      phase: 'current_concurrent_activity',
+      signalFamily: 'concurrent_count',
+      windowStart: observedAt,
+      windowEnd: observedAt,
+      timezone: 'UTC',
+      label: current.alertLevel || null,
+      classificationLabel: `Emergency level ${Number.isFinite(emergencyLevel) ? emergencyLevel : 1}`,
+      severity: severityForLevel(Number.isFinite(emergencyLevel) ? emergencyLevel : 1),
+      method: 'rolling_baseline_current_snapshot',
+      primaryCluster: null,
+      distanceMiles: null,
+      peakResidual: Number.isFinite(sigmaShift) ? sigmaShift : null,
+      observedAircraft: Number.isFinite(actualConcurrentCount) ? actualConcurrentCount : null,
+      expectedAircraft: Number.isFinite(expectedConcurrentCount) ? expectedConcurrentCount : null,
+      takeoffEvents: null,
+      landingEvents: null,
+      sampleAircraft: [],
+      provenance: `${cohort}: current concurrent-count monitor vs rolling baseline.`,
+      status: 'current',
+      alertEventKey: null,
+    }];
+  });
 }
 
 function formatCluster(cluster) {
@@ -75,11 +135,16 @@ function recordsFromLiveAlerts(limit) {
       .prepare(`
         SELECT id, kind, severity, cohort, event_key AS eventKey, occurred_at AS occurredAt, title, message, payload_json AS payloadJson, status
         FROM alert_events
+        WHERE kind IN ('statistical_anomaly', 'takeoff_anomaly', 'takeoff_rate_anomaly')
+          AND status <> 'observed'
         ORDER BY occurred_at DESC, id DESC
         LIMIT ?
       `)
       .all(limit)
       .map((event) => {
+        if (!ALERT_SIGNAL_KINDS.has(event.kind)) {
+          throw new Error(`Unexpected live alert signal kind after SQL filtering: ${event.kind}`);
+        }
         const payload = parseJson(event.payloadJson, {});
         const sampleAircraft = Array.isArray(payload.aircraft)
           ? payload.aircraft.filter(Boolean).map(String).slice(0, 10)
@@ -124,7 +189,7 @@ function recordsFromLiveAlerts(limit) {
 function main() {
   fs.mkdirSync(PUBLISHED_DIR, { recursive: true });
   const liveLimit = Math.min(Math.max(Number(process.env.EWS_EVENT_SIGNAL_LIVE_LIMIT) || 100, 1), 500);
-  const records = [...recordsFromLiveAlerts(liveLimit), ...recordsFromResearch()];
+  const records = [...recordsFromLiveAlerts(liveLimit), ...recordsFromCurrentSnapshots(), ...recordsFromResearch()];
   fs.writeFileSync(
     path.join(PUBLISHED_DIR, 'event-signals.json'),
     `${JSON.stringify({ generatedAt: new Date().toISOString(), records }, null, 2)}\n`,

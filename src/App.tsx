@@ -323,6 +323,11 @@ type EventSignalRecord = {
   distanceMiles?: number | null;
   peakResidual?: number | null;
   observedAircraft?: number | null;
+  expectedAircraft?: number | null;
+  observedTakeoffs?: number | null;
+  expectedTakeoffs?: number | null;
+  takeoffRateZScore?: number | null;
+  sampleCount?: number | null;
   takeoffEvents?: number | null;
   landingEvents?: number | null;
   provenance?: string | null;
@@ -1124,7 +1129,9 @@ function EventSignalsPage() {
                 <div><dt>Window</dt><dd>{formatDateTime(record.windowStart)}{record.windowEnd && record.windowEnd !== record.windowStart ? ` – ${formatDateTime(record.windowEnd)}` : ''}</dd></div>
                 <div><dt>Distance</dt><dd>{record.distanceMiles == null ? 'n/a' : `${formatNumber(record.distanceMiles, 0)} mi`}</dd></div>
                 <div><dt>Peak residual</dt><dd>{record.peakResidual == null ? 'n/a' : formatNumber(record.peakResidual, 1)}</dd></div>
-                <div><dt>Takeoffs</dt><dd>{record.takeoffEvents == null ? 'n/a' : formatInteger(record.takeoffEvents)}</dd></div>
+                <div><dt>Concurrent</dt><dd>{record.observedAircraft == null ? 'n/a' : record.expectedAircraft == null ? formatInteger(record.observedAircraft) : `${formatInteger(record.observedAircraft)} vs ${formatNumber(record.expectedAircraft, 0)} expected`}</dd></div>
+                <div><dt>Takeoffs</dt><dd>{(record.observedTakeoffs ?? record.takeoffEvents) == null ? 'n/a' : record.expectedTakeoffs == null ? formatInteger(record.observedTakeoffs ?? record.takeoffEvents ?? 0) : `${formatInteger(record.observedTakeoffs ?? record.takeoffEvents ?? 0)} vs ${formatNumber(record.expectedTakeoffs, 1)} expected`}</dd></div>
+                {record.sampleCount == null ? null : <div><dt>Samples</dt><dd>{formatInteger(record.sampleCount)}</dd></div>}
                 {record.sampleAircraft?.length ? <div><dt>Aircraft</dt><dd>{record.sampleAircraft.join(', ')}</dd></div> : null}
               </dl>
             </article>

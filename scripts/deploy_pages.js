@@ -6,6 +6,7 @@ const {
   REQUIRED_DEPLOY_ENV_VARS,
   getEnvWithDotEnv,
   validateDeployEnv,
+  validateMaintenanceWranglerConfig,
   validateWranglerConfig,
 } = require("./_deploy_env");
 
@@ -14,6 +15,23 @@ const publicUrl = env.EWS_PUBLIC_URL || "https://ews.kylemcdonald.net/";
 const projectName = env.CLOUDFLARE_PAGES_PROJECT || "apocalypse-ews";
 const distDir = path.join(REPO_ROOT, "dist");
 const publishedDir = path.join(REPO_ROOT, "data", "published");
+const MAINTENANCE_WORKER_SECRET_NAMES = [
+  "APP_BASE_URL",
+  "EWS_PUBLIC_URL",
+  "EWS_NOTIFICATION_URL",
+  "NOTIFICATION_HASH_SECRET",
+  "NOTIFICATION_ENCRYPTION_KEY",
+  "SENDGRID_API_KEY",
+  "SENDGRID_FROM_EMAIL",
+  "SENDGRID_FROM_NAME",
+  "SENDGRID_WEBHOOK_URL",
+  "TELNYX_API_KEY",
+  "TELNYX_NUMBER",
+  "TELNYX_FROM_PHONE",
+  "TELNYX_MESSAGING_PROFILE_ID",
+  "TELNYX_WEBHOOK_URL",
+  "TELNYX_WEBHOOK_FAILOVER_URL",
+];
 
 
 function normalizeBaseUrl(value) {
@@ -71,6 +89,40 @@ function applyD1Migrations(databaseName) {
   run("npx", ["wrangler", "d1", "migrations", "apply", databaseName, "--remote"]);
 }
 
+function deployMaintenanceWorker() {
+  run("npx", ["wrangler", "deploy", "--config", "wrangler.maintenance.toml"]);
+}
+
+function putMaintenanceWorkerSecret(name, value) {
+  const normalizedValue = String(value || "").trim();
+  if (!normalizedValue) {
+    return;
+  }
+  console.log(`$ npx wrangler secret put ${name} --config wrangler.maintenance.toml`);
+  const result = spawnSync("npx", ["wrangler", "secret", "put", name, "--config", "wrangler.maintenance.toml"], {
+    cwd: REPO_ROOT,
+    env,
+    input: `${normalizedValue}\n`,
+    stdio: ["pipe", "inherit", "inherit"],
+    shell: false,
+  });
+  if (result.status !== 0) {
+    process.exit(result.status || 1);
+  }
+}
+
+function configureMaintenanceWorkerSecrets(targetPublicUrl) {
+  const derivedEnv = {
+    ...env,
+    EWS_PUBLIC_URL: env.EWS_PUBLIC_URL || targetPublicUrl,
+    APP_BASE_URL: env.APP_BASE_URL || targetPublicUrl,
+    EWS_NOTIFICATION_URL: env.EWS_NOTIFICATION_URL || targetPublicUrl,
+  };
+  for (const name of MAINTENANCE_WORKER_SECRET_NAMES) {
+    putMaintenanceWorkerSecret(name, derivedEnv[name]);
+  }
+}
+
 
 async function restoreCurrentRss(targetPublicUrl) {
   const rssUrl = env.EWS_RSS_URL || new URL("/rss.xml", targetPublicUrl).toString();
@@ -88,7 +140,8 @@ async function restoreCurrentRss(targetPublicUrl) {
 
 async function main() {
   const wrangler = validateWranglerConfig();
-  const errors = [...validateDeployEnv(env), ...wrangler.errors];
+  const maintenanceWrangler = validateMaintenanceWranglerConfig();
+  const errors = [...validateDeployEnv(env), ...wrangler.errors, ...maintenanceWrangler.errors];
   const wranglerPublicUrl = normalizeBaseUrl(wrangler.vars?.EWS_PUBLIC_URL || "");
   const localPublicUrl = normalizeBaseUrl(publicUrl);
   if (wranglerPublicUrl && localPublicUrl && wranglerPublicUrl !== localPublicUrl) {
@@ -97,6 +150,7 @@ async function main() {
   for (const name of REQUIRED_DEPLOY_ENV_VARS) {
     console.log(`${name}=${env[name] ? "set" : "missing"}`);
   }
+  console.log(`wrangler.maintenance.toml=${maintenanceWrangler.ok ? "ready" : "incomplete"}`);
 
   if (errors.length) {
     console.error("Refusing to deploy because required deployment environment is incomplete:");
@@ -112,6 +166,8 @@ async function main() {
   await restoreCurrentRss(smokePublicUrl);
   run("npm", ["run", "verify:dashboard-urls"]);
   applyD1Migrations(wrangler.d1DatabaseName);
+  deployMaintenanceWorker();
+  configureMaintenanceWorkerSecrets(smokePublicUrl);
 
   const deployArgs = [
     "wrangler",

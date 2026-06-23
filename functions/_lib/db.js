@@ -1329,6 +1329,10 @@ function insertedRowCount(result) {
   return Number(result?.meta?.changes ?? result?.changes ?? 0);
 }
 
+function fanoutLeaseExpiresAt(leaseMs) {
+  return new Date(Date.now() + Math.max(Number(leaseMs) || 0, 0)).toISOString();
+}
+
 export async function claimAlertRecord(
   env,
   {
@@ -1341,6 +1345,8 @@ export async function claimAlertRecord(
     subject = null,
     smsMessageText = null,
     status = "created",
+    fanoutLeaseToken = null,
+    fanoutLeaseExpiresAt = null,
   },
 ) {
   const result = await getDb(env)
@@ -1356,9 +1362,11 @@ export async function claimAlertRecord(
           subject,
           sms_message_text,
           status,
+          fanout_lease_token,
+          fanout_lease_expires_at,
           created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
     )
     .bind(
@@ -1371,6 +1379,8 @@ export async function claimAlertRecord(
       subject ? String(subject).slice(0, 500) : null,
       smsMessageText || null,
       status,
+      fanoutLeaseToken,
+      fanoutLeaseExpiresAt,
       nowIso(),
     )
     .run();
@@ -1378,6 +1388,8 @@ export async function claimAlertRecord(
   return {
     id,
     inserted: insertedRowCount(result) > 0,
+    fanoutLeaseToken: insertedRowCount(result) > 0 ? fanoutLeaseToken : null,
+    fanoutLeaseExpiresAt: insertedRowCount(result) > 0 ? fanoutLeaseExpiresAt : null,
   };
 }
 
@@ -1386,6 +1398,8 @@ export async function beginAlertRecordSend(env, alertId, options = {}) {
     ? options
     : options.statuses || ["created", "completed_with_errors"];
   const staleMs = Array.isArray(options) ? 0 : Math.max(Number(options.staleMs || 0), 0);
+  const fanoutLeaseToken = Array.isArray(options) ? null : options.fanoutLeaseToken || null;
+  const fanoutLeaseExpiresAtValue = Array.isArray(options) ? null : options.fanoutLeaseExpiresAt || null;
   const directStatuses = staleMs ? statuses.filter((status) => status !== "processing") : statuses;
 
   if (directStatuses.length) {
@@ -1396,12 +1410,14 @@ export async function beginAlertRecordSend(env, alertId, options = {}) {
           UPDATE notification_alerts
           SET
             status = 'processing',
+            fanout_lease_token = COALESCE(?, fanout_lease_token),
+            fanout_lease_expires_at = COALESCE(?, fanout_lease_expires_at),
             updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
             AND status IN (${placeholders})
         `,
       )
-      .bind(alertId, ...directStatuses)
+      .bind(fanoutLeaseToken, fanoutLeaseExpiresAtValue, alertId, ...directStatuses)
       .run();
     if (insertedRowCount(result) > 0) {
       return true;
@@ -1419,17 +1435,77 @@ export async function beginAlertRecordSend(env, alertId, options = {}) {
         UPDATE notification_alerts
         SET
           status = 'processing',
+          fanout_lease_token = COALESCE(?, fanout_lease_token),
+          fanout_lease_expires_at = COALESCE(?, fanout_lease_expires_at),
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
           AND status = 'processing'
           AND CAST(COALESCE(strftime('%s', updated_at), '0') AS INTEGER) <= ?
       `,
     )
-    .bind(alertId, staleBeforeEpoch)
+    .bind(fanoutLeaseToken, fanoutLeaseExpiresAtValue, alertId, staleBeforeEpoch)
     .run();
 
   return insertedRowCount(stale) > 0;
 }
+
+export async function claimProcessingAlertRecords(env, { limit = 10, leaseMs = 30 * 60 * 1000 } = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 10, 1), 100);
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  const candidates = await getDb(env)
+    .prepare(
+      `
+        SELECT id
+        FROM notification_alerts
+        WHERE status = 'processing'
+          AND (
+            fanout_lease_expires_at IS NULL
+            OR CAST(COALESCE(strftime('%s', fanout_lease_expires_at), '0') AS INTEGER) <= ?
+          )
+        ORDER BY created_at ASC, id ASC
+        LIMIT ?
+      `,
+    )
+    .bind(nowEpoch, safeLimit)
+    .all();
+
+  const records = [];
+  for (const candidate of candidates.results || candidates || []) {
+    const leaseToken = crypto.randomUUID();
+    const leaseExpiresAt = fanoutLeaseExpiresAt(leaseMs);
+    const claimed = await getDb(env)
+      .prepare(
+        `
+          UPDATE notification_alerts
+          SET
+            fanout_lease_token = ?,
+            fanout_lease_expires_at = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+            AND status = 'processing'
+            AND (
+              fanout_lease_expires_at IS NULL
+              OR CAST(COALESCE(strftime('%s', fanout_lease_expires_at), '0') AS INTEGER) <= ?
+            )
+        `,
+      )
+      .bind(leaseToken, leaseExpiresAt, candidate.id, nowEpoch)
+      .run();
+    if (insertedRowCount(claimed) === 0) {
+      continue;
+    }
+    const record = await getAlertRecordById(env, candidate.id);
+    if (record) {
+      records.push({
+        ...record,
+        fanout_lease_token: leaseToken,
+        fanout_lease_expires_at: leaseExpiresAt,
+      });
+    }
+  }
+  return records;
+}
+
 
 export async function createAlertRecord(env, details) {
   const claim = await claimAlertRecord(env, details);
@@ -1472,10 +1548,12 @@ export async function updateAlertRecord(env, alertId, summary) {
     .run();
 }
 
-export async function updateAlertFanoutProgress(env, alertId, summary, cursor = {}, status = "processing") {
-  const timestamp = nowIso();
-  const completedAt = isCompletedAlertStatus(status) ? timestamp : null;
-  await getDb(env)
+export async function updateAlertFanoutProgress(env, alertId, summary, cursor = {}, status = "processing", lease = {}) {
+  const completedAt = isCompletedAlertStatus(status) ? nowIso() : null;
+  const leaseToken = lease.token || null;
+  const nextLeaseExpiresAt = lease.expiresAt || null;
+  const clearLease = isCompletedAlertStatus(status) || lease.release ? 1 : 0;
+  const result = await getDb(env)
     .prepare(
       `
         UPDATE notification_alerts
@@ -1490,8 +1568,11 @@ export async function updateAlertFanoutProgress(env, alertId, summary, cursor = 
           fanout_batch_count = fanout_batch_count + ?,
           sent_at = COALESCE(?, sent_at),
           fanout_completed_at = COALESCE(?, fanout_completed_at),
+          fanout_lease_token = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, fanout_lease_token) END,
+          fanout_lease_expires_at = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, fanout_lease_expires_at) END,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
+          AND (? IS NULL OR fanout_lease_token = ?)
       `,
     )
     .bind(
@@ -1505,9 +1586,16 @@ export async function updateAlertFanoutProgress(env, alertId, summary, cursor = 
       summary.batchCount || 0,
       completedAt,
       completedAt,
+      clearLease,
+      leaseToken,
+      clearLease,
+      nextLeaseExpiresAt,
       alertId,
+      leaseToken,
+      leaseToken,
     )
     .run();
+  return insertedRowCount(result);
 }
 
 export async function getProcessingAlertRecords(env, { limit = 10 } = {}) {
