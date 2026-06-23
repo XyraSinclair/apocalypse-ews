@@ -29,6 +29,16 @@ export function base64ToBytes(value) {
   return bytes;
 }
 
+export function bytesToBase64Url(bytes) {
+  return bytesToBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+export function base64UrlToBytes(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  return base64ToBytes(padded);
+}
+
 export function arrayBufferToHex(buffer) {
   const bytes = new Uint8Array(buffer);
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");

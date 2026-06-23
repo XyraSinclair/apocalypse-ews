@@ -1,0 +1,72 @@
+name: Deploy Cloudflare Pages
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: cloudflare-pages-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy production stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      INTERNAL_ALERT_TOKEN: ${{ secrets.INTERNAL_ALERT_TOKEN }}
+      EWS_PUBLIC_URL: ${{ vars.EWS_PUBLIC_URL || 'https://ews.kylemcdonald.net/' }}
+      APP_BASE_URL: ${{ vars.APP_BASE_URL || 'https://ews.kylemcdonald.net' }}
+      EWS_NOTIFICATION_URL: ${{ vars.EWS_NOTIFICATION_URL || 'https://ews.kylemcdonald.net' }}
+      CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'apocalypse-ews' }}
+      SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+      SENDGRID_FROM_EMAIL: ${{ secrets.SENDGRID_FROM_EMAIL }}
+      SENDGRID_FROM_NAME: ${{ vars.SENDGRID_FROM_NAME }}
+      SENDGRID_WEBHOOK_PUBLIC_KEY: ${{ secrets.SENDGRID_WEBHOOK_PUBLIC_KEY }}
+      SENDGRID_WEBHOOK_URL: ${{ vars.SENDGRID_WEBHOOK_URL }}
+      TELNYX_API_KEY: ${{ secrets.TELNYX_API_KEY }}
+      TELNYX_PUBLIC_KEY: ${{ secrets.TELNYX_PUBLIC_KEY }}
+      TELNYX_NUMBER: ${{ secrets.TELNYX_NUMBER }}
+      TELNYX_FROM_PHONE: ${{ secrets.TELNYX_FROM_PHONE }}
+      TELNYX_MESSAGING_PROFILE_ID: ${{ secrets.TELNYX_MESSAGING_PROFILE_ID }}
+      TELNYX_WEBHOOK_URL: ${{ vars.TELNYX_WEBHOOK_URL }}
+      TELNYX_WEBHOOK_FAILOVER_URL: ${{ vars.TELNYX_WEBHOOK_FAILOVER_URL }}
+      WEB_PUSH_VAPID_PUBLIC_KEY: ${{ secrets.WEB_PUSH_VAPID_PUBLIC_KEY }}
+      WEB_PUSH_VAPID_PRIVATE_KEY: ${{ secrets.WEB_PUSH_VAPID_PRIVATE_KEY }}
+      WEB_PUSH_CONTACT: ${{ secrets.WEB_PUSH_CONTACT }}
+      EWS_ALERT_EVENTS_WEBHOOK_URL: ${{ vars.EWS_ALERT_EVENTS_WEBHOOK_URL }}
+      EWS_SMOKE_TEST_EMAIL: ${{ secrets.EWS_SMOKE_TEST_EMAIL }}
+      EWS_SMOKE_TEST_PHONE: ${{ secrets.EWS_SMOKE_TEST_PHONE }}
+      VITE_DASHBOARD_URL: ${{ vars.VITE_DASHBOARD_URL || 'https://ews.kylemcdonald.net/dashboard.json' }}
+      VITE_MILITARY_DASHBOARD_URL: ${{ vars.VITE_MILITARY_DASHBOARD_URL || 'https://ews.kylemcdonald.net/military-dashboard.json' }}
+      VITE_UNTRACKED_DASHBOARD_URL: ${{ vars.VITE_UNTRACKED_DASHBOARD_URL || 'https://ews.kylemcdonald.net/untracked-dashboard.json' }}
+      NOTIFICATION_HASH_SECRET: ${{ secrets.NOTIFICATION_HASH_SECRET }}
+      NOTIFICATION_ENCRYPTION_KEY: ${{ secrets.NOTIFICATION_ENCRYPTION_KEY }}
+      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+      STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+      STRIPE_PRODUCT_ID: ${{ secrets.STRIPE_PRODUCT_ID }}
+      STRIPE_PRICE_ID: ${{ secrets.STRIPE_PRICE_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHANNEL: ${{ secrets.TELEGRAM_CHANNEL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify deployment configuration
+        run: npm run check:deploy
+
+      - name: Deploy and smoke-test production
+        run: npm run deploy:pages

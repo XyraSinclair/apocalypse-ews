@@ -2,6 +2,7 @@ import { contactHash, decryptString, encryptString, metadataHash } from "./crypt
 import { getPhoneCountry, isSupportedSmsPhone, normalizeEmail, normalizePhone } from "./contacts.js";
 import { createAccountManagementLink } from "./customer-portal.js";
 import { HttpError } from "./http.js";
+import { normalizePushSubscriptionPayload } from "./web-push.js";
 
 export const SUBSCRIBER_STATUS = {
   PENDING: "pending_checkout",
@@ -857,7 +858,7 @@ export async function getActiveSubscribers(env) {
         SELECT *
         FROM notification_signups
         WHERE status = ?
-          AND (wants_email = 1 OR wants_sms = 1)
+          AND (wants_email = 1 OR wants_sms = 1 OR (wants_push = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL))
         ORDER BY created_at ASC
       `,
     )
@@ -876,7 +877,7 @@ export async function getActiveSubscriberBatch(env, { afterCreatedAt = "", after
         SELECT *
         FROM notification_signups
         WHERE status = ?
-          AND (wants_email = 1 OR wants_sms = 1)
+          AND (wants_email = 1 OR wants_sms = 1 OR (wants_push = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL))
           AND (
             created_at > ?
             OR (created_at = ? AND id > ?)
@@ -893,10 +894,13 @@ export async function getActiveSubscriberBatch(env, { afterCreatedAt = "", after
 
 
 export async function hydrateSubscriberContacts(env, subscriber) {
-  const [email, accountEmail, phone] = await Promise.all([
+  const [email, accountEmail, phone, pushEndpoint, pushP256dh, pushAuth] = await Promise.all([
     decryptString(env, subscriber.email_cipher),
     decryptString(env, subscriber.account_email_cipher),
     decryptString(env, subscriber.phone_cipher),
+    decryptString(env, subscriber.push_endpoint_cipher),
+    decryptString(env, subscriber.push_p256dh_cipher),
+    decryptString(env, subscriber.push_auth_cipher),
   ]);
   const storedPhoneCountry = String(subscriber.phone_country || "").trim() || null;
   let phoneCountry = storedPhoneCountry;
@@ -916,6 +920,22 @@ export async function hydrateSubscriberContacts(env, subscriber) {
     phone,
     wantsEmail: Number(subscriber.wants_email || 0) === 1,
     wantsSms: Number(subscriber.wants_sms || 0) === 1,
+    wantsPush:
+      Number(subscriber.wants_push || 0) === 1 &&
+      Boolean(pushEndpoint && pushP256dh && pushAuth) &&
+      !subscriber.push_expired_at &&
+      !subscriber.push_opted_out_at,
+    pushSubscription:
+      pushEndpoint && pushP256dh && pushAuth
+        ? {
+            endpoint: pushEndpoint,
+            keys: {
+              p256dh: pushP256dh,
+              auth: pushAuth,
+            },
+            encoding: subscriber.push_encoding || "aes128gcm",
+          }
+        : null,
     source: subscriber.source || "stripe",
     phoneCountry,
     stripeCancelAtPeriodEnd: Number(subscriber.stripe_cancel_at_period_end || 0) === 1,
@@ -928,6 +948,332 @@ export async function getSubscriberById(env, subscriberId) {
   }
 
   return getDb(env).prepare("SELECT * FROM notification_signups WHERE id = ?").bind(subscriberId).first();
+}
+
+export async function upsertWebPushSubscriber(env, payload = {}, requestContext = {}) {
+  const subscription = normalizePushSubscriptionPayload(payload);
+  const timestamp = nowIso();
+  const [endpointHash, endpointCipher, p256dhCipher, authCipher, userAgentHash] = await Promise.all([
+    contactHash(env, "push_endpoint", subscription.endpoint),
+    encryptString(env, subscription.endpoint),
+    encryptString(env, subscription.keys.p256dh),
+    encryptString(env, subscription.keys.auth),
+    metadataHash(env, "push_user_agent", requestContext.userAgent),
+  ]);
+  const existing = await getDb(env)
+    .prepare(
+      `
+        SELECT *
+        FROM notification_signups
+        WHERE push_endpoint_hash = ?
+        ORDER BY updated_at DESC, id ASC
+        LIMIT 1
+      `,
+    )
+    .bind(endpointHash)
+    .first();
+  const id = existing?.id || crypto.randomUUID();
+  const createdAt = existing?.created_at || timestamp;
+
+  if (existing) {
+    await getDb(env)
+      .prepare(
+        `
+          UPDATE notification_signups
+          SET
+            status = ?,
+            source = CASE WHEN source IN ('stripe', 'manual', 'local_api') THEN source ELSE 'web_push' END,
+            wants_push = 1,
+            push_endpoint_cipher = ?,
+            push_endpoint_hash = ?,
+            push_p256dh_cipher = ?,
+            push_auth_cipher = ?,
+            push_encoding = ?,
+            push_user_agent_hash = ?,
+            push_failure_count = 0,
+            push_last_failure_at = NULL,
+            push_last_error = NULL,
+            push_expired_at = NULL,
+            push_opted_out_at = NULL,
+            push_opt_out_source = NULL,
+            updated_at = ?
+          WHERE id = ?
+        `,
+      )
+      .bind(
+        SUBSCRIBER_STATUS.ACTIVE,
+        endpointCipher,
+        endpointHash,
+        p256dhCipher,
+        authCipher,
+        subscription.encoding,
+        userAgentHash,
+        timestamp,
+        id,
+      )
+      .run();
+  } else {
+    await getDb(env)
+      .prepare(
+        `
+          INSERT INTO notification_signups (
+            id,
+            status,
+            source,
+            wants_push,
+            push_endpoint_cipher,
+            push_endpoint_hash,
+            push_p256dh_cipher,
+            push_auth_cipher,
+            push_encoding,
+            push_user_agent_hash,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      )
+      .bind(
+        id,
+        SUBSCRIBER_STATUS.ACTIVE,
+        "web_push",
+        1,
+        endpointCipher,
+        endpointHash,
+        p256dhCipher,
+        authCipher,
+        subscription.encoding,
+        userAgentHash,
+        createdAt,
+        timestamp,
+      )
+      .run();
+  }
+
+  return {
+    id,
+    pushEnabled: true,
+    reused: Boolean(existing),
+  };
+}
+
+export async function unsubscribeWebPushSubscriber(env, payload = {}) {
+  const subscription = normalizePushSubscriptionPayload(payload);
+  const endpointHash = await contactHash(env, "push_endpoint", subscription.endpoint);
+  const timestamp = nowIso();
+  const result = await getDb(env)
+    .prepare(
+      `
+        UPDATE notification_signups
+        SET
+          wants_push = 0,
+          push_opted_out_at = COALESCE(push_opted_out_at, ?),
+          push_opt_out_source = 'browser_unsubscribe',
+          status = CASE WHEN wants_email = 1 OR wants_sms = 1 THEN status ELSE ? END,
+          updated_at = ?
+        WHERE push_endpoint_hash = ?
+      `,
+    )
+    .bind(timestamp, SUBSCRIBER_STATUS.CANCELED, timestamp, endpointHash)
+    .run();
+
+  return {
+    removed: insertedRowCount(result) > 0,
+  };
+}
+
+export async function markWebPushSubscriberSucceeded(env, subscriberId) {
+  if (!subscriberId) {
+    return;
+  }
+  await getDb(env)
+    .prepare(
+      `
+        UPDATE notification_signups
+        SET
+          push_failure_count = 0,
+          push_last_success_at = ?,
+          push_last_failure_at = NULL,
+          push_last_error = NULL,
+          updated_at = ?
+        WHERE id = ?
+      `,
+    )
+    .bind(nowIso(), nowIso(), subscriberId)
+    .run();
+}
+
+export async function markWebPushSubscriberFailed(env, subscriberId, { error, expired = false } = {}) {
+  if (!subscriberId) {
+    return;
+  }
+  const timestamp = nowIso();
+  await getDb(env)
+    .prepare(
+      `
+        UPDATE notification_signups
+        SET
+          push_failure_count = push_failure_count + 1,
+          push_last_failure_at = ?,
+          push_last_error = ?,
+          push_expired_at = CASE WHEN ? = 1 THEN COALESCE(push_expired_at, ?) ELSE push_expired_at END,
+          wants_push = CASE WHEN ? = 1 THEN 0 ELSE wants_push END,
+          updated_at = ?
+        WHERE id = ?
+      `,
+    )
+    .bind(
+      timestamp,
+      error ? String(error).slice(0, 1000) : null,
+      expired ? 1 : 0,
+      timestamp,
+      expired ? 1 : 0,
+      timestamp,
+      subscriberId,
+    )
+    .run();
+}
+
+export async function createPublicSubscriber(env, contacts, requestContext = {}) {
+  const accountEmail = contacts.email || null;
+  const email = contacts.wantsEmail ? contacts.email : null;
+  const phone = contacts.wantsSms ? contacts.phone : null;
+  const phoneCountry = phone ? getPhoneCountry(phone) : null;
+  const timestamp = nowIso();
+  const [accountEmailHash, accountEmailCipher, emailHash, emailCipher, phoneHash, phoneCipher, consentIpHash, consentUserAgentHash] =
+    await Promise.all([
+      contactHash(env, "email", accountEmail),
+      encryptString(env, accountEmail),
+      contactHash(env, "email", email),
+      encryptString(env, email),
+      contactHash(env, "phone", phone),
+      encryptString(env, phone),
+      metadataHash(env, "sms_consent_ip", requestContext.ip),
+      metadataHash(env, "sms_consent_user_agent", requestContext.userAgent),
+    ]);
+  const existing = await firstByContactHashes(env, emailHash, phoneHash, accountEmailHash);
+  if (existing?.status === SUBSCRIBER_STATUS.ACTIVE || existing?.status === SUBSCRIBER_STATUS.PAST_DUE) {
+    throw new HttpError(409, "That email address or phone number is already subscribed.");
+  }
+
+  const id = existing?.id || crypto.randomUUID();
+  const createdAt = existing?.created_at || timestamp;
+  const db = getDb(env);
+  if (existing) {
+    await db
+      .prepare(
+        `
+          UPDATE notification_signups
+          SET
+            status = ?,
+            source = ?,
+            account_email_cipher = ?,
+            account_email_hash = ?,
+            account_email_source = ?,
+            email_cipher = ?,
+            email_hash = ?,
+            phone_cipher = ?,
+            phone_hash = ?,
+            phone_country = ?,
+            wants_email = ?,
+            wants_sms = ?,
+            sms_consent_at = ?,
+            sms_consent_ip_hash = ?,
+            sms_consent_user_agent_hash = ?,
+            stripe_customer_id = NULL,
+            stripe_subscription_id = NULL,
+            stripe_checkout_session_id = NULL,
+            stripe_product_id = NULL,
+            stripe_price_id = NULL,
+            checkout_url = NULL,
+            checkout_created_at = NULL,
+            checkout_completed_at = NULL,
+            current_period_end = NULL,
+            canceled_at = NULL,
+            contact_redacted_at = NULL,
+            sms_opted_out_at = NULL,
+            sms_opt_out_source = NULL,
+            email_opted_out_at = NULL,
+            email_opt_out_source = NULL,
+            welcome_email_sent_at = NULL,
+            welcome_sms_sent_at = NULL,
+            stripe_cancel_at_period_end = 0,
+            manual_note = NULL,
+            updated_at = ?
+          WHERE id = ?
+        `,
+      )
+      .bind(
+        SUBSCRIBER_STATUS.ACTIVE,
+        "public_api",
+        accountEmailCipher,
+        accountEmailHash,
+        accountEmail ? "signup" : null,
+        emailCipher,
+        emailHash,
+        phoneCipher,
+        phoneHash,
+        phoneCountry,
+        contacts.wantsEmail ? 1 : 0,
+        contacts.wantsSms ? 1 : 0,
+        contacts.wantsSms ? timestamp : null,
+        contacts.wantsSms ? consentIpHash : null,
+        contacts.wantsSms ? consentUserAgentHash : null,
+        timestamp,
+        id,
+      )
+      .run();
+  } else {
+    await db
+      .prepare(
+        `
+          INSERT INTO notification_signups (
+            id,
+            status,
+            source,
+            account_email_cipher,
+            account_email_hash,
+            account_email_source,
+            email_cipher,
+            email_hash,
+            phone_cipher,
+            phone_hash,
+            phone_country,
+            wants_email,
+            wants_sms,
+            sms_consent_at,
+            sms_consent_ip_hash,
+            sms_consent_user_agent_hash,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      )
+      .bind(
+        id,
+        SUBSCRIBER_STATUS.ACTIVE,
+        "public_api",
+        accountEmailCipher,
+        accountEmailHash,
+        accountEmail ? "signup" : null,
+        emailCipher,
+        emailHash,
+        phoneCipher,
+        phoneHash,
+        phoneCountry,
+        contacts.wantsEmail ? 1 : 0,
+        contacts.wantsSms ? 1 : 0,
+        contacts.wantsSms ? timestamp : null,
+        contacts.wantsSms ? consentIpHash : null,
+        contacts.wantsSms ? consentUserAgentHash : null,
+        createdAt,
+        timestamp,
+      )
+      .run();
+  }
+
+  return hydrateSubscriberContacts(env, await getSubscriberById(env, id));
 }
 
 export async function createManualSubscriber(env, payload = {}, requestContext = {}) {
@@ -1545,6 +1891,7 @@ async function recalculateAlertDeliveryCounts(env, alertId) {
         SELECT
           SUM(CASE WHEN channel = 'email' AND status IN ('sent', 'delivered') THEN 1 ELSE 0 END) AS email_sent_count,
           SUM(CASE WHEN channel = 'sms' AND status IN ('sent', 'delivered') THEN 1 ELSE 0 END) AS sms_sent_count,
+          SUM(CASE WHEN channel = 'push' AND status IN ('sent', 'delivered') THEN 1 ELSE 0 END) AS push_sent_count,
           SUM(CASE WHEN status IN ('failed', 'undelivered', 'unconfirmed') THEN 1 ELSE 0 END) AS error_count
         FROM notification_deliveries
         WHERE alert_id = ?
@@ -1561,6 +1908,7 @@ async function recalculateAlertDeliveryCounts(env, alertId) {
         SET
           email_sent_count = ?,
           sms_sent_count = ?,
+          push_sent_count = ?,
           error_count = ?,
           status = CASE
             WHEN ? > 0 THEN 'completed_with_errors'
@@ -1574,6 +1922,7 @@ async function recalculateAlertDeliveryCounts(env, alertId) {
     .bind(
       Number(row?.email_sent_count || 0),
       Number(row?.sms_sent_count || 0),
+      Number(row?.push_sent_count || 0),
       errorCount,
       errorCount,
       nowIso(),
@@ -1687,6 +2036,7 @@ export async function beginAlertRecordSend(env, alertId, options = {}) {
             subscriber_count = CASE WHEN status = 'completed_with_errors' THEN 0 ELSE subscriber_count END,
             email_sent_count = CASE WHEN status = 'completed_with_errors' THEN 0 ELSE email_sent_count END,
             sms_sent_count = CASE WHEN status = 'completed_with_errors' THEN 0 ELSE sms_sent_count END,
+            push_sent_count = CASE WHEN status = 'completed_with_errors' THEN 0 ELSE push_sent_count END,
             error_count = CASE WHEN status = 'completed_with_errors' THEN 0 ELSE error_count END,
             fanout_after_created_at = CASE WHEN status = 'completed_with_errors' THEN '' ELSE fanout_after_created_at END,
             fanout_after_id = CASE WHEN status = 'completed_with_errors' THEN '' ELSE fanout_after_id END,
@@ -1816,6 +2166,7 @@ export async function updateAlertRecord(env, alertId, summary) {
           subscriber_count = ?,
           email_sent_count = ?,
           sms_sent_count = ?,
+          push_sent_count = ?,
           error_count = ?,
           sent_at = COALESCE(?, sent_at),
           fanout_completed_at = COALESCE(?, fanout_completed_at),
@@ -1828,6 +2179,7 @@ export async function updateAlertRecord(env, alertId, summary) {
       summary.subscriberCount || 0,
       summary.emailSentCount || 0,
       summary.smsSentCount || 0,
+      summary.pushSentCount || 0,
       summary.errorCount || 0,
       completedAt,
       completedAt,
@@ -1850,6 +2202,7 @@ export async function updateAlertFanoutProgress(env, alertId, summary, cursor = 
           subscriber_count = subscriber_count + ?,
           email_sent_count = email_sent_count + ?,
           sms_sent_count = sms_sent_count + ?,
+          push_sent_count = push_sent_count + ?,
           error_count = error_count + ?,
           fanout_after_created_at = ?,
           fanout_after_id = ?,
@@ -1868,6 +2221,7 @@ export async function updateAlertFanoutProgress(env, alertId, summary, cursor = 
       summary.subscriberCount || 0,
       summary.emailSentCount || 0,
       summary.smsSentCount || 0,
+      summary.pushSentCount || 0,
       summary.errorCount || 0,
       cursor.afterCreatedAt || "",
       cursor.afterId || "",
@@ -2138,6 +2492,7 @@ export async function getNotificationPipelineStatus(env) {
           SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
           SUM(CASE WHEN status = 'active' AND wants_email = 1 AND email_hash IS NOT NULL THEN 1 ELSE 0 END) AS active_email,
           SUM(CASE WHEN status = 'active' AND wants_sms = 1 AND phone_hash IS NOT NULL AND sms_opted_out_at IS NULL THEN 1 ELSE 0 END) AS active_sms,
+          SUM(CASE WHEN status = 'active' AND wants_push = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL THEN 1 ELSE 0 END) AS active_push,
           SUM(CASE WHEN status = 'pending_checkout' THEN 1 ELSE 0 END) AS pending_checkout,
           SUM(CASE WHEN status = 'past_due' THEN 1 ELSE 0 END) AS past_due,
           SUM(CASE WHEN status = 'canceled' THEN 1 ELSE 0 END) AS canceled
@@ -2188,6 +2543,7 @@ export async function getNotificationPipelineStatus(env) {
           subscriber_count AS subscriberCount,
           email_sent_count AS emailSentCount,
           sms_sent_count AS smsSentCount,
+          push_sent_count AS pushSentCount,
           error_count AS errorCount,
           created_at AS createdAt,
           sent_at AS sentAt
@@ -2204,6 +2560,7 @@ export async function getNotificationPipelineStatus(env) {
       active: numberField(subscriberSummary, "active"),
       activeEmail: numberField(subscriberSummary, "active_email"),
       activeSms: numberField(subscriberSummary, "active_sms"),
+      activePush: numberField(subscriberSummary, "active_push"),
       pendingCheckout: numberField(subscriberSummary, "pending_checkout"),
       pastDue: numberField(subscriberSummary, "past_due"),
       canceled: numberField(subscriberSummary, "canceled"),
@@ -2236,6 +2593,7 @@ export async function getRecentAlertDeliveries(env, limit = 25) {
           a.subscriber_count,
           a.email_sent_count,
           a.sms_sent_count,
+          a.push_sent_count,
           a.error_count,
           a.created_at AS alert_created_at,
           a.sent_at,

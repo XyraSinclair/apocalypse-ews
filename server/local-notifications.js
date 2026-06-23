@@ -1,6 +1,13 @@
 const crypto = require('node:crypto');
 const { parsePhoneNumberFromString } = require('libphonenumber-js/min');
 const { cleanPublicUrl } = require('./public-url');
+const {
+  buildWebPushNotificationPayload,
+  getVapidPublicKey,
+  isWebPushConfigured,
+  normalizePushSubscriptionPayload,
+  sendWebPush,
+} = require('./web-push');
 
 const ALERT_DISPATCH_LIMIT = 25;
 const EMAIL_CONCURRENCY = 8;
@@ -131,6 +138,9 @@ function normalizeSignupPayload(payload) {
   if (!email && !phone) {
     throw new HttpError(400, 'Enter an email address, a phone number, or both.');
   }
+  if (phone && !payload?.smsConsent) {
+    throw new HttpError(400, 'SMS consent is required before subscribing a phone number.');
+  }
   return { email, phone };
 }
 
@@ -162,6 +172,7 @@ function mapSubscriberResult(env, subscriber, reused = false) {
     id: subscriber.id,
     emailEnabled: Boolean(subscriber.email_enabled),
     smsEnabled: Boolean(subscriber.sms_enabled),
+    pushEnabled: Boolean(subscriber.push_enabled),
     managementPath: createSubscriberManagementPath(env, subscriber),
     reused,
   };
@@ -234,7 +245,105 @@ function upsertSubscriber(db, payload, env = process.env) {
   return mapSubscriberResult(env, getSubscriberById(db, result.lastInsertRowid), false);
 }
 
+function normalizeLocalPushSubscription(payload) {
+  try {
+    return normalizePushSubscriptionPayload(payload);
+  } catch (error) {
+    throw new HttpError(400, error.message);
+  }
+}
+
+function upsertPushSubscriber(db, payload, env = process.env, requestContext = {}) {
+  getVapidPublicKey(env);
+  const subscription = normalizeLocalPushSubscription(payload);
+  const endpointHash = notificationHash(env, 'push_endpoint', subscription.endpoint);
+  const existing = db
+    .prepare(`
+      SELECT *
+      FROM notification_subscribers
+      WHERE push_endpoint_hash = ?
+      ORDER BY updated_at DESC, id ASC
+      LIMIT 1
+    `)
+    .get(endpointHash);
+  const row = {
+    status: 'active',
+    push_enabled: 1,
+    push_endpoint_hash: endpointHash,
+    push_endpoint_cipher: encryptString(env, subscription.endpoint),
+    push_p256dh_cipher: encryptString(env, subscription.keys.p256dh),
+    push_auth_cipher: encryptString(env, subscription.keys.auth),
+    push_encoding: subscription.encoding,
+    push_user_agent_hash: requestContext.userAgent ? notificationHash(env, 'metadata:push_user_agent', requestContext.userAgent) : null,
+  };
+  if (existing) {
+    db.prepare(`
+      UPDATE notification_subscribers
+      SET status = @status,
+          push_enabled = @push_enabled,
+          push_endpoint_hash = @push_endpoint_hash,
+          push_endpoint_cipher = @push_endpoint_cipher,
+          push_p256dh_cipher = @push_p256dh_cipher,
+          push_auth_cipher = @push_auth_cipher,
+          push_encoding = @push_encoding,
+          push_user_agent_hash = @push_user_agent_hash,
+          push_failure_count = 0,
+          push_last_failure_at = NULL,
+          push_last_error = NULL,
+          push_expired_at = NULL,
+          push_opted_out_at = NULL,
+          push_opt_out_source = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = @id
+    `).run({ ...row, id: existing.id });
+    return { id: existing.id, pushEnabled: true, reused: true };
+  }
+
+  const result = db.prepare(`
+    INSERT INTO notification_subscribers (
+      status,
+      push_enabled,
+      push_endpoint_hash,
+      push_endpoint_cipher,
+      push_p256dh_cipher,
+      push_auth_cipher,
+      push_encoding,
+      push_user_agent_hash,
+      source
+    ) VALUES (
+      @status,
+      @push_enabled,
+      @push_endpoint_hash,
+      @push_endpoint_cipher,
+      @push_p256dh_cipher,
+      @push_auth_cipher,
+      @push_encoding,
+      @push_user_agent_hash,
+      'web_push'
+    )
+  `).run(row);
+  return { id: result.lastInsertRowid, pushEnabled: true, reused: false };
+}
+
+function unsubscribePushSubscriber(db, payload, env = process.env) {
+  const subscription = normalizeLocalPushSubscription(payload);
+  const endpointHash = notificationHash(env, 'push_endpoint', subscription.endpoint);
+  const result = db.prepare(`
+    UPDATE notification_subscribers
+    SET push_enabled = 0,
+        push_opted_out_at = COALESCE(push_opted_out_at, CURRENT_TIMESTAMP),
+        push_opt_out_source = 'browser_unsubscribe',
+        status = CASE WHEN email_enabled = 1 OR sms_enabled = 1 THEN status ELSE 'unsubscribed' END,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE push_endpoint_hash = ?
+  `).run(endpointHash);
+  return { removed: result.changes > 0 };
+}
+
 function hydrateSubscriber(env, subscriber) {
+  const pushEndpoint = subscriber.push_endpoint_cipher ? decryptString(env, subscriber.push_endpoint_cipher) : null;
+  const pushP256dh = subscriber.push_p256dh_cipher ? decryptString(env, subscriber.push_p256dh_cipher) : null;
+  const pushAuth = subscriber.push_auth_cipher ? decryptString(env, subscriber.push_auth_cipher) : null;
   return {
     id: subscriber.id,
     createdAt: subscriber.created_at,
@@ -242,6 +351,19 @@ function hydrateSubscriber(env, subscriber) {
     phone: subscriber.sms_enabled ? decryptString(env, subscriber.phone_cipher) : null,
     emailHash: subscriber.email_hash,
     phoneHash: subscriber.phone_hash,
+    pushEndpoint,
+    pushEndpointHash: subscriber.push_endpoint_hash,
+    pushSubscription:
+      subscriber.push_enabled && pushEndpoint && pushP256dh && pushAuth && !subscriber.push_expired_at && !subscriber.push_opted_out_at
+        ? {
+            endpoint: pushEndpoint,
+            keys: {
+              p256dh: pushP256dh,
+              auth: pushAuth,
+            },
+            encoding: subscriber.push_encoding || 'aes128gcm',
+          }
+        : null,
   };
 }
 
@@ -275,6 +397,7 @@ function mapManagedSubscriber(env, subscriber) {
     smsSupported: Boolean(phone),
     wantsEmail: Boolean(subscriber.email_enabled),
     wantsSms: Boolean(subscriber.sms_enabled),
+    wantsPush: Boolean(subscriber.push_enabled),
     currentPeriodEnd: null,
     stripeCancelAtPeriodEnd: false,
     hasStripeSubscription: false,
@@ -345,7 +468,7 @@ function countActiveSubscribers(db) {
       SELECT COUNT(*) AS count
       FROM notification_subscribers
       WHERE status = 'active'
-        AND (email_enabled = 1 OR sms_enabled = 1)
+        AND (email_enabled = 1 OR sms_enabled = 1 OR (push_enabled = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL))
     `)
     .get().count;
 }
@@ -356,7 +479,7 @@ function getActiveSubscriberBatch(db, env = process.env, { afterId = 0, limit = 
       SELECT *
       FROM notification_subscribers
       WHERE status = 'active'
-        AND (email_enabled = 1 OR sms_enabled = 1)
+        AND (email_enabled = 1 OR sms_enabled = 1 OR (push_enabled = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL))
         AND id > ?
       ORDER BY id ASC
       LIMIT ?
@@ -487,6 +610,10 @@ async function sendSms(env, { to, text }) {
   return { providerMessageId: payload.data?.id || null };
 }
 
+async function sendPush(env, { subscription, payload }) {
+  return sendWebPush(env, { subscription, payload });
+}
+
 function recordDelivery(db, delivery) {
   db.prepare(`
     INSERT INTO alert_deliveries (
@@ -546,6 +673,41 @@ function buildSmsAlertText(env, alert, subscriber) {
   ].filter(Boolean).join(' ').slice(0, 800);
 }
 
+function buildPushAlertText(env, alert) {
+  return buildWebPushNotificationPayload({
+    title: alert.title,
+    body: alert.message,
+    url: cleanPublicUrl(env.EWS_PUBLIC_URL) || '/',
+    tag: `alert-${alert.event_key || alert.id}`,
+    eventKey: alert.event_key || null,
+  });
+}
+
+function markPushDeliverySucceeded(db, subscriberId) {
+  db.prepare(`
+    UPDATE notification_subscribers
+    SET push_failure_count = 0,
+        push_last_success_at = CURRENT_TIMESTAMP,
+        push_last_failure_at = NULL,
+        push_last_error = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(subscriberId);
+}
+
+function markPushDeliveryFailed(db, subscriberId, error) {
+  db.prepare(`
+    UPDATE notification_subscribers
+    SET push_failure_count = push_failure_count + 1,
+        push_last_failure_at = CURRENT_TIMESTAMP,
+        push_last_error = ?,
+        push_expired_at = CASE WHEN ? = 1 THEN COALESCE(push_expired_at, CURRENT_TIMESTAMP) ELSE push_expired_at END,
+        push_enabled = CASE WHEN ? = 1 THEN 0 ELSE push_enabled END,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(error.message ? error.message.slice(0, 1000) : String(error).slice(0, 1000), error.expired ? 1 : 0, error.expired ? 1 : 0, subscriberId);
+}
+
 
 
 function createProcessingLease(db, alertId, initialStamp) {
@@ -592,8 +754,9 @@ function startProcessingLeaseHeartbeat(renewProcessing, intervalMs) {
 }
 
 async function dispatchOne(db, env, alert, subscriber, channel, pacer = null, renewProcessing = null, leaseHeartbeatMs = 20_000) {
-  const destination = channel === 'sms' ? subscriber.phone : subscriber.email;
-  const destinationHash = channel === 'sms' ? subscriber.phoneHash : subscriber.emailHash;
+  const destination =
+    channel === 'sms' ? subscriber.phone : channel === 'push' ? subscriber.pushSubscription?.endpoint : subscriber.email;
+  const destinationHash = channel === 'sms' ? subscriber.phoneHash : channel === 'push' ? subscriber.pushEndpointHash : subscriber.emailHash;
   const attemptedAt = new Date().toISOString();
   try {
     if (renewProcessing && !renewProcessing()) {
@@ -610,7 +773,9 @@ async function dispatchOne(db, env, alert, subscriber, channel, pacer = null, re
     try {
       result = channel === 'sms'
         ? await sendSms(env, { to: destination, text: buildSmsAlertText(env, alert, subscriber) })
-        : await sendEmail(env, { to: destination, subject: alert.title, text: buildEmailAlertText(env, alert, subscriber) });
+        : channel === 'push'
+          ? await sendPush(env, { subscription: subscriber.pushSubscription, payload: buildPushAlertText(env, alert) })
+          : await sendEmail(env, { to: destination, subject: alert.title, text: buildEmailAlertText(env, alert, subscriber) });
     } finally {
       stopHeartbeat();
     }
@@ -624,8 +789,14 @@ async function dispatchOne(db, env, alert, subscriber, channel, pacer = null, re
       error: null,
       attemptedAt,
     });
+    if (channel === 'push') {
+      markPushDeliverySucceeded(db, subscriber.id);
+    }
     return { ok: true, channel };
   } catch (error) {
+    if (channel === 'push') {
+      markPushDeliveryFailed(db, subscriber.id, error);
+    }
     recordDelivery(db, {
       alertEventId: alert.id,
       subscriberId: subscriber.id,
@@ -719,6 +890,7 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
       for (const subscriber of subscribers) {
         if (subscriber.email && !hasSentDelivery(db, alert.id, subscriber.id, 'email')) work.push({ subscriber, channel: 'email' });
         if (subscriber.phone && !hasSentDelivery(db, alert.id, subscriber.id, 'sms')) work.push({ subscriber, channel: 'sms' });
+        if (subscriber.pushSubscription && !hasSentDelivery(db, alert.id, subscriber.id, 'push')) work.push({ subscriber, channel: 'push' });
       }
       if (!work.length) {
         continue;
@@ -771,11 +943,15 @@ module.exports = {
   createSubscriberManagementUrl,
   countActiveSubscribers,
   dispatchPendingAlerts,
+  getVapidPublicKey,
+  isWebPushConfigured,
   getManagedSubscriber,
   listAlertEvents,
   listTakeoffEvents,
   normalizeEmail,
   normalizePhone,
   upsertSubscriber,
+  unsubscribePushSubscriber,
   updateManagedSubscriber,
+  upsertPushSubscriber,
 };

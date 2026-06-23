@@ -12,6 +12,8 @@ import {
   hasSuccessfulDelivery,
   hydrateSubscriberContacts,
   markRenewalReminderFailed,
+  markWebPushSubscriberFailed,
+  markWebPushSubscriberSucceeded,
   markRenewalReminderSent,
   recordSubscriberWelcomeSent,
   recordDelivery,
@@ -26,6 +28,7 @@ import { createAccountManagementLink } from "./customer-portal.js";
 import { HttpError } from "./http.js";
 import { sendTelnyxMessage } from "./telnyx.js";
 import { createStripeInvoicePreview, retrieveStripeSubscription } from "./stripe.js";
+import { buildWebPushNotificationPayload, sendWebPush } from "./web-push.js";
 
 const LEVEL5_COOLDOWN_META_KEY = "level5_notification_last_sent_at";
 const DEFAULT_NOTIFICATION_URL = "https://aews.cc/";
@@ -323,8 +326,16 @@ async function sendSms(env, { to, text }) {
   return sendTelnyxMessage(env, { to, text });
 }
 
-async function sendDelivery(env, { alertId, subscriberId, channel, destination, text, subject = null, html = null }) {
-  const destinationHash = await contactHash(env, channel === "sms" ? "phone" : channel, destination);
+async function sendPush(env, { subscription, payload }) {
+  return sendWebPush(env, { subscription, payload });
+}
+
+async function sendDelivery(env, { alertId, subscriberId, channel, destination, text, subject = null, html = null, pushSubscription = null }) {
+  const destinationHash = await contactHash(
+    env,
+    channel === "sms" ? "phone" : channel === "push" ? "push_endpoint" : channel,
+    destination,
+  );
   if (await hasSuccessfulDelivery(env, { alertId, subscriberId, channel, destinationHash })) {
     return { ok: true, channel, skipped: true };
   }
@@ -334,7 +345,9 @@ async function sendDelivery(env, { alertId, subscriberId, channel, destination, 
     const result =
       channel === "email"
         ? await sendEmail(env, { to: destination, subject, text, html })
-        : await sendSms(env, { to: destination, text });
+        : channel === "push"
+          ? await sendPush(env, { subscription: pushSubscription, payload: text })
+          : await sendSms(env, { to: destination, text });
     await recordDelivery(env, {
       alertId,
       subscriberId,
@@ -357,12 +370,13 @@ async function sendDelivery(env, { alertId, subscriberId, channel, destination, 
       channel,
       destinationHash,
       status: "failed",
+      providerStatus: error.status ? String(error.status) : null,
       error: error.message,
       messageText: text,
       subject,
     });
 
-    return { ok: false, channel, error: error.message };
+    return { ok: false, channel, error: error.message, expired: Boolean(error.expired) };
   }
 }
 
@@ -612,6 +626,17 @@ async function recordSubscriberHydrationFailure(env, { alertId, subscriber, erro
       }),
     );
   }
+  if (Number(subscriber?.wants_push || 0) === 1 && subscriber?.push_endpoint_hash && !subscriber?.push_expired_at && !subscriber?.push_opted_out_at) {
+    records.push(
+      recordDeliveryPreparationFailure(env, {
+        alertId,
+        subscriberId,
+        channel: "push",
+        destinationHash: subscriber.push_endpoint_hash,
+        error,
+      }),
+    );
+  }
   await Promise.all(records);
   return records.length;
 }
@@ -626,6 +651,7 @@ async function sendAlertToSubscribers(
     subject,
     includeCustomerPortalLinks = false,
     emailContentFactory = null,
+    pushPayloadFactory = null,
     concurrency = 1,
     smsMinIntervalMs = 0,
     updateRecord = true,
@@ -639,8 +665,10 @@ async function sendAlertToSubscribers(
     errorCount: 0,
     emailEligibleCount: 0,
     smsEligibleCount: 0,
+    pushSentCount: 0,
     smsMinIntervalMs,
     concurrency,
+    pushEligibleCount: 0,
   };
   const smsPacer = createPacer(smsMinIntervalMs);
 
@@ -650,7 +678,9 @@ async function sendAlertToSubscribers(
       smsEligibleCount: 0,
       emailSentCount: 0,
       smsSentCount: 0,
+      pushSentCount: 0,
       errorCount: 0,
+      pushEligibleCount: 0,
     };
     let hydrated;
     try {
@@ -723,14 +753,61 @@ async function sendAlertToSubscribers(
       }
     }
 
+    if (hydrated.wantsPush && hydrated.pushSubscription) {
+      subscriberSummary.pushEligibleCount += 1;
+      if (renewFanoutLease) {
+        await renewFanoutLease();
+      }
+      let pushPayload;
+      try {
+        pushPayload =
+          typeof pushPayloadFactory === "function"
+            ? await pushPayloadFactory(hydrated)
+            : buildWebPushNotificationPayload({
+                title: subject || "Apocalypse EWS alert",
+                body: smsMessageText || messageText,
+                url: getAlertUrl(env),
+                tag: alertId,
+              });
+      } catch (error) {
+        await recordDeliveryPreparationFailure(env, {
+          alertId,
+          subscriberId: hydrated.id,
+          channel: "push",
+          destination: hydrated.pushSubscription.endpoint,
+          error,
+        });
+        subscriberSummary.errorCount += 1;
+        return subscriberSummary;
+      }
+      const result = await sendDelivery(env, {
+        alertId,
+        subscriberId: hydrated.id,
+        channel: "push",
+        destination: hydrated.pushSubscription.endpoint,
+        text: pushPayload,
+        subject,
+        pushSubscription: hydrated.pushSubscription,
+      });
+      if (result.ok) {
+        subscriberSummary.pushSentCount += 1;
+        await markWebPushSubscriberSucceeded(env, hydrated.id);
+      } else {
+        subscriberSummary.errorCount += 1;
+        await markWebPushSubscriberFailed(env, hydrated.id, { error: result.error, expired: result.expired });
+      }
+    }
+
     return subscriberSummary;
   });
 
   for (const result of results) {
     summary.emailEligibleCount += Number(result.emailEligibleCount || 0);
     summary.smsEligibleCount += Number(result.smsEligibleCount || 0);
+    summary.pushEligibleCount += Number(result.pushEligibleCount || 0);
     summary.emailSentCount += Number(result.emailSentCount || 0);
     summary.smsSentCount += Number(result.smsSentCount || 0);
+    summary.pushSentCount += Number(result.pushSentCount || 0);
     summary.errorCount += Number(result.errorCount || 0);
   }
 
@@ -745,9 +822,11 @@ function mergeAlertSummaries(summary, batchSummary) {
   summary.subscriberCount += Number(batchSummary.subscriberCount || 0);
   summary.emailSentCount += Number(batchSummary.emailSentCount || 0);
   summary.smsSentCount += Number(batchSummary.smsSentCount || 0);
+  summary.pushSentCount += Number(batchSummary.pushSentCount || 0);
   summary.errorCount += Number(batchSummary.errorCount || 0);
   summary.emailEligibleCount += Number(batchSummary.emailEligibleCount || 0);
   summary.smsEligibleCount += Number(batchSummary.smsEligibleCount || 0);
+  summary.pushEligibleCount += Number(batchSummary.pushEligibleCount || 0);
 }
 
 function normalizeMaxBatches(value) {
@@ -805,7 +884,9 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
     errorCount: 0,
     emailEligibleCount: 0,
     smsEligibleCount: 0,
+    pushSentCount: 0,
     smsMinIntervalMs: options.smsMinIntervalMs || 0,
+    pushEligibleCount: 0,
     concurrency: options.concurrency || 1,
     batchSize,
     batchCount: 0,
@@ -825,7 +906,7 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
     const progressUpdated = await updateAlertFanoutProgress(
       env,
       options.alertId,
-      { subscriberCount: 0, emailSentCount: 0, smsSentCount: 0, errorCount: 0, batchCount: 0 },
+      { subscriberCount: 0, emailSentCount: 0, smsSentCount: 0, pushSentCount: 0, errorCount: 0, batchCount: 0 },
       { afterCreatedAt, afterId },
       "processing",
       nextAlertFanoutLease(options.leaseToken, options.leaseMs),
@@ -879,7 +960,7 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
     const progressUpdated = await updateAlertFanoutProgress(
       env,
       options.alertId,
-      { subscriberCount: 0, emailSentCount: 0, smsSentCount: 0, errorCount: 0, batchCount: 0 },
+      { subscriberCount: 0, emailSentCount: 0, smsSentCount: 0, pushSentCount: 0, errorCount: 0, batchCount: 0 },
       { afterCreatedAt: "", afterId: "" },
       summary.status,
       { token: options.leaseToken || null },
@@ -892,7 +973,7 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
     const progressUpdated = await updateAlertFanoutProgress(
       env,
       options.alertId,
-      { subscriberCount: 0, emailSentCount: 0, smsSentCount: 0, errorCount: 0, batchCount: 0 },
+      { subscriberCount: 0, emailSentCount: 0, smsSentCount: 0, pushSentCount: 0, errorCount: 0, batchCount: 0 },
       { afterCreatedAt, afterId },
       "processing",
       { token: options.leaseToken || null, release: true },

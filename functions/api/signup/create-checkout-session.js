@@ -1,6 +1,6 @@
 import { normalizeSignupContacts } from "../../_lib/contacts.js";
 import { anonymizeExpiredPendingSignups, createPendingSignup, recordCheckoutSession } from "../../_lib/db.js";
-import { handleError, jsonResponse, getOriginBaseUrl, getRequestIp, getRequestUserAgent, readJsonRequest } from "../../_lib/http.js";
+import { handleError, jsonResponse, getOriginBaseUrl, getRequestIp, getRequestUserAgent, HttpError, readJsonRequest } from "../../_lib/http.js";
 import {
   createCheckoutSession,
   expireOpenCheckoutSession,
@@ -11,6 +11,9 @@ import {
 
 export async function onRequestPost({ request, env }) {
   try {
+    if (!String(env.STRIPE_SECRET_KEY || "").trim()) {
+      throw new HttpError(503, "Stripe checkout is not configured.");
+    }
     await anonymizeExpiredPendingSignups(env);
     const payload = await readJsonRequest(request);
     const contacts = normalizeSignupContacts(payload);

@@ -17,11 +17,17 @@ const REQUIRED_PROVIDER_ENV_VARS = [
   "TELNYX_API_KEY",
   "TELNYX_PUBLIC_KEY",
 ];
+const REQUIRED_WEB_PUSH_ENV_VARS = [
+  "WEB_PUSH_VAPID_PUBLIC_KEY",
+  "WEB_PUSH_VAPID_PRIVATE_KEY",
+  "WEB_PUSH_CONTACT",
+];
 const REQUIRED_DEPLOY_ENV_VARS = [
   "CLOUDFLARE_API_TOKEN",
   "INTERNAL_ALERT_TOKEN",
   "EWS_PUBLIC_URL",
   ...REQUIRED_PROVIDER_ENV_VARS,
+  ...REQUIRED_WEB_PUSH_ENV_VARS,
   "SENDGRID_WEBHOOK_PUBLIC_KEY",
   "SENDGRID_WEBHOOK_URL",
   "EWS_ALERT_EVENTS_WEBHOOK_URL",
@@ -89,12 +95,32 @@ function getDeployEnvFiles(extraEnvFiles = []) {
   return [...extraEnvFiles.filter(Boolean), ...DEFAULT_DEPLOY_ENV_FILES];
 }
 
+function derivePublicPathUrl(env, pathname) {
+  const baseUrl = String(env.APP_BASE_URL || env.EWS_PUBLIC_URL || "").trim();
+  if (!/^https?:\/\/[^\s/]+/i.test(baseUrl)) {
+    return "";
+  }
+  return `${baseUrl.replace(/\/+$/, "")}${pathname}`;
+}
+
+function withDerivedDeployEnv(env) {
+  const derivedEnv = { ...env };
+  if (!derivedEnv.SENDGRID_WEBHOOK_URL) {
+    derivedEnv.SENDGRID_WEBHOOK_URL = derivePublicPathUrl(derivedEnv, "/api/sendgrid/webhook");
+  }
+  if (!derivedEnv.EWS_ALERT_EVENTS_WEBHOOK_URL) {
+    derivedEnv.EWS_ALERT_EVENTS_WEBHOOK_URL = derivePublicPathUrl(derivedEnv, "/api/internal/alert-events");
+  }
+  return derivedEnv;
+}
+
+
 function getEnvWithDotEnv(baseEnv = process.env, options = {}) {
   const envFiles = options.envFiles || getDeployEnvFiles(options.extraEnvFiles || []);
-  return {
+  return withDerivedDeployEnv({
     ...readDotEnvFiles(envFiles),
     ...baseEnv,
-  };
+  });
 }
 
 function validateDashboardUrl(name, value) {
@@ -199,6 +225,41 @@ function validateNotificationEncryptionKey(value) {
     return "NOTIFICATION_ENCRYPTION_KEY must be a base64-encoded 32-byte key.";
   }
 
+  return null;
+}
+
+function decodeBase64Url(value) {
+  const normalized = String(value || "").trim().replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  return Buffer.from(padded, "base64");
+}
+
+function validateBase64UrlKey(name, value, byteLength, { firstByte = null } = {}) {
+  if (!value) {
+    return null;
+  }
+  const normalized = String(value).trim();
+  if (!/^[A-Za-z0-9_-]+={0,2}$/.test(normalized)) {
+    return `${name} must be base64url encoded.`;
+  }
+  const bytes = decodeBase64Url(normalized);
+  if (bytes.length !== byteLength) {
+    return `${name} must decode to ${byteLength} bytes.`;
+  }
+  if (firstByte !== null && bytes[0] !== firstByte) {
+    return `${name} must be an uncompressed P-256 public key.`;
+  }
+  return null;
+}
+
+function validateWebPushContact(value) {
+  if (!value) {
+    return null;
+  }
+  const contact = String(value).trim();
+  if (!/^mailto:[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(contact) && !/^https:\/\//i.test(contact)) {
+    return "WEB_PUSH_CONTACT must be a mailto: address or https URL.";
+  }
   return null;
 }
 
@@ -340,6 +401,13 @@ function validateDeployEnv(env) {
     missingNames.has("NOTIFICATION_ENCRYPTION_KEY")
       ? null
       : validateNotificationEncryptionKey(env.NOTIFICATION_ENCRYPTION_KEY),
+    missingNames.has("WEB_PUSH_VAPID_PUBLIC_KEY")
+      ? null
+      : validateBase64UrlKey("WEB_PUSH_VAPID_PUBLIC_KEY", env.WEB_PUSH_VAPID_PUBLIC_KEY, 65, { firstByte: 4 }),
+    missingNames.has("WEB_PUSH_VAPID_PRIVATE_KEY")
+      ? null
+      : validateBase64UrlKey("WEB_PUSH_VAPID_PRIVATE_KEY", env.WEB_PUSH_VAPID_PRIVATE_KEY, 32),
+    missingNames.has("WEB_PUSH_CONTACT") ? null : validateWebPushContact(env.WEB_PUSH_CONTACT),
     telnyxSenderConfigured
       ? null
       : "One of TELNYX_NUMBER, TELNYX_FROM_PHONE, or TELNYX_MESSAGING_PROFILE_ID is required.",

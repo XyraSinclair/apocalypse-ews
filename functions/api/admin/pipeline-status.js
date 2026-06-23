@@ -20,7 +20,11 @@ function hasTelnyxDeliveryStatusPath(env) {
 }
 
 function hasSendGridDeliveryStatusPath(env) {
-  return hasHttpsUrl(env.SENDGRID_WEBHOOK_URL);
+  return (
+    hasHttpsUrl(env.SENDGRID_WEBHOOK_URL) ||
+    hasHttpsUrl(env.APP_BASE_URL) ||
+    hasHttpsUrl(env.EWS_PUBLIC_URL)
+  );
 }
 
 function hasBase64EncodedBytes(value, byteLength) {
@@ -50,6 +54,8 @@ function getProviderConfig(env) {
       (hasText(env.TELNYX_NUMBER) || hasText(env.TELNYX_FROM_PHONE) || hasText(env.TELNYX_MESSAGING_PROFILE_ID)),
     telnyxWebhookVerificationConfigured: hasText(env.TELNYX_PUBLIC_KEY),
     telnyxDeliveryStatusConfigured: hasText(env.TELNYX_PUBLIC_KEY) && hasTelnyxDeliveryStatusPath(env),
+    webPushConfigured:
+      hasText(env.WEB_PUSH_VAPID_PUBLIC_KEY) && hasText(env.WEB_PUSH_VAPID_PRIVATE_KEY) && hasText(env.WEB_PUSH_CONTACT),
     stripeConfigured: hasText(env.STRIPE_SECRET_KEY) && hasText(env.STRIPE_PRICE_ID),
     telegramEmergencyConfigured: hasText(env.TELEGRAM_BOT_TOKEN) && hasText(env.TELEGRAM_CHANNEL),
   };
@@ -89,6 +95,7 @@ function buildReadinessFailures(status) {
   addFailure(failures, status.providerConfig.telnyxConfigured, "telnyx_not_configured");
   addFailure(failures, status.providerConfig.telnyxWebhookVerificationConfigured, "telnyx_webhook_verification_not_configured");
   addFailure(failures, status.providerConfig.telnyxDeliveryStatusConfigured, "telnyx_delivery_status_not_configured");
+  addFailure(failures, status.providerConfig.webPushConfigured, "web_push_not_configured");
   addFailure(failures, status.feeds.alerts.available && Number(status.feeds.alerts.itemCount || 0) > 0, "alerts_feed_empty_or_unavailable");
   addFailure(failures, status.feeds.takeoffs.available && Number(status.feeds.takeoffs.itemCount || 0) > 0, "takeoffs_feed_empty_or_unavailable");
   addFailure(failures, status.feeds.eventSignals.available && Number(status.feeds.eventSignals.itemCount || 0) > 0, "event_signals_feed_empty_or_unavailable");
@@ -96,6 +103,7 @@ function buildReadinessFailures(status) {
   const subscribers = status.notifications.subscribers || {};
   addFailure(failures, Number(subscribers.activeEmail || 0) > 0, "no_active_email_subscribers");
   addFailure(failures, Number(subscribers.activeSms || 0) > 0, "no_active_sms_subscribers");
+  addFailure(failures, Number(subscribers.activePush || 0) > 0, "no_active_push_subscribers");
   return failures;
 }
 

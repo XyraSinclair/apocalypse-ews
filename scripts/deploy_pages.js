@@ -21,6 +21,9 @@ const MAINTENANCE_WORKER_SECRET_NAMES = [
   "EWS_NOTIFICATION_URL",
   "NOTIFICATION_HASH_SECRET",
   "NOTIFICATION_ENCRYPTION_KEY",
+  "WEB_PUSH_VAPID_PUBLIC_KEY",
+  "WEB_PUSH_VAPID_PRIVATE_KEY",
+  "WEB_PUSH_CONTACT",
   "SENDGRID_API_KEY",
   "SENDGRID_FROM_EMAIL",
   "SENDGRID_FROM_NAME",
@@ -31,6 +34,32 @@ const MAINTENANCE_WORKER_SECRET_NAMES = [
   "TELNYX_MESSAGING_PROFILE_ID",
   "TELNYX_WEBHOOK_URL",
   "TELNYX_WEBHOOK_FAILOVER_URL",
+];
+const PAGES_FUNCTION_SECRET_NAMES = [
+  "INTERNAL_ALERT_TOKEN",
+  "NOTIFICATION_HASH_SECRET",
+  "NOTIFICATION_ENCRYPTION_KEY",
+  "WEB_PUSH_VAPID_PUBLIC_KEY",
+  "WEB_PUSH_VAPID_PRIVATE_KEY",
+  "WEB_PUSH_CONTACT",
+  "SENDGRID_API_KEY",
+  "SENDGRID_FROM_EMAIL",
+  "SENDGRID_FROM_NAME",
+  "SENDGRID_WEBHOOK_PUBLIC_KEY",
+  "SENDGRID_WEBHOOK_URL",
+  "TELNYX_API_KEY",
+  "TELNYX_PUBLIC_KEY",
+  "TELNYX_NUMBER",
+  "TELNYX_FROM_PHONE",
+  "TELNYX_MESSAGING_PROFILE_ID",
+  "TELNYX_WEBHOOK_URL",
+  "TELNYX_WEBHOOK_FAILOVER_URL",
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "STRIPE_PRODUCT_ID",
+  "STRIPE_PRICE_ID",
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_CHANNEL",
 ];
 
 
@@ -110,6 +139,30 @@ function configureMaintenanceWorkerSecrets(targetPublicUrl) {
   }
 }
 
+function putPagesFunctionSecret(projectName, name, value) {
+  const normalizedValue = String(value || "").trim();
+  if (!normalizedValue) {
+    return;
+  }
+  console.log(`$ npx wrangler pages secret put ${name} --project-name ${projectName}`);
+  const result = spawnSync("npx", ["wrangler", "pages", "secret", "put", name, "--project-name", projectName], {
+    cwd: REPO_ROOT,
+    env,
+    input: `${normalizedValue}\n`,
+    stdio: ["pipe", "inherit", "inherit"],
+    shell: false,
+  });
+  if (result.status !== 0) {
+    process.exit(result.status || 1);
+  }
+}
+
+function configurePagesFunctionSecrets(projectName) {
+  for (const name of PAGES_FUNCTION_SECRET_NAMES) {
+    putPagesFunctionSecret(projectName, name, env[name]);
+  }
+}
+
 
 async function restoreCurrentRss(targetPublicUrl) {
   const rssUrl = env.EWS_RSS_URL || new URL("/rss.xml", targetPublicUrl).toString();
@@ -172,11 +225,20 @@ async function main() {
   }
 
   run("npx", deployArgs);
+  configurePagesFunctionSecrets(projectName);
   run("npm", ["run", "smoke:live", "--", smokePublicUrl]);
   run("npm", getPagesPipelineSmokeArgs(smokePublicUrl));
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  MAINTENANCE_WORKER_SECRET_NAMES,
+  PAGES_FUNCTION_SECRET_NAMES,
+  getPagesPipelineSmokeArgs,
+};

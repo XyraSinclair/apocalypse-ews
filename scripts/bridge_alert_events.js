@@ -19,11 +19,19 @@ function loadEnvFile(filePath) {
 loadEnvFile('/etc/apocalypse-ews.env');
 loadEnvFile(path.join(__dirname, '..', '.env'));
 
+function deriveAlertEventsWebhookUrl() {
+  const baseUrl = String(process.env.EWS_PUBLIC_URL || process.env.APP_BASE_URL || '').trim();
+  if (!/^https:\/\/[^\s/]+/i.test(baseUrl)) {
+    return '';
+  }
+  return `${baseUrl.replace(/\/+$/, '')}/api/internal/alert-events`;
+}
+
 function parseArgs(argv) {
   const args = {
     db: process.env.EWS_DB_PATH || path.join(__dirname, '..', 'data', 'ews-main.sqlite'),
     limit: Number(process.env.EWS_ALERT_EVENT_BRIDGE_LIMIT || 100),
-    url: process.env.EWS_ALERT_EVENTS_WEBHOOK_URL || '',
+    url: process.env.EWS_ALERT_EVENTS_WEBHOOK_URL || deriveAlertEventsWebhookUrl(),
     statusPath:
       process.env.EWS_ALERT_BRIDGE_STATUS_PATH ||
       path.join(__dirname, '..', 'data', 'published', 'alert-bridge-status.json'),

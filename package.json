@@ -38,7 +38,8 @@
     "deploy:pages": "node scripts/deploy_pages.js",
     "smoke:live": "node scripts/smoke_live_site.js",
     "smoke:alert-pipeline": "node scripts/smoke_alert_pipeline.js",
-    "smoke:pages-pipeline": "node scripts/smoke_pages_pipeline.js"
+    "smoke:pages-pipeline": "node scripts/smoke_pages_pipeline.js",
+    "webpush:keys": "node scripts/generate_web_push_keys.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",

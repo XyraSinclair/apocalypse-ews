@@ -212,7 +212,7 @@ async function fetchDashboard(kind: CohortKind, baseUrl: string): Promise<[Cohor
   return [kind, JSON.parse(text) as DashboardResponse];
 }
 
-type SignupContacts = { email: string | null; phone: string | null };
+type SignupContacts = { email: string | null; phone: string | null; smsConsent: boolean };
 
 type SignupResult =
   | { mode: 'checkout'; checkoutUrl: string; sessionId: string | null; reused: boolean }
@@ -239,9 +239,9 @@ async function createCheckoutSignup(contacts: SignupContacts): Promise<SignupRes
   const response = await fetch('/api/signup/create-checkout-session', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: contacts.email, phone: contacts.phone, smsConsent: Boolean(contacts.phone) }),
+    body: JSON.stringify({ email: contacts.email, phone: contacts.phone, smsConsent: contacts.smsConsent }),
   });
-  if (response.status === 404 || response.status === 405) {
+  if (response.status === 404 || response.status === 405 || response.status === 503) {
     throw new CheckoutUnavailableError('Checkout API is not available on this deployment.');
   }
 
@@ -265,7 +265,7 @@ async function createLocalNotificationSignup(contacts: SignupContacts): Promise<
   const response = await fetch('/api/notifications/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: contacts.email, phone: contacts.phone }),
+    body: JSON.stringify({ email: contacts.email, phone: contacts.phone, smsConsent: contacts.smsConsent }),
   });
   const payload = await readApiPayload(response);
   if (!response.ok) {
@@ -289,6 +289,88 @@ async function createNotificationSignup(contacts: SignupContacts): Promise<Signu
     }
     throw error;
   }
+}
+
+type BrowserPushSignupResult = {
+  id: string | null;
+  pushEnabled: boolean;
+  reused: boolean;
+};
+
+function browserPushUnsupportedReason() {
+  if (!('serviceWorker' in navigator)) {
+    return 'This browser does not support service workers.';
+  }
+  if (!('PushManager' in window)) {
+    return 'This browser does not support push notifications.';
+  }
+  if (!('Notification' in window)) {
+    return 'This browser does not expose notification permission controls.';
+  }
+  if (!window.isSecureContext) {
+    return 'Browser push requires HTTPS.';
+  }
+  return null;
+}
+
+function base64UrlToUint8Array(value: string) {
+  const padded = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
+  const binary = window.atob(padded);
+  const output = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    output[index] = binary.charCodeAt(index);
+  }
+  return output;
+}
+
+async function fetchBrowserPushPublicKey() {
+  const response = await fetch('/api/push/vapid-public-key', { cache: 'no-store' });
+  const payload = await readApiPayload(response);
+  if (!response.ok) {
+    throw new Error(apiErrorMessage(payload, `Browser push setup failed with HTTP ${response.status}`));
+  }
+  if (typeof payload.publicKey !== 'string' || !payload.publicKey) {
+    throw new Error('Browser push is not configured on this deployment.');
+  }
+  return payload.publicKey;
+}
+
+async function enableBrowserPushSignup(): Promise<BrowserPushSignupResult> {
+  const unsupportedReason = browserPushUnsupportedReason();
+  if (unsupportedReason) {
+    throw new Error(unsupportedReason);
+  }
+  if (Notification.permission === 'denied') {
+    throw new Error('Notification permission is blocked in this browser.');
+  }
+  const publicKey = await fetchBrowserPushPublicKey();
+  const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+  if (permission !== 'granted') {
+    throw new Error('Notification permission was not granted.');
+  }
+  const registration = await navigator.serviceWorker.register('/ews-service-worker.js');
+  const existingSubscription = await registration.pushManager.getSubscription();
+  const subscription =
+    existingSubscription ??
+    (await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: base64UrlToUint8Array(publicKey),
+    }));
+  const response = await fetch('/api/push/subscribe', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ subscription: subscription.toJSON() }),
+  });
+  const payload = await readApiPayload(response);
+  if (!response.ok) {
+    throw new Error(apiErrorMessage(payload, `Browser push signup failed with HTTP ${response.status}`));
+  }
+  const subscriber = payload.subscriber && typeof payload.subscriber === 'object' ? (payload.subscriber as Record<string, unknown>) : {};
+  return {
+    id: typeof subscriber.id === 'string' || typeof subscriber.id === 'number' ? String(subscriber.id) : null,
+    pushEnabled: payload.pushEnabled === true || subscriber.pushEnabled === true,
+    reused: subscriber.reused === true,
+  };
 }
 
 type ManagedSubscriber = {
@@ -988,10 +1070,14 @@ function UpdatesPanel() {
 function SignupPage() {
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
+  const [smsConsent, setSmsConsent] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [managementPath, setManagementPath] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [pushStatus, setPushStatus] = useState<string | null>(null);
+  const [pushError, setPushError] = useState<string | null>(null);
+  const [pushSubmitting, setPushSubmitting] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -1021,8 +1107,12 @@ function SignupPage() {
       setError('Enter a phone number with country code if SMS alerts are desired.');
       return;
     }
+    if (trimmedPhone && !smsConsent) {
+      setError('Confirm SMS consent before subscribing a phone number.');
+      return;
+    }
 
-    const contacts = { email: trimmedEmail || null, phone: trimmedPhone || null };
+    const contacts = { email: trimmedEmail || null, phone: trimmedPhone || null, smsConsent: Boolean(trimmedPhone && smsConsent) };
     setSubmitting(true);
     try {
       const result = await createNotificationSignup(contacts);
@@ -1046,6 +1136,24 @@ function SignupPage() {
     }
   }
 
+  async function enablePushAlerts() {
+    setPushError(null);
+    setPushStatus(null);
+    setPushSubmitting(true);
+    try {
+      const result = await enableBrowserPushSignup();
+      window.localStorage.setItem(
+        'ews-browser-push',
+        JSON.stringify({ subscriberId: result.id, createdAt: new Date().toISOString(), reused: result.reused }),
+      );
+      setPushStatus(result.reused ? 'Browser push alerts were already enabled for this device.' : 'Browser push alerts enabled for this device.');
+    } catch (pushSignupError) {
+      setPushError(pushSignupError instanceof Error ? pushSignupError.message : 'Browser push setup failed.');
+    } finally {
+      setPushSubmitting(false);
+    }
+  }
+
   return (
     <main className="app-shell signup-shell">
       <div className="background-wallpaper" aria-hidden="true" />
@@ -1061,6 +1169,15 @@ function SignupPage() {
           {error ? <p className="signup-status signup-status-error">{error}</p> : null}
           {status ? <p className="signup-status signup-status-success">{status}</p> : null}
           {managementPath ? <p className="signup-status"><a href={managementPath}>Manage this subscription</a></p> : null}
+          {pushError ? <p className="signup-status signup-status-error">{pushError}</p> : null}
+          {pushStatus ? <p className="signup-status signup-status-success">{pushStatus}</p> : null}
+          <div className="push-signup-box">
+            <h3>Fast browser push</h3>
+            <p>Enable device push alerts for takeoff clusters and anomaly spikes. No email, phone number, checkout, or carrier throughput limit required.</p>
+            <button className="signup-submit" type="button" disabled={pushSubmitting} onClick={enablePushAlerts}>
+              {pushSubmitting ? 'Enabling...' : 'Enable Browser Push'}
+            </button>
+          </div>
           <form className="signup-form" onSubmit={submit} noValidate>
             <label className="signup-field">
               <span>Email address</span>
@@ -1068,7 +1185,15 @@ function SignupPage() {
             </label>
             <label className="signup-field">
               <span>Phone number</span>
-              <input type="tel" name="phone" placeholder="+1 415 555 2671" value={phone} onChange={(event) => setPhone(event.currentTarget.value)} />
+              <input type="tel" name="phone" placeholder="+1 415 555 2671" value={phone} onChange={(event) => {
+                const value = event.currentTarget.value;
+                setPhone(value);
+                if (!value.trim()) setSmsConsent(false);
+              }} />
+            </label>
+            <label className="signup-field checkbox-field">
+              <input type="checkbox" name="smsConsent" checked={smsConsent} disabled={!phone.trim()} onChange={(event) => setSmsConsent(event.currentTarget.checked)} />
+              <span>I consent to receive Apocalypse EWS SMS alerts at this number. Message and data rates may apply; reply STOP to opt out.</span>
             </label>
             <button className="signup-submit" type="submit" disabled={submitting}>{submitting ? 'Saving...' : 'Sign Up'}</button>
           </form>

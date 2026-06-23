@@ -582,6 +582,18 @@ h3 {
 .signup-panel,
 .signup-form { display: grid; gap: 12px; }
 
+.push-signup-box {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  background: #f8fbff;
+  border: 1px dashed #667;
+}
+
+.push-signup-box p {
+  margin-bottom: 0;
+}
+
 .signup-field {
   display: grid;
   gap: 4px;

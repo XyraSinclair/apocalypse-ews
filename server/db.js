@@ -77,6 +77,30 @@ function migrateSchema(db) {
 
   db.prepare("DROP INDEX IF EXISTS idx_recent_history_activity_last_observed_at").run();
   db.prepare("DROP TABLE IF EXISTS recent_history_activity").run();
+
+  const notificationSubscriberColumns = tableColumns(db, "notification_subscribers");
+  const pushColumns = [
+    ["push_enabled", "INTEGER NOT NULL DEFAULT 0"],
+    ["push_endpoint_hash", "TEXT"],
+    ["push_endpoint_cipher", "TEXT"],
+    ["push_p256dh_cipher", "TEXT"],
+    ["push_auth_cipher", "TEXT"],
+    ["push_encoding", "TEXT"],
+    ["push_user_agent_hash", "TEXT"],
+    ["push_failure_count", "INTEGER NOT NULL DEFAULT 0"],
+    ["push_last_success_at", "TEXT"],
+    ["push_last_failure_at", "TEXT"],
+    ["push_last_error", "TEXT"],
+    ["push_expired_at", "TEXT"],
+    ["push_opted_out_at", "TEXT"],
+    ["push_opt_out_source", "TEXT"],
+  ];
+  for (const [columnName, columnDefinition] of pushColumns) {
+    if (!notificationSubscriberColumns.has(columnName)) {
+      db.prepare(`ALTER TABLE notification_subscribers ADD COLUMN ${columnName} ${columnDefinition}`).run();
+    }
+  }
+  db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_subscribers_push_endpoint_hash ON notification_subscribers (push_endpoint_hash)").run();
 }
 
 function getDb() {

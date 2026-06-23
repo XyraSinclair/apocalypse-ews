@@ -22,10 +22,14 @@ const { buildEmergencyRssFeedXml, dedupeRssItems, getRssItems, maybeRecordEmerge
 const {
   HttpError,
   countActiveSubscribers,
+  getVapidPublicKey,
+  isWebPushConfigured,
   getManagedSubscriber,
   listAlertEvents,
   listTakeoffEvents,
   upsertSubscriber,
+  unsubscribePushSubscriber,
+  upsertPushSubscriber,
   updateManagedSubscriber,
 } = require("./local-notifications");
 
@@ -139,7 +143,7 @@ function hasTelnyxDeliveryStatusPath() {
 }
 
 function hasSendGridDeliveryStatusPath() {
-  return hasHttpsEnv("SENDGRID_WEBHOOK_URL");
+  return hasHttpsEnv("SENDGRID_WEBHOOK_URL") || hasHttpsEnv("APP_BASE_URL") || hasHttpsEnv("EWS_PUBLIC_URL");
 }
 
 function hasBase64EncodedBytes(value, byteLength) {
@@ -341,6 +345,7 @@ app.get("/api/admin/local-pipeline-status", (request, response) => {
       telnyxDeliveryStatusConfigured: hasEnv("TELNYX_PUBLIC_KEY") && hasTelnyxDeliveryStatusPath(),
       stripeConfigured: hasEnv("STRIPE_SECRET_KEY") && hasEnv("STRIPE_PRICE_ID"),
       telegramEmergencyConfigured: hasEnv("TELEGRAM_BOT_TOKEN") && hasEnv("TELEGRAM_CHANNEL"),
+      webPushConfigured: isWebPushConfigured(process.env),
     },
     bridge: bridgeStatus.available
       ? {
@@ -398,6 +403,45 @@ app.post("/api/notifications/signup", (request, response) => {
     ok: true,
     ...subscriber,
     subscriber,
+  });
+});
+
+app.get("/api/push/vapid-public-key", (_request, response) => {
+  if (!isWebPushConfigured(process.env)) {
+    response.status(503).json({ error: "Browser push is not configured." });
+    return;
+  }
+  response.set("cache-control", "no-store").json({
+    ok: true,
+    configured: isWebPushConfigured(process.env),
+    publicKey: getVapidPublicKey(process.env),
+  });
+});
+
+app.post("/api/push/subscribe", (request, response) => {
+  if (!isWebPushConfigured(process.env)) {
+    response.status(503).json({ error: "Browser push is not configured." });
+    return;
+  }
+  const subscriber = upsertPushSubscriber(getDb(), request.body, process.env, {
+    userAgent: request.get("user-agent"),
+  });
+  response.json({
+    ok: true,
+    pushEnabled: true,
+    subscriber,
+  });
+});
+
+app.delete("/api/push/subscribe", (request, response) => {
+  if (!isWebPushConfigured(process.env)) {
+    response.status(503).json({ error: "Browser push is not configured." });
+    return;
+  }
+  const result = unsubscribePushSubscriber(getDb(), request.body, process.env);
+  response.json({
+    ok: true,
+    ...result,
   });
 });
 

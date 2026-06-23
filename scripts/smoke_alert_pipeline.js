@@ -32,6 +32,34 @@ async function assertRejects(fn, expectedMessagePart) {
   );
 }
 
+function createSmokeVapidEnv() {
+  const { publicKey, privateKey } = nodeCrypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const publicJwk = publicKey.export({ format: 'jwk' });
+  const privateJwk = privateKey.export({ format: 'jwk' });
+  const publicKeyBytes = Buffer.concat([
+    Buffer.from([4]),
+    Buffer.from(publicJwk.x, 'base64url'),
+    Buffer.from(publicJwk.y, 'base64url'),
+  ]);
+  return {
+    WEB_PUSH_VAPID_PUBLIC_KEY: publicKeyBytes.toString('base64url'),
+    WEB_PUSH_VAPID_PRIVATE_KEY: privateJwk.d,
+    WEB_PUSH_CONTACT: 'mailto:alerts@example.test',
+  };
+}
+
+async function createSmokePushSubscription(endpoint = 'https://push.example.test/send/smoke') {
+  const keyPair = await nodeCrypto.webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const publicKey = new Uint8Array(await nodeCrypto.webcrypto.subtle.exportKey('raw', keyPair.publicKey));
+  return {
+    endpoint,
+    keys: {
+      p256dh: Buffer.from(publicKey).toString('base64url'),
+      auth: nodeCrypto.randomBytes(16).toString('base64url'),
+    },
+  };
+}
+
 function writeJson(filePath, payload) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`);
@@ -159,6 +187,7 @@ function assertDeployEnvFileLoading(tempRoot) {
     validateMaintenanceWranglerConfig,
   } = require('./_deploy_env');
   const envPath = path.join(tempRoot, 'deploy.env');
+  const vapidEnv = createSmokeVapidEnv();
   fs.writeFileSync(envPath, [
     'CLOUDFLARE_API_TOKEN=smoke-cloudflare-token',
     'INTERNAL_ALERT_TOKEN=smoke-internal-token',
@@ -178,13 +207,82 @@ function assertDeployEnvFileLoading(tempRoot) {
     'VITE_UNTRACKED_DASHBOARD_URL=https://alerts.example.test/untracked-dashboard.json',
     'NOTIFICATION_HASH_SECRET=smoke-hash-secret',
     `NOTIFICATION_ENCRYPTION_KEY=${Buffer.alloc(32, 11).toString('base64')}`,
+    `WEB_PUSH_VAPID_PUBLIC_KEY=${vapidEnv.WEB_PUSH_VAPID_PUBLIC_KEY}`,
+    `WEB_PUSH_VAPID_PRIVATE_KEY=${vapidEnv.WEB_PUSH_VAPID_PRIVATE_KEY}`,
+    `WEB_PUSH_CONTACT=${vapidEnv.WEB_PUSH_CONTACT}`,
     '',
   ].join('\n'));
 
   const env = getEnvWithDotEnv({}, { envFiles: [envPath] });
   assert(env.CLOUDFLARE_API_TOKEN === 'smoke-cloudflare-token', 'Deploy env loader did not read the explicit env file.');
   assert(validateDeployEnv(env).length === 0, 'Deploy env validation rejected the explicit env file.');
+  const {
+    SENDGRID_WEBHOOK_URL: _explicitSendGridWebhookUrl,
+    EWS_ALERT_EVENTS_WEBHOOK_URL: _explicitAlertEventsWebhookUrl,
+    ...withoutExplicitWebhookUrls
+  } = env;
+  const derivedEnv = getEnvWithDotEnv(withoutExplicitWebhookUrls, { envFiles: [] });
+  assert(
+    derivedEnv.SENDGRID_WEBHOOK_URL === 'https://alerts.example.test/api/sendgrid/webhook',
+    'Deploy env loader did not derive the SendGrid webhook URL from EWS_PUBLIC_URL.',
+  );
+  assert(
+    derivedEnv.EWS_ALERT_EVENTS_WEBHOOK_URL === 'https://alerts.example.test/api/internal/alert-events',
+    'Deploy env loader did not derive the alert event bridge URL from EWS_PUBLIC_URL.',
+  );
+  assert(validateDeployEnv(derivedEnv).length === 0, 'Deploy env validation rejected derived webhook URLs.');
   assert(validateMaintenanceWranglerConfig().ok, 'Maintenance wrangler config is not deploy-ready.');
+}
+
+function assertDeploySecretCoverage() {
+  const {
+    MAINTENANCE_WORKER_SECRET_NAMES,
+    PAGES_FUNCTION_SECRET_NAMES,
+    getPagesPipelineSmokeArgs,
+  } = require('./deploy_pages');
+  const requiredMaintenanceSecrets = [
+    'NOTIFICATION_HASH_SECRET',
+    'NOTIFICATION_ENCRYPTION_KEY',
+    'WEB_PUSH_VAPID_PUBLIC_KEY',
+    'WEB_PUSH_VAPID_PRIVATE_KEY',
+    'WEB_PUSH_CONTACT',
+    'SENDGRID_API_KEY',
+    'SENDGRID_FROM_EMAIL',
+    'TELNYX_API_KEY',
+  ];
+  const requiredPagesSecrets = [
+    'INTERNAL_ALERT_TOKEN',
+    'NOTIFICATION_HASH_SECRET',
+    'NOTIFICATION_ENCRYPTION_KEY',
+    'WEB_PUSH_VAPID_PUBLIC_KEY',
+    'WEB_PUSH_VAPID_PRIVATE_KEY',
+    'WEB_PUSH_CONTACT',
+    'SENDGRID_API_KEY',
+    'SENDGRID_FROM_EMAIL',
+    'SENDGRID_WEBHOOK_PUBLIC_KEY',
+    'SENDGRID_WEBHOOK_URL',
+    'TELNYX_API_KEY',
+    'TELNYX_PUBLIC_KEY',
+    'STRIPE_SECRET_KEY',
+    'STRIPE_WEBHOOK_SECRET',
+  ];
+  assert(
+    new Set(MAINTENANCE_WORKER_SECRET_NAMES).size === MAINTENANCE_WORKER_SECRET_NAMES.length,
+    'Maintenance worker secret list contains duplicate names.',
+  );
+  assert(
+    new Set(PAGES_FUNCTION_SECRET_NAMES).size === PAGES_FUNCTION_SECRET_NAMES.length,
+    'Pages function secret list contains duplicate names.',
+  );
+  for (const name of requiredMaintenanceSecrets) {
+    assert(MAINTENANCE_WORKER_SECRET_NAMES.includes(name), `Maintenance worker deploy does not configure ${name}.`);
+  }
+  for (const name of requiredPagesSecrets) {
+    assert(PAGES_FUNCTION_SECRET_NAMES.includes(name), `Pages deploy does not configure ${name}.`);
+  }
+  const smokeArgs = getPagesPipelineSmokeArgs('https://alerts.example.test');
+  assert(smokeArgs.includes('--require-providers'), 'Pages deploy smoke does not require configured providers.');
+  assert(smokeArgs.includes('--require-test-delivery'), 'Pages deploy smoke does not require provider delivery evidence.');
 }
 
 function sendJson(response, status, payload) {
@@ -215,6 +313,7 @@ async function assertPagesPipelineSmokeScript(token) {
           telnyxConfigured: true,
           telnyxWebhookVerificationConfigured: true,
           telnyxDeliveryStatusConfigured: true,
+          webPushConfigured: true,
         },
         feeds: {
           alerts: { available: true },
@@ -227,6 +326,7 @@ async function assertPagesPipelineSmokeScript(token) {
             active: 2,
             activeEmail: 1,
             activeSms: 1,
+            activePush: 1,
           },
         },
       });
@@ -669,13 +769,13 @@ async function assertPagesPipelineStatus(token) {
     ['/takeoffs.json', { generatedAt: '2026-06-23T00:00:00.000Z', events: [{ id: 'takeoff-1' }] }],
     ['/event-signals.json', { generatedAt: '2026-06-23T00:00:00.000Z', records: [{ id: 'signal-1' }] }],
   ]);
+  const vapidEnv = createSmokeVapidEnv();
   const env = {
     INTERNAL_ALERT_TOKEN: token,
     EWS_PUBLIC_URL: 'https://alerts.example.test/',
     SENDGRID_API_KEY: 'smoke-sendgrid-key',
     SENDGRID_FROM_EMAIL: 'alerts@example.test',
     SENDGRID_WEBHOOK_PUBLIC_KEY: 'smoke-sendgrid-webhook-public-key',
-    SENDGRID_WEBHOOK_URL: 'https://alerts.example.test/api/sendgrid/webhook',
     TELNYX_API_KEY: 'smoke-telnyx-key',
     TELNYX_MESSAGING_PROFILE_ID: 'smoke-profile-id',
     TELNYX_PUBLIC_KEY: 'smoke-public-key',
@@ -683,6 +783,9 @@ async function assertPagesPipelineStatus(token) {
     STRIPE_PRICE_ID: 'price_smoke',
     NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
     NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
+    WEB_PUSH_VAPID_PUBLIC_KEY: vapidEnv.WEB_PUSH_VAPID_PUBLIC_KEY,
+    WEB_PUSH_VAPID_PRIVATE_KEY: vapidEnv.WEB_PUSH_VAPID_PRIVATE_KEY,
+    WEB_PUSH_CONTACT: vapidEnv.WEB_PUSH_CONTACT,
     EWS_NOTIFY_DB: {
       prepare(sql) {
         return {
@@ -693,6 +796,7 @@ async function assertPagesPipelineStatus(token) {
                 active: 2,
                 active_email: 2,
                 active_sms: 1,
+                active_push: 1,
                 pending_checkout: 1,
                 past_due: 0,
                 canceled: 0,
@@ -756,11 +860,13 @@ async function assertPagesPipelineStatus(token) {
   assert(payload.providerConfig.telnyxConfigured === true, 'Pages pipeline status did not report Telnyx as configured.');
   assert(payload.providerConfig.telnyxWebhookVerificationConfigured === true, 'Pages pipeline status did not report Telnyx webhook verification as configured.');
   assert(payload.providerConfig.telnyxDeliveryStatusConfigured === true, 'Pages pipeline status did not report Telnyx delivery status as configured.');
+  assert(payload.providerConfig.webPushConfigured === true, 'Pages pipeline status did not report browser push as configured.');
   assert(payload.providerConfig.stripeConfigured === true, 'Pages pipeline status did not report Stripe as configured.');
   assert(payload.feeds.alerts.itemCount === 1, 'Pages pipeline status did not summarize alerts.');
   assert(payload.feeds.takeoffs.itemCount === 1, 'Pages pipeline status did not summarize takeoffs.');
   assert(payload.feeds.eventSignals.itemCount === 1, 'Pages pipeline status did not summarize event signals.');
   assert(payload.notifications.subscribers.active === 2, 'Pages pipeline status did not summarize active subscribers.');
+  assert(payload.notifications.subscribers.activePush === 1, 'Pages pipeline status did not summarize active browser push subscribers.');
   assert(payload.notifications.alerts.statusCounts.sent === 2, 'Pages pipeline status did not summarize alert statuses.');
 
   feedPayloads.set('/alerts.json', { generatedAt: '2026-06-23T00:00:00.000Z' });
@@ -831,6 +937,97 @@ async function assertManualSubscriberValidation() {
   assert(smsSubscriber.wantsEmail === false && smsSubscriber.wantsSms === true, 'Manual SMS subscriber enabled the wrong channels.');
   db.close();
 }
+
+async function assertPublicNotificationSignupEndpoint() {
+  const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-public-signup-esm-'));
+  fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{"type":"module"}\n');
+  fs.cpSync(path.join(ROOT_DIR, 'functions'), path.join(moduleRoot, 'functions'), { recursive: true });
+  const endpointUrl = pathToFileURL(path.join(moduleRoot, 'functions', 'api', 'notifications', 'signup.js')).href;
+  const { onRequestPost } = await import(endpointUrl);
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-public-signup-')), 'notify.sqlite');
+  const db = new Database(dbPath);
+  applyD1Migrations(db);
+  const env = {
+    APP_BASE_URL: 'https://alerts.example.test',
+    NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
+    NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 5).toString('base64'),
+    SENDGRID_API_KEY: 'smoke-sendgrid-key',
+    SENDGRID_FROM_EMAIL: 'alerts@example.test',
+    TELNYX_API_KEY: 'smoke-telnyx-key',
+    TELNYX_NUMBER: '+14155552671',
+    EWS_NOTIFY_DB: createD1Adapter(db),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href === 'https://api.sendgrid.com/v3/mail/send') {
+      return new Response('', {
+        status: 202,
+        headers: { 'x-message-id': 'sendgrid-public-signup-smoke' },
+      });
+    }
+    if (href === 'https://api.telnyx.com/v2/messages') {
+      return new Response(JSON.stringify({ data: { id: 'telnyx-public-signup-smoke', to: [{ status: 'queued' }] } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      });
+    }
+    return originalFetch(url, options);
+  };
+
+  try {
+    const noConsentResponse = await onRequestPost({
+      request: new Request('https://alerts.example.test/api/notifications/signup', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ phone: '+14155552671' }),
+      }),
+      env,
+    });
+    const noConsentPayload = await noConsentResponse.json();
+    assert(noConsentResponse.status === 400, `Public signup without SMS consent returned ${noConsentResponse.status}.`);
+    assert(/SMS consent/.test(noConsentPayload.error || ''), 'Public signup did not reject SMS without consent.');
+
+    const signupResponse = await onRequestPost({
+      request: new Request('https://alerts.example.test/api/notifications/signup', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'public@example.test', phone: '+14155552671', smsConsent: true }),
+      }),
+      env,
+    });
+    const signupPayload = await signupResponse.json();
+    assert(signupResponse.status === 200, `Public signup returned ${signupResponse.status}: ${JSON.stringify(signupPayload)}`);
+    assert(signupPayload.ok === true, 'Public signup did not report ok=true.');
+    assert(signupPayload.emailEnabled === true && signupPayload.smsEnabled === true, 'Public signup did not enable email and SMS.');
+    assert(signupPayload.managementPath === null, 'Public signup leaked an account management capability link.');
+    assert(signupPayload.signupConfirmation?.emailSentCount === 1, 'Public signup did not send a confirmation email.');
+    assert(signupPayload.signupConfirmation?.smsSentCount === 1, 'Public signup did not send a confirmation SMS.');
+
+    const summary = db.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN status = 'active' AND wants_email = 1 AND email_hash IS NOT NULL THEN 1 ELSE 0 END) AS active_email,
+        SUM(CASE WHEN status = 'active' AND wants_sms = 1 AND phone_hash IS NOT NULL THEN 1 ELSE 0 END) AS active_sms
+      FROM notification_signups
+    `).get();
+    assert(summary.active === 1 && summary.active_email === 1 && summary.active_sms === 1, 'Public signup did not create one active email/SMS subscriber.');
+
+    const duplicateResponse = await onRequestPost({
+      request: new Request('https://alerts.example.test/api/notifications/signup', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'public@example.test', phone: '+14155552671', smsConsent: true }),
+      }),
+      env,
+    });
+    assert(duplicateResponse.status === 409, `Duplicate public signup returned ${duplicateResponse.status}, not 409.`);
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
+}
+
 
 async function assertSendGridWebhookDeliveryStatus() {
   const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-sendgrid-webhook-esm-'));
@@ -1426,12 +1623,99 @@ async function assertAlertEventBridgePosts(dbPath, token, statusPath) {
   }
 }
 
+async function assertPagesWebPushSubscriptionAndFanout() {
+  const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-web-push-esm-'));
+  fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{"type":"module"}\n');
+  fs.cpSync(path.join(ROOT_DIR, 'functions'), path.join(moduleRoot, 'functions'), { recursive: true });
+  const publicKeyEndpointUrl = pathToFileURL(path.join(moduleRoot, 'functions', 'api', 'push', 'vapid-public-key.js')).href;
+  const subscribeEndpointUrl = pathToFileURL(path.join(moduleRoot, 'functions', 'api', 'push', 'subscribe.js')).href;
+  const notificationsModuleUrl = pathToFileURL(path.join(moduleRoot, 'functions', '_lib', 'notifications.js')).href;
+  const { onRequestGet: getPushPublicKey } = await import(publicKeyEndpointUrl);
+  const { onRequestPost: postPushSubscription } = await import(subscribeEndpointUrl);
+  const { sendAlertEventNotifications } = await import(notificationsModuleUrl);
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-web-push-')), 'notify.sqlite');
+  const db = new Database(dbPath);
+  applyD1Migrations(db);
+  const vapidEnv = createSmokeVapidEnv();
+  const subscription = await createSmokePushSubscription('https://push.example.test/send/d1-smoke');
+  const env = {
+    ...vapidEnv,
+    APP_BASE_URL: 'https://alerts.example.test',
+    EWS_PUBLIC_URL: 'https://alerts.example.test/',
+    NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
+    NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 10).toString('base64'),
+    LEVEL5_SUBSCRIBER_BATCH_SIZE: '10',
+    ALERT_EVENT_MAX_BATCHES_PER_INVOCATION: '1',
+    EWS_NOTIFY_DB: createD1Adapter(db),
+  };
+
+  const publicKeyResponse = await getPushPublicKey({
+    request: new Request('https://alerts.example.test/api/push/vapid-public-key'),
+    env,
+  });
+  const publicKeyPayload = await publicKeyResponse.json();
+  assert(publicKeyResponse.status === 200, `Push public key endpoint failed with ${publicKeyResponse.status}.`);
+  assert(publicKeyPayload.publicKey === vapidEnv.WEB_PUSH_VAPID_PUBLIC_KEY, 'Push public key endpoint returned the wrong VAPID key.');
+
+  const subscribeResponse = await postPushSubscription({
+    request: new Request('https://alerts.example.test/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'user-agent': 'smoke-web-push' },
+      body: JSON.stringify({ subscription }),
+    }),
+    env,
+  });
+  const subscribePayload = await subscribeResponse.json();
+  assert(subscribeResponse.status === 200, `Push subscribe endpoint failed: ${JSON.stringify(subscribePayload)}`);
+  assert(subscribePayload.pushEnabled === true, 'Push subscribe endpoint did not enable push.');
+  const saved = db.prepare('SELECT status, wants_push, push_endpoint_hash FROM notification_signups').get();
+  assert(saved?.status === 'active' && saved?.wants_push === 1 && saved?.push_endpoint_hash, 'Push subscribe endpoint did not persist an active push subscriber.');
+
+  const originalFetch = globalThis.fetch;
+  const pushRequests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    if (String(url).startsWith('https://push.example.test/')) {
+      pushRequests.push({
+        url: String(url),
+        headers: Object.fromEntries(new Headers(options.headers).entries()),
+        bodyLength: options.body?.byteLength || options.body?.length || 0,
+      });
+      return new Response('', { status: 201, headers: { location: 'push-message-smoke' } });
+    }
+    return originalFetch(url, options);
+  };
+  try {
+    const summary = await sendAlertEventNotifications(env, {
+      eventKey: 'web-push-fanout-smoke',
+      kind: 'takeoff_rate_anomaly',
+      cohort: 'global_business_jet',
+      title: 'Web push fanout smoke',
+      message: 'Web push fanout smoke message',
+      severity: 'high',
+      level: 4,
+      occurredAt: '2026-06-23T00:00:00.000Z',
+    });
+    assert(summary.status === 'sent', `Web push fanout did not complete: ${JSON.stringify(summary)}`);
+    assert(summary.pushSentCount === 1, 'Web push fanout did not count a pushed alert.');
+    assert(pushRequests.length === 1, 'Web push fanout did not post exactly one push request.');
+    assert(pushRequests[0].headers['content-encoding'] === 'aes128gcm', 'Web push request did not use aes128gcm payload encoding.');
+    assert(pushRequests[0].headers.authorization?.startsWith('vapid '), 'Web push request did not include VAPID authorization.');
+    assert(pushRequests[0].bodyLength > 0, 'Web push request had an empty encrypted body.');
+    const delivery = db.prepare('SELECT channel, status, provider_message_id FROM notification_deliveries').get();
+    assert(delivery?.channel === 'push' && delivery?.status === 'sent', 'Web push delivery was not recorded as sent.');
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
+}
+
 async function main() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-alert-smoke-'));
   const publishedDir = path.join(tempRoot, 'published');
   const dbPath = path.join(tempRoot, 'ews.sqlite');
   const bridgeStatusPath = path.join(tempRoot, 'bridge-status.json');
   const token = 'alert-pipeline-smoke-token';
+  assertDeploySecretCoverage();
   assertDeployEnvFileLoading(tempRoot);
   initTempDb(dbPath);
   writeJson(path.join(publishedDir, 'alerts.json'), { generatedAt: '2026-06-23T00:00:00.000Z', events: [{ id: 1 }] });
@@ -1447,6 +1731,8 @@ async function main() {
   });
 
   const port = await freePort();
+  const vapidEnv = createSmokeVapidEnv();
+  const pushSubscription = await createSmokePushSubscription();
   const env = {
     ...process.env,
     HOST: '127.0.0.1',
@@ -1466,6 +1752,9 @@ async function main() {
     TELNYX_NUMBER: '+14155552671',
     TELEGRAM_BOT_TOKEN: 'smoke-telegram-token',
     TELEGRAM_CHANNEL: 'alerts-channel',
+    WEB_PUSH_VAPID_PUBLIC_KEY: vapidEnv.WEB_PUSH_VAPID_PUBLIC_KEY,
+    WEB_PUSH_VAPID_PRIVATE_KEY: vapidEnv.WEB_PUSH_VAPID_PRIVATE_KEY,
+    WEB_PUSH_CONTACT: vapidEnv.WEB_PUSH_CONTACT,
   };
   const server = spawn(process.execPath, ['server/index.js'], {
     cwd: ROOT_DIR,
@@ -1485,6 +1774,13 @@ async function main() {
   try {
     const baseUrl = `http://127.0.0.1:${port}`;
     await waitForJson(`${baseUrl}/api/health`, { timeoutMs: 20_000 });
+    const noConsentLocalSignup = await fetch(`${baseUrl}/api/notifications/signup`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ phone: '+14155552671' }),
+    });
+    assert(noConsentLocalSignup.status === 400, `Local SMS signup without consent returned ${noConsentLocalSignup.status}.`);
+
 
     const signupResponse = await fetch(`${baseUrl}/api/notifications/signup`, {
       method: 'POST',
@@ -1503,12 +1799,25 @@ async function main() {
     const manage = await waitForJson(manageApiUrl.toString());
     assert(manage.payload.subscriber.email === 'smoke@example.com', 'Management endpoint did not return the signed-up subscriber.');
 
+    const pushKey = await waitForJson(`${baseUrl}/api/push/vapid-public-key`);
+    assert(pushKey.payload.publicKey === vapidEnv.WEB_PUSH_VAPID_PUBLIC_KEY, 'Push public key endpoint did not return the configured VAPID key.');
+    const pushSignup = await fetch(`${baseUrl}/api/push/subscribe`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ subscription: pushSubscription }),
+    });
+    if (!pushSignup.ok) {
+      throw new Error(`Push signup failed with HTTP ${pushSignup.status}: ${await pushSignup.text()}`);
+    }
+    const pushSignupPayload = await pushSignup.json();
+    assert(pushSignupPayload.pushEnabled === true, 'Push signup endpoint did not enable browser push.');
+
     const unauthorizedStatus = await fetch(`${baseUrl}/api/admin/local-pipeline-status`);
     assert(unauthorizedStatus.status === 401, `Pipeline status without auth returned ${unauthorizedStatus.status}, not 401.`);
     const authorized = await waitForJson(`${baseUrl}/api/admin/local-pipeline-status`, {
       fetchOptions: { headers: { authorization: `Bearer ${token}` } },
     });
-    assert(authorized.payload.localDispatch.activeSubscriberCount === 1, 'Pipeline status did not count the active subscriber.');
+    assert(authorized.payload.localDispatch.activeSubscriberCount === 2, 'Pipeline status did not count the active email and push subscribers.');
     assert(authorized.payload.feeds.eventSignals.itemCount === 1, 'Pipeline status did not summarize event signal records.');
     assert(authorized.payload.bridge.reason === 'smoke_seed', 'Pipeline status did not surface bridge health.');
     assert(authorized.payload.providerConfig.sendgridConfigured === true, 'Pipeline status did not report SendGrid as configured.');
@@ -1516,6 +1825,7 @@ async function main() {
     assert(authorized.payload.providerConfig.sendgridDeliveryStatusConfigured === true, 'Pipeline status did not report SendGrid delivery status as configured.');
     assert(authorized.payload.providerConfig.telnyxConfigured === true, 'Pipeline status did not report Telnyx as configured.');
     assert(authorized.payload.providerConfig.telegramEmergencyConfigured === true, 'Pipeline status did not report emergency Telegram as configured from TELEGRAM_CHANNEL.');
+    assert(authorized.payload.providerConfig.webPushConfigured === true, 'Pipeline status did not report browser push as configured.');
     assert(authorized.payload.notificationCryptoConfigured === true, 'Pipeline status did not report notification crypto as configured.');
 
     const eventSignals = await waitForJson(`${baseUrl}/api/event-signals`);
@@ -1536,11 +1846,13 @@ async function main() {
 
     await assertResumableAlertFanout();
     await assertPagesPipelineStatus(token);
+    await assertPagesWebPushSubscriptionAndFanout();
     await assertTakeoffRateDetection();
     await assertSingleTakeoffDuringConcurrentAnomalySuppressed();
     await assertConcurrentAnomalyRequiresReadyBaseline();
     await assertPagesPipelineSmokeScript(token);
     await assertManualSubscriberValidation();
+    await assertPublicNotificationSignupEndpoint();
     await assertSendGridWebhookDeliveryStatus();
     await assertClaimAlertRecordIsIdempotent();
     await assertAlertProcessingStaleReclaim();

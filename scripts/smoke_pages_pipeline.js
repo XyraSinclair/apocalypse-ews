@@ -167,8 +167,10 @@ async function main() {
       payload.providerConfig?.telnyxDeliveryStatusConfigured === true,
       'Pipeline status reports Telnyx delivery status unavailable.',
     );
+    assert(payload.providerConfig?.webPushConfigured === true, 'Pipeline status reports browser push unavailable.');
     assert(Number(subscriberSummary.activeEmail || 0) > 0, 'Pipeline status reports no active email subscribers.');
     assert(Number(subscriberSummary.activeSms || 0) > 0, 'Pipeline status reports no active SMS subscribers.');
+    assert(Number(subscriberSummary.activePush || 0) > 0, 'Pipeline status reports no active browser push subscribers.');
   }
 
   if (requireTestDelivery && requireProviders) {
