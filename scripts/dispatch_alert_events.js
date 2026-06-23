@@ -9,6 +9,11 @@ function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) {
     return;
   }
+  try {
+    fs.accessSync(filePath, fs.constants.R_OK);
+  } catch {
+    return;
+  }
 
   for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
     const trimmed = line.trim();
