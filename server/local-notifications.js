@@ -158,23 +158,53 @@ function upsertSubscriber(db, payload, env = process.env) {
   return { id: result.lastInsertRowid, emailEnabled: Boolean(row.email_enabled), smsEnabled: Boolean(row.sms_enabled), reused: false };
 }
 
-function getActiveSubscribers(db, env = process.env) {
+function hydrateSubscriber(env, subscriber) {
+  return {
+    id: subscriber.id,
+    email: subscriber.email_enabled ? decryptString(env, subscriber.email_cipher) : null,
+    phone: subscriber.sms_enabled ? decryptString(env, subscriber.phone_cipher) : null,
+    emailHash: subscriber.email_hash,
+    phoneHash: subscriber.phone_hash,
+  };
+}
+
+function countActiveSubscribers(db) {
+  return db
+    .prepare(`
+      SELECT COUNT(*) AS count
+      FROM notification_subscribers
+      WHERE status = 'active'
+        AND (email_enabled = 1 OR sms_enabled = 1)
+    `)
+    .get().count;
+}
+
+function getActiveSubscriberBatch(db, env = process.env, { afterId = 0, limit = 500 } = {}) {
   return db
     .prepare(`
       SELECT *
       FROM notification_subscribers
       WHERE status = 'active'
         AND (email_enabled = 1 OR sms_enabled = 1)
+        AND id > ?
       ORDER BY id ASC
+      LIMIT ?
     `)
-    .all()
-    .map((subscriber) => ({
-      id: subscriber.id,
-      email: subscriber.email_enabled ? decryptString(env, subscriber.email_cipher) : null,
-      phone: subscriber.sms_enabled ? decryptString(env, subscriber.phone_cipher) : null,
-      emailHash: subscriber.email_hash,
-      phoneHash: subscriber.phone_hash,
-    }));
+    .all(afterId, Math.min(Math.max(Number(limit) || 500, 1), 5000))
+    .map((subscriber) => hydrateSubscriber(env, subscriber));
+}
+
+function getActiveSubscribers(db, env = process.env) {
+  const subscribers = [];
+  let afterId = 0;
+  while (true) {
+    const batch = getActiveSubscriberBatch(db, env, { afterId });
+    if (!batch.length) {
+      return subscribers;
+    }
+    subscribers.push(...batch);
+    afterId = batch.at(-1).id;
+  }
 }
 
 function listAlertEvents(db, { limit = 50 } = {}) {
@@ -372,43 +402,66 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
       LIMIT ?
     `)
     .all(Math.min(Math.max(Number(limit) || ALERT_DISPATCH_LIMIT, 1), 100));
-  const subscribers = getActiveSubscribers(db, env);
-  const summary = { alerts: alerts.length, subscribers: subscribers.length, deliveries: 0, sent: 0, failed: 0, noRecipients: 0 };
+  const subscriberCount = countActiveSubscribers(db);
+  const subscriberBatchSize = Math.min(Math.max(Number(env.ALERT_SUBSCRIBER_BATCH_SIZE) || 500, 1), 5000);
+  const summary = { alerts: alerts.length, subscribers: subscriberCount, deliveries: 0, sent: 0, failed: 0, noRecipients: 0 };
   const smsPacer = createPacer(Number(env.LEVEL5_SMS_MIN_INTERVAL_MS || SMS_MIN_INTERVAL_MS));
 
   for (const alert of alerts) {
-    const work = [];
-    for (const subscriber of subscribers) {
-      if (subscriber.email && !hasSentDelivery(db, alert.id, subscriber.id, 'email')) work.push({ subscriber, channel: 'email' });
-      if (subscriber.phone && !hasSentDelivery(db, alert.id, subscriber.id, 'sms')) work.push({ subscriber, channel: 'sms' });
+    let afterId = 0;
+    let totalSent = 0;
+    let totalFailed = 0;
+    let totalDeliveries = 0;
+    let attemptedWork = false;
+
+    while (true) {
+      const subscribers = getActiveSubscriberBatch(db, env, { afterId, limit: subscriberBatchSize });
+      if (!subscribers.length) {
+        break;
+      }
+      afterId = subscribers.at(-1).id;
+
+      const work = [];
+      for (const subscriber of subscribers) {
+        if (subscriber.email && !hasSentDelivery(db, alert.id, subscriber.id, 'email')) work.push({ subscriber, channel: 'email' });
+        if (subscriber.phone && !hasSentDelivery(db, alert.id, subscriber.id, 'sms')) work.push({ subscriber, channel: 'sms' });
+      }
+      if (!work.length) {
+        continue;
+      }
+
+      attemptedWork = true;
+      const results = await mapWithConcurrency(work, EMAIL_CONCURRENCY, ({ subscriber, channel }) =>
+        dispatchOne(db, env, alert, subscriber, channel, channel === 'sms' ? smsPacer : null),
+      );
+      const sent = results.filter((result) => result.ok).length;
+      const failed = results.length - sent;
+      totalDeliveries += results.length;
+      totalSent += sent;
+      totalFailed += failed;
+      summary.deliveries += results.length;
+      summary.sent += sent;
+      summary.failed += failed;
     }
 
-    if (!work.length) {
-      const reason = subscribers.length ? 'all_deliveries_already_sent' : 'no_active_subscribers';
+    if (!attemptedWork) {
+      const reason = subscriberCount ? 'all_deliveries_already_sent' : 'no_active_subscribers';
       db.prepare(`
         UPDATE alert_events
         SET status = ?, dispatched_at = CURRENT_TIMESTAMP, dispatch_summary_json = ?
         WHERE id = ?
-      `).run(subscribers.length ? 'sent' : 'no_recipients', JSON.stringify({ deliveries: 0, reason }), alert.id);
-      if (!subscribers.length) {
+      `).run(subscriberCount ? 'sent' : 'no_recipients', JSON.stringify({ deliveries: 0, reason }), alert.id);
+      if (!subscriberCount) {
         summary.noRecipients += 1;
       }
       continue;
     }
 
-    const results = await mapWithConcurrency(work, EMAIL_CONCURRENCY, ({ subscriber, channel }) =>
-      dispatchOne(db, env, alert, subscriber, channel, channel === 'sms' ? smsPacer : null),
-    );
-    const sent = results.filter((result) => result.ok).length;
-    const failed = results.length - sent;
-    summary.deliveries += results.length;
-    summary.sent += sent;
-    summary.failed += failed;
     db.prepare(`
       UPDATE alert_events
       SET status = ?, dispatched_at = CURRENT_TIMESTAMP, dispatch_summary_json = ?
       WHERE id = ?
-    `).run(failed === 0 ? 'sent' : sent > 0 ? 'partial' : 'failed', JSON.stringify({ deliveries: results.length, sent, failed }), alert.id);
+    `).run(totalFailed === 0 ? 'sent' : totalSent > 0 ? 'partial' : 'failed', JSON.stringify({ deliveries: totalDeliveries, sent: totalSent, failed: totalFailed }), alert.id);
   }
 
   return summary;
