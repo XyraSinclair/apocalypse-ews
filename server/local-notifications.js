@@ -659,6 +659,7 @@ module.exports = {
   HttpError,
   createSubscriberManagementPath,
   createSubscriberManagementUrl,
+  countActiveSubscribers,
   dispatchPendingAlerts,
   getManagedSubscriber,
   listAlertEvents,

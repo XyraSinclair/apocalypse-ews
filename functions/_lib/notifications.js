@@ -1,4 +1,5 @@
 import {
+  claimAlertRecord,
   claimRenewalReminder,
   createAlertRecord,
   getAlertRecordById,
@@ -1138,19 +1139,8 @@ export async function sendRenewalReminderBatch(env, options = {}) {
 export async function sendAlertEventNotifications(env, rawEvent, { source = "alert_event_bridge" } = {}) {
   const event = normalizeExternalAlertEvent(rawEvent);
   const alertId = externalAlertRecordId(event);
-  const existing = await getAlertRecordById(env, alertId);
-  if (existing && existing.status !== "created") {
-    return {
-      ok: true,
-      sent: false,
-      reason: "already_recorded",
-      alertId,
-      status: existing.status,
-    };
-  }
-
   const messageText = formatExternalAlertMessage(env, event);
-  await createAlertRecord(env, {
+  const claim = await claimAlertRecord(env, {
     id: alertId,
     kind: event.kind,
     source: `${source}:${event.cohort}`,
@@ -1158,6 +1148,16 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
     slotKey: event.eventKey,
     messageText,
   });
+  if (!claim.inserted) {
+    const existing = await getAlertRecordById(env, alertId);
+    return {
+      ok: true,
+      sent: false,
+      reason: "already_recorded",
+      alertId,
+      status: existing?.status || "unknown",
+    };
+  }
   const smsMinIntervalMs = getLevel5SmsMinIntervalMs(env);
   const concurrency = getLevel5NotificationConcurrency(env);
   const summary = await sendAlertToActiveSubscriberBatches(env, {

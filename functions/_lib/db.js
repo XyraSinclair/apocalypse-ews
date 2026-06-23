@@ -1316,8 +1316,15 @@ export async function getAlertRecordById(env, id) {
     .first();
 }
 
-export async function createAlertRecord(env, { id = crypto.randomUUID(), kind, source, level, slotKey, messageText, status = "created" }) {
-  await getDb(env)
+function insertedRowCount(result) {
+  return Number(result?.meta?.changes ?? result?.changes ?? 0);
+}
+
+export async function claimAlertRecord(
+  env,
+  { id = crypto.randomUUID(), kind, source, level, slotKey, messageText, status = "created" },
+) {
+  const result = await getDb(env)
     .prepare(
       `
         INSERT OR IGNORE INTO notification_alerts (
@@ -1336,7 +1343,15 @@ export async function createAlertRecord(env, { id = crypto.randomUUID(), kind, s
     .bind(id, kind, source, level ?? null, slotKey || null, messageText, status, nowIso())
     .run();
 
-  return id;
+  return {
+    id,
+    inserted: insertedRowCount(result) > 0,
+  };
+}
+
+export async function createAlertRecord(env, details) {
+  const claim = await claimAlertRecord(env, details);
+  return claim.id;
 }
 
 export async function updateAlertRecord(env, alertId, summary) {

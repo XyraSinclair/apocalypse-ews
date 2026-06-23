@@ -22,6 +22,9 @@ function parseArgs(argv) {
     db: process.env.EWS_DB_PATH || path.join(__dirname, '..', 'data', 'ews-main.sqlite'),
     limit: Number(process.env.EWS_ALERT_EVENT_BRIDGE_LIMIT || 100),
     url: process.env.EWS_ALERT_EVENTS_WEBHOOK_URL || '',
+    statusPath:
+      process.env.EWS_ALERT_BRIDGE_STATUS_PATH ||
+      path.join(__dirname, '..', 'data', 'published', 'alert-bridge-status.json'),
   };
   for (let index = 2; index < argv.length; index += 1) {
     const value = argv[index];
@@ -31,6 +34,8 @@ function parseArgs(argv) {
       args.limit = Number(argv[++index]);
     } else if (value === '--url') {
       args.url = argv[++index];
+    } else if (value === '--status-path') {
+      args.statusPath = argv[++index];
     } else {
       throw new Error(`Unknown argument: ${value}`);
     }
@@ -67,6 +72,19 @@ function listAlertEvents(db, limit) {
     }));
 }
 
+function writeBridgeStatus(args, status) {
+  const payload = {
+    schemaVersion: 1,
+    checkedAt: new Date().toISOString(),
+    webhookConfigured: Boolean(String(args.url || '').trim()),
+    limit: args.limit,
+    ...status,
+  };
+  fs.mkdirSync(path.dirname(args.statusPath), { recursive: true });
+  fs.writeFileSync(args.statusPath, `${JSON.stringify(payload, null, 2)}\n`);
+  return payload;
+}
+
 async function postEvents(url, token, events) {
   const response = await fetch(url, {
     method: 'POST',
@@ -86,27 +104,62 @@ async function postEvents(url, token, events) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  if (!args.url) {
-    console.log(JSON.stringify({ ok: true, skipped: true, reason: 'missing_EWS_ALERT_EVENTS_WEBHOOK_URL' }));
-    return;
-  }
-  const token = String(process.env.INTERNAL_ALERT_TOKEN || '').trim();
-  if (!token) {
-    throw new Error('Missing INTERNAL_ALERT_TOKEN for alert event bridge.');
-  }
-
-  const dbPath = path.resolve(args.db);
-  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
-    const events = listAlertEvents(db, args.limit);
-    if (!events.length) {
-      console.log(JSON.stringify({ ok: true, skipped: true, reason: 'no_alert_events' }));
+    if (!args.url) {
+      const status = writeBridgeStatus(args, {
+        ok: true,
+        skipped: true,
+        reason: 'missing_EWS_ALERT_EVENTS_WEBHOOK_URL',
+      });
+      console.log(JSON.stringify(status));
       return;
     }
-    const result = await postEvents(args.url, token, events);
-    console.log(JSON.stringify({ ok: true, postedEvents: events.length, result }));
-  } finally {
-    db.close();
+    const token = String(process.env.INTERNAL_ALERT_TOKEN || '').trim();
+    if (!token) {
+      const error = new Error('Missing INTERNAL_ALERT_TOKEN for alert event bridge.');
+      error.bridgeStatus = {
+        ok: false,
+        skipped: true,
+        reason: 'missing_INTERNAL_ALERT_TOKEN',
+      };
+      throw error;
+    }
+
+    const dbPath = path.resolve(args.db);
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      const events = listAlertEvents(db, args.limit);
+      if (!events.length) {
+        const status = writeBridgeStatus(args, {
+          ok: true,
+          skipped: true,
+          reason: 'no_alert_events',
+          eventCount: 0,
+        });
+        console.log(JSON.stringify(status));
+        return;
+      }
+      const result = await postEvents(args.url, token, events);
+      const status = writeBridgeStatus(args, {
+        ok: true,
+        skipped: false,
+        postedEvents: events.length,
+        result,
+      });
+      console.log(JSON.stringify(status));
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    writeBridgeStatus(
+      args,
+      error.bridgeStatus || {
+        ok: false,
+        skipped: false,
+        error: error.message || String(error),
+      },
+    );
+    throw error;
   }
 }
 

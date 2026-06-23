@@ -1,10 +1,12 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const Database = require("better-sqlite3");
 const express = require("express");
 const cors = require("cors");
 const { loadEnvFile } = require("./env");
 const { CLIENT_DIST_DIR, DATA_DIR, DB_PATH, readWatchlist } = require("./config");
+const { cleanPublicUrl } = require("./public-url");
 const {
   initDb,
   getDb,
@@ -19,6 +21,7 @@ const { maybeSendEmergencyLevelTelegramAlert } = require("./telegram-alert");
 const { buildEmergencyRssFeedXml, dedupeRssItems, getRssItems, maybeRecordEmergencyLevelRssItem, rssItemFromAlertEvent } = require("./rss-feed");
 const {
   HttpError,
+  countActiveSubscribers,
   getManagedSubscriber,
   listAlertEvents,
   listTakeoffEvents,
@@ -37,6 +40,9 @@ const DASHBOARD_DB_PATHS = [
   path.join(DATA_DIR, "ews-military.sqlite"),
   path.join(DATA_DIR, "ews-untracked.sqlite"),
 ];
+const PUBLISHED_DIR = process.env.EWS_PUBLISHED_DIR
+  ? path.resolve(process.env.EWS_PUBLISHED_DIR)
+  : path.join(DATA_DIR, "published");
 
 function readAcrossDashboardDbs(reader, sortKey, limit) {
   const rows = [];
@@ -66,11 +72,79 @@ const PUBLISHED_DASHBOARD_FILES = new Map([
 ]);
 
 function readPublishedJson(fileName) {
-  const filePath = path.join(DATA_DIR, "published", fileName);
+  const filePath = path.join(PUBLISHED_DIR, fileName);
   if (!fs.existsSync(filePath)) {
     throw new HttpError(503, `Published feed is not available at ${filePath}.`);
   }
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function readOptionalPublishedJson(fileName) {
+  const filePath = path.join(PUBLISHED_DIR, fileName);
+  if (!fs.existsSync(filePath)) {
+    return {
+      available: false,
+      path: filePath,
+    };
+  }
+
+  const payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  return {
+    available: true,
+    path: filePath,
+    payload,
+  };
+}
+
+function summarizePublishedFeed(fileName, itemKey) {
+  const file = readOptionalPublishedJson(fileName);
+  if (!file.available) {
+    return file;
+  }
+
+  const items = Array.isArray(file.payload[itemKey]) ? file.payload[itemKey] : [];
+  return {
+    available: true,
+    generatedAt: file.payload.generatedAt || null,
+    itemCount: items.length,
+  };
+}
+
+function timingSafeEqualString(left, right) {
+  const leftBuffer = Buffer.from(String(left || ""));
+  const rightBuffer = Buffer.from(String(right || ""));
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function requireInternalAuth(request) {
+  const expectedToken = String(process.env.INTERNAL_ALERT_TOKEN || "").trim();
+  if (!expectedToken) {
+    throw new HttpError(503, "INTERNAL_ALERT_TOKEN is not configured.");
+  }
+
+  const header = String(request.get("authorization") || "").trim();
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  if (!match || !timingSafeEqualString(match[1].trim(), expectedToken)) {
+    throw new HttpError(401, "Unauthorized.");
+  }
+}
+
+function getAlertEventStatusCounts(db) {
+  return db
+    .prepare(`
+      SELECT status, COUNT(*) AS count
+      FROM alert_events
+      GROUP BY status
+      ORDER BY status ASC
+    `)
+    .all()
+    .reduce((counts, row) => {
+      counts[row.status] = row.count;
+      return counts;
+    }, {});
 }
 
 
@@ -204,6 +278,38 @@ app.get("/api/health", (_request, response) => {
   });
 });
 
+app.get("/api/admin/local-pipeline-status", (request, response) => {
+  requireInternalAuth(request);
+  const db = getDb();
+  const bridgeStatus = readOptionalPublishedJson("alert-bridge-status.json");
+  response.set("cache-control", "no-store").json({
+    ok: true,
+    now: new Date().toISOString(),
+    publicUrlConfigured: Boolean(cleanPublicUrl(process.env.EWS_PUBLIC_URL)),
+    providerConfig: {
+      sendgridConfigured: Boolean(process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL),
+      telnyxConfigured: Boolean(process.env.TELNYX_API_KEY && process.env.TELNYX_NUMBER),
+      telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
+    },
+    bridge: bridgeStatus.available
+      ? {
+          available: true,
+          ...bridgeStatus.payload,
+        }
+      : bridgeStatus,
+    feeds: {
+      alerts: summarizePublishedFeed("alerts.json", "events"),
+      takeoffs: summarizePublishedFeed("takeoffs.json", "events"),
+      eventSignals: summarizePublishedFeed("event-signals.json", "records"),
+    },
+    localDispatch: {
+      activeSubscriberCount: countActiveSubscribers(db),
+      alertStatusCounts: getAlertEventStatusCounts(db),
+      recentAlertEvents: listAlertEvents(db, { limit: 10 }),
+    },
+  });
+});
+
 app.get("/api/watchlist", (_request, response) => {
   const watchlist = readWatchlist();
   response.json({
@@ -259,7 +365,6 @@ app.post("/api/manage/subscriber", (request, response) => {
     subscriber,
   });
 });
-
 app.get("/api/dashboard", (_request, response) => {
   const snapshot = dashboardSnapshotManager.getSnapshot();
   if (!snapshot) {
@@ -274,7 +379,7 @@ app.get("/api/dashboard", (_request, response) => {
 
 for (const [routePath, fileName] of PUBLISHED_DASHBOARD_FILES) {
   app.get(routePath, (_request, response) => {
-    const snapshotPath = path.join(DATA_DIR, "published", fileName);
+    const snapshotPath = path.join(PUBLISHED_DIR, fileName);
     if (!fs.existsSync(snapshotPath)) {
       response.status(503).json({
         error: `Published dashboard snapshot is not available at ${snapshotPath}.`,
