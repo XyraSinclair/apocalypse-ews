@@ -274,6 +274,52 @@ function getD1DatabaseBlock(configText) {
   return blocks.find((block) => getTomlString(block, "binding") === "EWS_NOTIFY_DB") || "";
 }
 
+function tomlString(value) {
+  return JSON.stringify(String(value || ""));
+}
+
+function ensureWranglerConfig(env = process.env, filePath = WRANGLER_CONFIG_PATH) {
+  if (fs.existsSync(filePath)) {
+    return false;
+  }
+
+  if (!fs.existsSync(MAINTENANCE_WRANGLER_CONFIG_PATH)) {
+    return false;
+  }
+
+  const maintenanceText = fs.readFileSync(MAINTENANCE_WRANGLER_CONFIG_PATH, "utf8");
+  const d1Block = getD1DatabaseBlock(maintenanceText);
+  const databaseName = getTomlString(d1Block, "database_name");
+  const databaseId = getTomlString(d1Block, "database_id");
+  if (!databaseName || !databaseId || databaseId === "replace-with-cloudflare-d1-database-id") {
+    return false;
+  }
+
+  const ewsPublicUrl = env.EWS_PUBLIC_URL || "https://ews.kylemcdonald.net/";
+  const appBaseUrl = env.APP_BASE_URL || "https://ews.kylemcdonald.net";
+  const notificationUrl = env.EWS_NOTIFICATION_URL || appBaseUrl;
+  const configText = [
+    'name = "apocalypse-ews"',
+    'compatibility_date = "2026-05-05"',
+    'pages_build_output_dir = "dist"',
+    "",
+    "[vars]",
+    `EWS_PUBLIC_URL = ${tomlString(ewsPublicUrl)}`,
+    `APP_BASE_URL = ${tomlString(appBaseUrl)}`,
+    `EWS_NOTIFICATION_URL = ${tomlString(notificationUrl)}`,
+    "",
+    "[[d1_databases]]",
+    'binding = "EWS_NOTIFY_DB"',
+    `database_name = ${tomlString(databaseName)}`,
+    `database_id = ${tomlString(databaseId)}`,
+    'migrations_dir = "migrations"',
+    "",
+  ].join("\n");
+
+  fs.writeFileSync(filePath, configText);
+  return true;
+}
+
 function validateWranglerConfig(filePath = WRANGLER_CONFIG_PATH) {
   const errors = [];
   let d1DatabaseName = "";
@@ -431,6 +477,7 @@ module.exports = {
   getEnvWithDotEnv,
   readDotEnvFile,
   readDotEnvFiles,
+  ensureWranglerConfig,
   validateDashboardEnv,
   validateDeployEnv,
   validateWranglerConfig,

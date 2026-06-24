@@ -5,6 +5,7 @@ const {
   REPO_ROOT,
   REQUIRED_DEPLOY_ENV_VARS,
   getEnvWithDotEnv,
+  ensureWranglerConfig,
   validateDeployEnv,
   validateMaintenanceWranglerConfig,
   validateWranglerConfig,
@@ -179,6 +180,7 @@ async function restoreCurrentRss(targetPublicUrl) {
 }
 
 async function main() {
+  ensureWranglerConfig(env);
   const wrangler = validateWranglerConfig();
   const maintenanceWrangler = validateMaintenanceWranglerConfig();
   const errors = [...validateDeployEnv(env), ...wrangler.errors, ...maintenanceWrangler.errors];

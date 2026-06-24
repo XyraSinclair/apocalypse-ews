@@ -2,6 +2,7 @@ const {
   REQUIRED_DEPLOY_ENV_VARS,
   getDeployEnvFiles,
   getEnvWithDotEnv,
+  ensureWranglerConfig,
   validateDeployEnv,
   validateWranglerConfig,
   validateMaintenanceWranglerConfig,
@@ -31,6 +32,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv);
 const env = getEnvWithDotEnv(process.env, { envFiles: getDeployEnvFiles(args.envFiles) });
+ensureWranglerConfig(env);
 const envErrors = validateDeployEnv(env);
 const wrangler = validateWranglerConfig();
 const maintenanceWrangler = validateMaintenanceWranglerConfig();
