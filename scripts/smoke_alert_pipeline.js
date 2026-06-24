@@ -230,6 +230,17 @@ function assertDeployEnvFileLoading(tempRoot) {
     validateDeployEnv(withoutAccess).some((error) => error === 'CF_ACCESS_CLIENT_SECRET is missing.'),
     'Deploy env validation accepted a missing Cloudflare Access client secret.',
   );
+  const aliasAccessEnv = getEnvWithDotEnv(
+    {
+      ...withoutAccess,
+      CLOUDFLARE_ACCESS_CLIENT_ID: 'alias-access-client-id',
+      CLOUDFLARE_ACCESS_CLIENT_SECRET: 'alias-access-client-secret',
+    },
+    { envFiles: [] },
+  );
+  assert(aliasAccessEnv.CF_ACCESS_CLIENT_ID === 'alias-access-client-id', 'Deploy env loader did not derive the Access client ID alias.');
+  assert(aliasAccessEnv.CF_ACCESS_CLIENT_SECRET === 'alias-access-client-secret', 'Deploy env loader did not derive the Access client secret alias.');
+  assert(validateDeployEnv(aliasAccessEnv).length === 0, 'Deploy env validation rejected Cloudflare Access alias credentials.');
   const {
     SENDGRID_WEBHOOK_URL: _explicitSendGridWebhookUrl,
     EWS_ALERT_EVENTS_WEBHOOK_URL: _explicitAlertEventsWebhookUrl,

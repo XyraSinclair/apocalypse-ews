@@ -116,6 +116,12 @@ function derivePublicPathUrl(env, pathname) {
 
 function withDerivedDeployEnv(env) {
   const derivedEnv = { ...env };
+  if (!derivedEnv.CF_ACCESS_CLIENT_ID && derivedEnv.CLOUDFLARE_ACCESS_CLIENT_ID) {
+    derivedEnv.CF_ACCESS_CLIENT_ID = derivedEnv.CLOUDFLARE_ACCESS_CLIENT_ID;
+  }
+  if (!derivedEnv.CF_ACCESS_CLIENT_SECRET && derivedEnv.CLOUDFLARE_ACCESS_CLIENT_SECRET) {
+    derivedEnv.CF_ACCESS_CLIENT_SECRET = derivedEnv.CLOUDFLARE_ACCESS_CLIENT_SECRET;
+  }
   if (!derivedEnv.SENDGRID_WEBHOOK_URL) {
     derivedEnv.SENDGRID_WEBHOOK_URL = derivePublicPathUrl(derivedEnv, "/api/sendgrid/webhook");
   }
