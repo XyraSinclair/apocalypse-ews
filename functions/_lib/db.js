@@ -858,7 +858,11 @@ export async function getActiveSubscribers(env) {
         SELECT *
         FROM notification_signups
         WHERE status = ?
-          AND (wants_email = 1 OR wants_sms = 1 OR (wants_push = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL))
+          AND (
+            (wants_email = 1 AND email_hash IS NOT NULL AND email_opted_out_at IS NULL)
+            OR (wants_sms = 1 AND phone_hash IS NOT NULL AND sms_opted_out_at IS NULL)
+            OR (wants_push = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL)
+          )
         ORDER BY created_at ASC
       `,
     )
@@ -877,7 +881,11 @@ export async function getActiveSubscriberBatch(env, { afterCreatedAt = "", after
         SELECT *
         FROM notification_signups
         WHERE status = ?
-          AND (wants_email = 1 OR wants_sms = 1 OR (wants_push = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL))
+          AND (
+            (wants_email = 1 AND email_hash IS NOT NULL AND email_opted_out_at IS NULL)
+            OR (wants_sms = 1 AND phone_hash IS NOT NULL AND sms_opted_out_at IS NULL)
+            OR (wants_push = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL)
+          )
           AND (
             created_at > ?
             OR (created_at = ? AND id > ?)
@@ -918,8 +926,8 @@ export async function hydrateSubscriberContacts(env, subscriber) {
     alertEmail: email,
     accountEmail,
     phone,
-    wantsEmail: Number(subscriber.wants_email || 0) === 1,
-    wantsSms: Number(subscriber.wants_sms || 0) === 1,
+    wantsEmail: Number(subscriber.wants_email || 0) === 1 && Boolean(email) && !subscriber.email_opted_out_at,
+    wantsSms: Number(subscriber.wants_sms || 0) === 1 && Boolean(phone) && !subscriber.sms_opted_out_at,
     wantsPush:
       Number(subscriber.wants_push || 0) === 1 &&
       Boolean(pushEndpoint && pushP256dh && pushAuth) &&
@@ -1511,10 +1519,10 @@ export async function updateSubscriberContactSettings(env, subscriberId, payload
           phone_country = ?,
           wants_email = ?,
           wants_sms = ?,
-          email_opted_out_at = CASE WHEN ? = 1 AND ? = 0 THEN ? ELSE email_opted_out_at END,
-          email_opt_out_source = CASE WHEN ? = 1 AND ? = 0 THEN ? ELSE email_opt_out_source END,
-          sms_opted_out_at = CASE WHEN ? = 1 AND ? = 0 THEN ? ELSE sms_opted_out_at END,
-          sms_opt_out_source = CASE WHEN ? = 1 AND ? = 0 THEN ? ELSE sms_opt_out_source END,
+          email_opted_out_at = CASE WHEN ? = 1 THEN NULL WHEN ? = 1 AND ? = 0 THEN COALESCE(email_opted_out_at, ?) ELSE email_opted_out_at END,
+          email_opt_out_source = CASE WHEN ? = 1 THEN NULL WHEN ? = 1 AND ? = 0 THEN COALESCE(email_opt_out_source, ?) ELSE email_opt_out_source END,
+          sms_opted_out_at = CASE WHEN ? = 1 THEN NULL WHEN ? = 1 AND ? = 0 THEN COALESCE(sms_opted_out_at, ?) ELSE sms_opted_out_at END,
+          sms_opt_out_source = CASE WHEN ? = 1 THEN NULL WHEN ? = 1 AND ? = 0 THEN COALESCE(sms_opt_out_source, ?) ELSE sms_opt_out_source END,
           updated_at = ?
         WHERE id = ?
       `,
@@ -1530,15 +1538,19 @@ export async function updateSubscriberContactSettings(env, subscriberId, payload
       phoneCountry,
       wantsEmail ? 1 : 0,
       wantsSms ? 1 : 0,
+      wantsEmail ? 1 : 0,
       previous.wantsEmail ? 1 : 0,
       wantsEmail ? 1 : 0,
       timestamp,
+      wantsEmail ? 1 : 0,
       previous.wantsEmail ? 1 : 0,
       wantsEmail ? 1 : 0,
       SMS_OPT_OUT_SOURCE.MANAGE_LINK,
+      wantsSms ? 1 : 0,
       previous.wantsSms ? 1 : 0,
       wantsSms ? 1 : 0,
       timestamp,
+      wantsSms ? 1 : 0,
       previous.wantsSms ? 1 : 0,
       wantsSms ? 1 : 0,
       SMS_OPT_OUT_SOURCE.MANAGE_LINK,
@@ -2490,7 +2502,7 @@ export async function getNotificationPipelineStatus(env) {
         SELECT
           COUNT(*) AS total,
           SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
-          SUM(CASE WHEN status = 'active' AND wants_email = 1 AND email_hash IS NOT NULL THEN 1 ELSE 0 END) AS active_email,
+          SUM(CASE WHEN status = 'active' AND wants_email = 1 AND email_hash IS NOT NULL AND email_opted_out_at IS NULL THEN 1 ELSE 0 END) AS active_email,
           SUM(CASE WHEN status = 'active' AND wants_sms = 1 AND phone_hash IS NOT NULL AND sms_opted_out_at IS NULL THEN 1 ELSE 0 END) AS active_sms,
           SUM(CASE WHEN status = 'active' AND wants_push = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL THEN 1 ELSE 0 END) AS active_push,
           SUM(CASE WHEN status = 'pending_checkout' THEN 1 ELSE 0 END) AS pending_checkout,

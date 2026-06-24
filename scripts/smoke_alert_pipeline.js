@@ -917,7 +917,14 @@ async function assertManualSubscriberValidation() {
   fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{"type":"module"}\n');
   fs.cpSync(path.join(ROOT_DIR, 'functions', '_lib'), path.join(moduleRoot, '_lib'), { recursive: true });
   const dbModuleUrl = pathToFileURL(path.join(moduleRoot, '_lib', 'db.js')).href;
-  const { createManualSubscriber } = await import(dbModuleUrl);
+  const {
+    createManualSubscriber,
+    getActiveSubscriberBatch,
+    getNotificationPipelineStatus,
+    getSubscriberById,
+    hydrateSubscriberContacts,
+    updateSubscriberContactSettings,
+  } = await import(dbModuleUrl);
   const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-manual-subscriber-')), 'notify.sqlite');
   const db = new Database(dbPath);
   applyD1Migrations(db);
@@ -959,6 +966,53 @@ async function assertManualSubscriberValidation() {
   );
   assert(emailSubscriber.wantsEmail === true && emailSubscriber.wantsSms === false, 'Manual email subscriber enabled the wrong channels.');
   assert(smsSubscriber.wantsEmail === false && smsSubscriber.wantsSms === true, 'Manual SMS subscriber enabled the wrong channels.');
+
+  const bothSubscriber = await createManualSubscriber(
+    env,
+    {
+      accountEmail: 'ops-both@example.test',
+      wantsEmail: true,
+      email: 'alerts-both@example.test',
+      wantsSms: true,
+      phone: '+14155552672',
+      smsConsent: true,
+    },
+    { ip: '127.0.0.1', userAgent: 'smoke' },
+  );
+  db.prepare(`
+    UPDATE notification_signups
+    SET
+      wants_email = 1,
+      wants_sms = 1,
+      email_opted_out_at = ?,
+      email_opt_out_source = 'manage_link',
+      sms_opted_out_at = ?,
+      sms_opt_out_source = 'sms_stop'
+    WHERE id = ?
+  `).run('2026-06-23T00:00:00.000Z', '2026-06-23T00:00:00.000Z', bothSubscriber.id);
+  const legacyOptedOut = await hydrateSubscriberContacts(env, await getSubscriberById(env, bothSubscriber.id));
+  assert(legacyOptedOut.wantsEmail === false, 'Opted-out email channel was still considered alertable.');
+  assert(legacyOptedOut.wantsSms === false, 'Opted-out SMS channel was still considered alertable.');
+  const optedOutBatch = await getActiveSubscriberBatch(env);
+  assert(
+    !optedOutBatch.some((subscriber) => subscriber.id === bothSubscriber.id),
+    'Active subscriber batch included a subscriber with opted-out channels.',
+  );
+  const optedOutStatus = await getNotificationPipelineStatus(env);
+  assert(optedOutStatus.subscribers.activeEmail === 1, 'Pipeline status counted an opted-out email subscriber as active.');
+  assert(optedOutStatus.subscribers.activeSms === 1, 'Pipeline status counted an opted-out SMS subscriber as active.');
+
+  const reenabled = await updateSubscriberContactSettings(env, bothSubscriber.id, {
+    accountEmail: 'ops-both@example.test',
+    wantsEmail: true,
+    email: 'alerts-both@example.test',
+    wantsSms: true,
+    phone: '+14155552672',
+  });
+  assert(reenabled.wantsEmail === true && reenabled.wantsSms === true, 'Re-enabled subscriber did not restore both alert channels.');
+  const reenabledRaw = await getSubscriberById(env, bothSubscriber.id);
+  assert(reenabledRaw.email_opted_out_at === null, 'Re-enabling email alerts did not clear the email opt-out timestamp.');
+  assert(reenabledRaw.sms_opted_out_at === null, 'Re-enabling SMS alerts did not clear the SMS opt-out timestamp.');
   db.close();
 }
 
