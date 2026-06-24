@@ -16,7 +16,12 @@ export async function onRequestPost({ request, env }) {
 
     const results = [];
     for (const event of events) {
-      results.push(await sendAlertEventNotifications(env, event, { source: payload.source || "alert_event_bridge" }));
+      results.push(
+        await sendAlertEventNotifications(env, event, {
+          source: payload.source || "alert_event_bridge",
+          deliveryMode: "queued",
+        }),
+      );
     }
 
     const ok = results.every((result) => result.ok);

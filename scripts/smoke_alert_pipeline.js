@@ -185,6 +185,7 @@ function assertDeployEnvFileLoading(tempRoot) {
     getEnvWithDotEnv,
     validateDeployEnv,
     validateMaintenanceWranglerConfig,
+    validateSharedD1Binding,
   } = require('./_deploy_env');
   const envPath = path.join(tempRoot, 'deploy.env');
   const vapidEnv = createSmokeVapidEnv();
@@ -257,6 +258,20 @@ function assertDeployEnvFileLoading(tempRoot) {
   );
   assert(validateDeployEnv(derivedEnv).length === 0, 'Deploy env validation rejected derived webhook URLs.');
   assert(validateMaintenanceWranglerConfig().ok, 'Maintenance wrangler config is not deploy-ready.');
+  assert(
+    validateSharedD1Binding(
+      { d1DatabaseName: 'ews-prod', d1DatabaseId: 'same-d1' },
+      { d1DatabaseName: 'ews-prod', d1DatabaseId: 'same-d1' },
+    ).length === 0,
+    'Deploy validation rejected matching Pages and maintenance D1 bindings.',
+  );
+  assert(
+    validateSharedD1Binding(
+      { d1DatabaseName: 'ews-prod', d1DatabaseId: 'pages-d1' },
+      { d1DatabaseName: 'ews-prod', d1DatabaseId: 'maintenance-d1' },
+    ).some((error) => error.includes('database_id must match')),
+    'Deploy validation accepted mismatched Pages and maintenance D1 database IDs.',
+  );
 }
 
 function assertDeploySecretCoverage() {
@@ -329,6 +344,7 @@ async function assertPagesPipelineSmokeScript(token) {
   const port = await freePort();
   const targetUrl = `http://127.0.0.1:${port}`;
   let testAlertPosts = 0;
+  let failDeliveryEvidence = false;
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, targetUrl);
     if (url.pathname === '/api/admin/pipeline-status') {
@@ -387,18 +403,18 @@ async function assertPagesPipelineSmokeScript(token) {
           {
             alert_id: 'smoke-admin-test',
             channel: 'email',
-            delivery_status: 'sent',
+            delivery_status: failDeliveryEvidence ? 'undelivered' : 'sent',
             provider_message_id: 'sg-smoke-message',
-            provider_status: 'processed',
+            provider_status: failDeliveryEvidence ? 'bounce' : 'processed',
             delivery_created_at: '2026-06-23T00:00:00.000Z',
             delivery_updated_at: '2026-06-23T00:00:05.000Z',
           },
           {
             alert_id: 'smoke-admin-test',
             channel: 'sms',
-            delivery_status: 'delivered',
+            delivery_status: failDeliveryEvidence ? 'failed' : 'delivered',
             provider_message_id: 'telnyx-smoke-message',
-            provider_status: 'delivered',
+            provider_status: failDeliveryEvidence ? 'sending_failed' : 'delivered',
             delivery_created_at: '2026-06-23T00:00:00.000Z',
             delivery_updated_at: '2026-06-23T00:00:05.000Z',
           },
@@ -443,6 +459,33 @@ async function assertPagesPipelineSmokeScript(token) {
     assert(payload.testDelivery?.evidence === 'provider_webhook_status', 'Pages smoke script did not require provider webhook status evidence.');
     assert(payload.testDelivery?.webhookDeliveryCount === 2, 'Pages smoke script did not verify both provider webhook statuses.');
     assert(testAlertPosts === 1, 'Pages smoke script did not call the admin test-alert endpoint exactly once.');
+    failDeliveryEvidence = true;
+    await assertRejects(
+      () => execNode(
+        [
+          'scripts/smoke_pages_pipeline.js',
+          targetUrl,
+          '--require-providers',
+          '--require-test-delivery',
+          '--test-email',
+          'smoke@example.test',
+          '--test-phone',
+          '+14155552671',
+        ],
+        {
+          env: {
+            ...process.env,
+            INTERNAL_ALERT_TOKEN: token,
+            EWS_SMOKE_TEST_EMAIL: '',
+            EWS_SMOKE_TEST_PHONE: '',
+            EWS_SMOKE_DELIVERY_TIMEOUT_MS: '1000',
+            EWS_SMOKE_DELIVERY_POLL_MS: '100',
+          },
+        },
+      ),
+      'Timed out waiting for provider webhook status evidence',
+    );
+    assert(testAlertPosts === 2, 'Pages smoke script did not retry the admin test-alert endpoint for failed delivery evidence.');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -710,7 +753,7 @@ async function assertResumableAlertFanout() {
     NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 12).toString('base64'),
     SENDGRID_API_KEY: 'smoke-sendgrid-key',
     SENDGRID_FROM_EMAIL: 'alerts@example.test',
-    LEVEL5_SUBSCRIBER_BATCH_SIZE: '500',
+    LEVEL5_SUBSCRIBER_BATCH_SIZE: '2',
     LEVEL5_SMS_BATCH_WINDOW_MS: '500',
     LEVEL5_SMS_MIN_INTERVAL_MS: '250',
     ALERT_EVENT_MAX_BATCHES_PER_INVOCATION: '1',
@@ -773,8 +816,8 @@ async function assertResumableAlertFanout() {
     });
     assert(first.status === 'processing' && first.queued === true, 'Initial resumable fanout did not leave the alert queued.');
     assert(first.emailSentCount === 2, 'Initial resumable fanout did not send exactly one bounded batch.');
-    assert(first.batchSize === 2, 'Initial resumable fanout did not cap the oversized batch to the paced SMS window.');
-    assert(first.smsBatchWindowMs === 500, 'Initial resumable fanout did not report the paced SMS batch window.');
+    assert(first.batchSize === 2, 'Initial resumable fanout did not use the configured subscriber batch size.');
+    assert(first.smsBatchWindowMs === 500, 'Initial resumable fanout did not report the SMS batch window.');
     assert(sendCount === 2, 'Initial resumable fanout sent the wrong number of provider requests.');
     const afterFirst = db.prepare('SELECT status, subscriber_count, email_sent_count, fanout_after_id, fanout_lease_token, fanout_lease_expires_at FROM notification_alerts WHERE id = ?').get('alert_event:resumable-fanout-smoke');
     assert(afterFirst.status === 'processing', 'Bounded fanout did not persist processing status.');
@@ -792,6 +835,155 @@ async function assertResumableAlertFanout() {
     assert(afterContinue.fanout_after_id === '', 'Fanout continuation did not clear the cursor after completion.');
     assert(afterContinue.fanout_completed_at, 'Fanout continuation did not persist a completion timestamp.');
     assert(afterContinue.fanout_lease_token === null && afterContinue.fanout_lease_expires_at === null, 'Fanout continuation did not clear its lease after completion.');
+
+    const sendsBeforeWideEmail = sendCount;
+    const wideEmailOnly = await sendAlertEventNotifications(
+      { ...env, LEVEL5_SUBSCRIBER_BATCH_SIZE: '500' },
+      {
+        eventKey: 'wide-email-fanout-smoke',
+        kind: 'takeoff_rate_anomaly',
+        cohort: 'global_business_jet',
+        title: 'Wide email fanout smoke',
+        message: 'Wide email fanout smoke message',
+        severity: 'high',
+        level: 4,
+        occurredAt: '2026-06-23T00:00:30.000Z',
+      },
+    );
+    assert(wideEmailOnly.status === 'sent', 'Email-only fanout was unnecessarily left queued by the SMS pacing window.');
+    assert(wideEmailOnly.emailSentCount === 3, 'Email-only fanout did not send every subscriber in one configured batch.');
+    assert(wideEmailOnly.batchSize === 500, 'Email-only fanout did not use the configured batch size.');
+    assert(wideEmailOnly.smsCappedBatchCount === 0, 'Email-only fanout was incorrectly capped by the SMS pacing budget.');
+    assert(sendCount === sendsBeforeWideEmail + 3, 'Email-only fanout sent the wrong number of provider requests.');
+
+    const sendsBeforeQueued = sendCount;
+    const queued = await sendAlertEventNotifications(
+      env,
+      {
+        eventKey: 'queued-fanout-smoke',
+        kind: 'takeoff_rate_anomaly',
+        cohort: 'global_business_jet',
+        title: 'Queued fanout smoke',
+        message: 'Queued fanout smoke message',
+        severity: 'high',
+        level: 4,
+        occurredAt: '2026-06-23T00:01:00.000Z',
+      },
+      { deliveryMode: 'queued' },
+    );
+    assert(queued.status === 'processing' && queued.queued === true && queued.sent === false, 'Queued fanout mode did not return a queued processing alert.');
+    assert(sendCount === sendsBeforeQueued, 'Queued fanout mode sent provider requests inline.');
+    const afterQueueOnly = db.prepare('SELECT status, subscriber_count, email_sent_count, fanout_after_id, fanout_lease_token, fanout_lease_expires_at FROM notification_alerts WHERE id = ?').get('alert_event:queued-fanout-smoke');
+    assert(afterQueueOnly.status === 'processing', 'Queued fanout mode did not persist processing status.');
+    assert(afterQueueOnly.subscriber_count === 0 && afterQueueOnly.email_sent_count === 0, 'Queued fanout mode sent subscribers before maintenance continuation.');
+    assert(afterQueueOnly.fanout_after_id === '', 'Queued fanout mode advanced the subscriber cursor before maintenance continuation.');
+    assert(afterQueueOnly.fanout_lease_token === null && afterQueueOnly.fanout_lease_expires_at === null, 'Queued fanout mode held a lease instead of leaving work for maintenance.');
+    const queuedFirstContinuation = await continueAlertFanoutBatch(env, { limit: 5 });
+    assert(queuedFirstContinuation.processed === 1, 'Queued fanout continuation did not claim the queued alert.');
+    assert(queuedFirstContinuation.results?.[0]?.status === 'processing', 'Queued fanout first continuation should leave the remaining batch queued.');
+    assert(sendCount === sendsBeforeQueued + 2, 'Queued fanout first continuation sent the wrong number of provider requests.');
+    const queuedSecondContinuation = await continueAlertFanoutBatch(env, { limit: 5 });
+    assert(queuedSecondContinuation.processed === 1, 'Queued fanout second continuation did not claim the queued alert.');
+    assert(queuedSecondContinuation.results?.[0]?.status === 'sent', 'Queued fanout second continuation did not complete the queued alert.');
+    assert(sendCount === sendsBeforeQueued + 3, 'Queued fanout second continuation sent the wrong number of provider requests.');
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
+}
+
+async function assertInternalAlertEventsEndpointQueuesFanout(token) {
+  const moduleRoot = fs.mkdtempSync(path.join(ROOT_DIR, 'tmp', 'apocalypse-ews-internal-alert-events-'));
+  fs.writeFileSync(path.join(moduleRoot, 'package.json'), '{"type":"module"}\n');
+  fs.cpSync(path.join(ROOT_DIR, 'functions', '_lib'), path.join(moduleRoot, '_lib'), { recursive: true });
+  fs.mkdirSync(path.join(moduleRoot, 'api', 'internal'), { recursive: true });
+  fs.copyFileSync(
+    path.join(ROOT_DIR, 'functions', 'api', 'internal', 'alert-events.js'),
+    path.join(moduleRoot, 'api', 'internal', 'alert-events.js'),
+  );
+  const endpointModuleUrl = pathToFileURL(path.join(moduleRoot, 'api', 'internal', 'alert-events.js')).href;
+  const cryptoModuleUrl = pathToFileURL(path.join(moduleRoot, '_lib', 'crypto.js')).href;
+  const { onRequestPost } = await import(endpointModuleUrl);
+  const { contactHash, encryptString } = await import(cryptoModuleUrl);
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-internal-alert-events-')), 'notify.sqlite');
+  const db = new Database(dbPath);
+  applyD1Migrations(db);
+  const env = {
+    APP_BASE_URL: 'https://alerts.example.test',
+    NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
+    NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 13).toString('base64'),
+    SENDGRID_API_KEY: 'smoke-sendgrid-key',
+    SENDGRID_FROM_EMAIL: 'alerts@example.test',
+    INTERNAL_ALERT_TOKEN: token,
+    EWS_NOTIFY_DB: createD1Adapter(db),
+  };
+  const email = 'endpoint-queue@example.test';
+  db.prepare(`
+    INSERT INTO notification_signups (
+      id,
+      status,
+      email_cipher,
+      email_hash,
+      wants_email,
+      source,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'endpoint-queue-sub',
+    'active',
+    await encryptString(env, email),
+    await contactHash(env, 'email', email),
+    1,
+    'manual',
+    '2026-06-23T00:00:00.000Z',
+    '2026-06-23T00:00:00.000Z',
+  );
+
+  const originalFetch = globalThis.fetch;
+  let providerSendCount = 0;
+  globalThis.fetch = async (url, options) => {
+    if (String(url).includes('api.sendgrid.com')) {
+      providerSendCount += 1;
+      return new Response('', {
+        status: 202,
+        headers: { 'x-message-id': `endpoint-queue-message-${providerSendCount}` },
+      });
+    }
+    return originalFetch(url, options);
+  };
+  try {
+    const response = await onRequestPost({
+      request: new Request('https://alerts.example.test/api/internal/alert-events', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          event: {
+            eventKey: 'internal-endpoint-queue-smoke',
+            kind: 'takeoff_rate_anomaly',
+            cohort: 'global_business_jet',
+            title: 'Internal endpoint queue smoke',
+            message: 'Internal endpoint queue smoke message',
+            severity: 'high',
+            level: 4,
+            occurredAt: '2026-06-23T00:00:00.000Z',
+          },
+        }),
+      }),
+      env,
+    });
+    const payload = await response.json();
+    const result = payload.results?.[0] || {};
+    assert(response.status === 200 && payload.ok === true, `Internal alert event endpoint returned ${response.status}.`);
+    assert(result.queued === true && result.sent === false, 'Internal alert event endpoint did not queue fanout.');
+    assert(providerSendCount === 0, 'Internal alert event endpoint sent provider requests inline.');
+    const queuedRecord = db.prepare('SELECT status, subscriber_count, email_sent_count, fanout_lease_token FROM notification_alerts WHERE id = ?').get('alert_event:internal-endpoint-queue-smoke');
+    assert(queuedRecord.status === 'processing', 'Internal alert event endpoint did not persist a processing alert.');
+    assert(queuedRecord.subscriber_count === 0 && queuedRecord.email_sent_count === 0, 'Internal alert event endpoint sent subscribers before maintenance.');
+    assert(queuedRecord.fanout_lease_token === null, 'Internal alert event endpoint held a fanout lease instead of leaving work for maintenance.');
   } finally {
     globalThis.fetch = originalFetch;
     db.close();
@@ -1308,8 +1500,10 @@ async function assertAlertEventEndpointFailureStatus(token) {
   );
 
   const originalFetch = globalThis.fetch;
+  let providerSendCount = 0;
   globalThis.fetch = async (url) => {
     if (String(url).includes('api.sendgrid.com')) {
+      providerSendCount += 1;
       return new Response('sendgrid down', { status: 500 });
     }
     return originalFetch(url);
@@ -1338,9 +1532,10 @@ async function assertAlertEventEndpointFailureStatus(token) {
       env,
     });
     const payload = await response.json();
-    assert(response.status === 502, `Alert event endpoint returned ${response.status}, not 502, for failed fanout.`);
-    assert(payload.ok === false, 'Alert event endpoint did not report ok=false for failed fanout.');
-    assert(payload.results?.[0]?.ok === false, 'Alert event endpoint did not preserve the failed fanout result.');
+    assert(response.status === 200, `Alert event endpoint returned ${response.status}, not 200, for queued fanout.`);
+    assert(payload.ok === true, 'Alert event endpoint did not report ok=true for queued fanout.');
+    assert(payload.results?.[0]?.queued === true && payload.results?.[0]?.sent === false, 'Alert event endpoint did not preserve the queued fanout result.');
+    assert(providerSendCount === 0, 'Alert event endpoint sent provider requests instead of queueing fanout.');
     const skipResponse = await onRequestPost({
       request: new Request('https://alerts.example.test/api/internal/alert-events', {
         method: 'POST',
@@ -2141,6 +2336,7 @@ async function main() {
     assert(bridgeStatus.reason === bridgeOutput.reason, 'Bridge status file did not persist the latest result.');
 
     await assertResumableAlertFanout();
+    await assertInternalAlertEventsEndpointQueuesFanout(token);
     await assertPagesPipelineStatus(token);
     await assertPagesWebPushSubscriptionAndFanout();
     await assertTakeoffRateDetection();

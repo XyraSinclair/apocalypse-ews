@@ -9,6 +9,7 @@ const {
   validateDeployEnv,
   validateMaintenanceWranglerConfig,
   validateWranglerConfig,
+  validateSharedD1Binding,
 } = require("./_deploy_env");
 const { REQUIRED_PUBLISHED_ASSETS, copyPublishedAssets } = require("./copy_published_assets");
 
@@ -206,7 +207,12 @@ async function main() {
   ensureWranglerConfig(env);
   const wrangler = validateWranglerConfig();
   const maintenanceWrangler = validateMaintenanceWranglerConfig();
-  const errors = [...validateDeployEnv(env), ...wrangler.errors, ...maintenanceWrangler.errors];
+  const errors = [
+    ...validateDeployEnv(env),
+    ...wrangler.errors,
+    ...maintenanceWrangler.errors,
+    ...validateSharedD1Binding(wrangler, maintenanceWrangler),
+  ];
   const wranglerPublicUrl = normalizeBaseUrl(wrangler.vars?.EWS_PUBLIC_URL || "");
   const localPublicUrl = normalizeBaseUrl(publicUrl);
   if (wranglerPublicUrl && localPublicUrl && wranglerPublicUrl !== localPublicUrl) {

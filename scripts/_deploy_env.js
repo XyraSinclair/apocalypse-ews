@@ -340,13 +340,14 @@ function ensureWranglerConfig(env = process.env, filePath = WRANGLER_CONFIG_PATH
 function validateWranglerConfig(filePath = WRANGLER_CONFIG_PATH) {
   const errors = [];
   let d1DatabaseName = "";
-
+  let d1DatabaseId = "";
   const vars = {};
 
   if (!fs.existsSync(filePath)) {
     return {
       ok: false,
       d1DatabaseName,
+      d1DatabaseId,
       errors: ["wrangler.toml is required for Pages deploys; copy wrangler.example.toml and set the D1 database_id."],
     };
   }
@@ -373,14 +374,14 @@ function validateWranglerConfig(filePath = WRANGLER_CONFIG_PATH) {
     errors.push("wrangler.toml must bind the EWS_NOTIFY_DB D1 database.");
   } else {
     d1DatabaseName = getTomlString(d1Block, "database_name");
-    const databaseId = getTomlString(d1Block, "database_id");
+    d1DatabaseId = getTomlString(d1Block, "database_id");
     const migrationsDir = getTomlString(d1Block, "migrations_dir") || "migrations";
     const migrationsPath = path.resolve(path.dirname(filePath), migrationsDir);
 
     if (!d1DatabaseName) {
       errors.push("wrangler.toml EWS_NOTIFY_DB must set database_name.");
     }
-    if (!databaseId || databaseId === "replace-with-cloudflare-d1-database-id") {
+    if (!d1DatabaseId || d1DatabaseId === "replace-with-cloudflare-d1-database-id") {
       errors.push("wrangler.toml EWS_NOTIFY_DB must set a real database_id.");
     }
     if (!fs.existsSync(migrationsPath)) {
@@ -393,16 +394,18 @@ function validateWranglerConfig(filePath = WRANGLER_CONFIG_PATH) {
     }
   }
 
-  return { ok: errors.length === 0, d1DatabaseName, vars, errors };
+  return { ok: errors.length === 0, d1DatabaseName, d1DatabaseId, vars, errors };
 }
 
 function validateMaintenanceWranglerConfig(filePath = MAINTENANCE_WRANGLER_CONFIG_PATH) {
   const errors = [];
   let d1DatabaseName = "";
+  let d1DatabaseId = "";
   if (!fs.existsSync(filePath)) {
     return {
       ok: false,
       d1DatabaseName,
+      d1DatabaseId,
       errors: ["wrangler.maintenance.toml is required to resume queued alert fanout."],
     };
   }
@@ -423,16 +426,37 @@ function validateMaintenanceWranglerConfig(filePath = MAINTENANCE_WRANGLER_CONFI
     errors.push("wrangler.maintenance.toml must bind the EWS_NOTIFY_DB D1 database.");
   } else {
     d1DatabaseName = getTomlString(d1Block, "database_name");
-    const databaseId = getTomlString(d1Block, "database_id");
+    d1DatabaseId = getTomlString(d1Block, "database_id");
     if (!d1DatabaseName) {
       errors.push("wrangler.maintenance.toml EWS_NOTIFY_DB must set database_name.");
     }
-    if (!databaseId || databaseId === "replace-with-cloudflare-d1-database-id") {
+    if (!d1DatabaseId || d1DatabaseId === "replace-with-cloudflare-d1-database-id") {
       errors.push("wrangler.maintenance.toml EWS_NOTIFY_DB must set a real database_id.");
     }
   }
 
-  return { ok: errors.length === 0, d1DatabaseName, errors };
+  return { ok: errors.length === 0, d1DatabaseName, d1DatabaseId, errors };
+}
+
+function validateSharedD1Binding(wrangler, maintenanceWrangler) {
+  const errors = [];
+  if (
+    wrangler?.d1DatabaseName &&
+    maintenanceWrangler?.d1DatabaseName &&
+    wrangler.d1DatabaseName !== maintenanceWrangler.d1DatabaseName
+  ) {
+    errors.push(
+      `wrangler.toml EWS_NOTIFY_DB database_name (${wrangler.d1DatabaseName}) must match wrangler.maintenance.toml (${maintenanceWrangler.d1DatabaseName}).`,
+    );
+  }
+  if (
+    wrangler?.d1DatabaseId &&
+    maintenanceWrangler?.d1DatabaseId &&
+    wrangler.d1DatabaseId !== maintenanceWrangler.d1DatabaseId
+  ) {
+    errors.push("wrangler.toml EWS_NOTIFY_DB database_id must match wrangler.maintenance.toml.");
+  }
+  return errors;
 }
 
 
@@ -499,4 +523,5 @@ module.exports = {
   validateDeployEnv,
   validateWranglerConfig,
   validateMaintenanceWranglerConfig,
+  validateSharedD1Binding,
 };

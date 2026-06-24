@@ -6,6 +6,7 @@ const {
   validateDeployEnv,
   validateWranglerConfig,
   validateMaintenanceWranglerConfig,
+  validateSharedD1Binding,
 } = require("./_deploy_env");
 
 function parseArgs(argv) {
@@ -36,7 +37,12 @@ ensureWranglerConfig(env);
 const envErrors = validateDeployEnv(env);
 const wrangler = validateWranglerConfig();
 const maintenanceWrangler = validateMaintenanceWranglerConfig();
-const errors = [...envErrors, ...wrangler.errors, ...maintenanceWrangler.errors];
+const errors = [
+  ...envErrors,
+  ...wrangler.errors,
+  ...maintenanceWrangler.errors,
+  ...validateSharedD1Binding(wrangler, maintenanceWrangler),
+];
 
 for (const name of REQUIRED_DEPLOY_ENV_VARS) {
   console.log(`${name}=${env[name] ? "set" : "missing"}`);

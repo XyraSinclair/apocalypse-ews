@@ -199,13 +199,47 @@ function getLevel5SmsBatchWindowMs(env) {
   });
 }
 
-function getLevel5SubscriberBatchSize(env, smsMinIntervalMs = getLevel5SmsMinIntervalMs(env), smsBatchWindowMs = getLevel5SmsBatchWindowMs(env)) {
-  const configuredBatchSize = getPositiveIntegerEnv(env, "LEVEL5_SUBSCRIBER_BATCH_SIZE", 500, { min: 1, max: 5000 });
+function getLevel5SubscriberBatchSize(env) {
+  return getPositiveIntegerEnv(env, "LEVEL5_SUBSCRIBER_BATCH_SIZE", 500, { min: 1, max: 5000 });
+}
+
+function getSmsBatchCapacity(smsMinIntervalMs, smsBatchWindowMs) {
   if (smsMinIntervalMs <= 0) {
-    return configuredBatchSize;
+    return Number.POSITIVE_INFINITY;
   }
-  const pacedSmsCap = Math.max(1, Math.floor(smsBatchWindowMs / smsMinIntervalMs));
-  return Math.min(configuredBatchSize, pacedSmsCap);
+  return Math.max(1, Math.floor(smsBatchWindowMs / smsMinIntervalMs));
+}
+
+function subscriberNeedsSmsDelivery(subscriber) {
+  return (
+    Number(subscriber?.wants_sms || 0) === 1 &&
+    Boolean(subscriber?.phone_hash) &&
+    !subscriber?.sms_opted_out_at
+  );
+}
+
+function limitSubscribersBySmsBudget(subscribers, smsMinIntervalMs, smsBatchWindowMs) {
+  const smsCapacity = getSmsBatchCapacity(smsMinIntervalMs, smsBatchWindowMs);
+  if (!Number.isFinite(smsCapacity)) {
+    return { subscribers, smsCapped: false, smsCapacity: null };
+  }
+
+  let smsCount = 0;
+  for (let index = 0; index < subscribers.length; index += 1) {
+    if (!subscriberNeedsSmsDelivery(subscribers[index])) {
+      continue;
+    }
+    if (smsCount >= smsCapacity) {
+      return {
+        subscribers: subscribers.slice(0, index),
+        smsCapped: true,
+        smsCapacity,
+      };
+    }
+    smsCount += 1;
+  }
+
+  return { subscribers, smsCapped: false, smsCapacity };
 }
 
 function sleep(ms) {
@@ -894,8 +928,9 @@ function getAlertFanoutSubject(record) {
 async function sendAlertToActiveSubscriberBatches(env, options) {
   const smsMinIntervalMs = options.smsMinIntervalMs ?? getLevel5SmsMinIntervalMs(env);
   const smsBatchWindowMs = getLevel5SmsBatchWindowMs(env);
-  const batchSize = getLevel5SubscriberBatchSize(env, smsMinIntervalMs, smsBatchWindowMs);
+  const batchSize = getLevel5SubscriberBatchSize(env);
   const maxBatches = normalizeMaxBatches(options.maxBatches);
+  const smsBatchCapacity = getSmsBatchCapacity(smsMinIntervalMs, smsBatchWindowMs);
   const summary = {
     subscriberCount: 0,
     emailSentCount: 0,
@@ -906,6 +941,8 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
     pushSentCount: 0,
     smsMinIntervalMs,
     smsBatchWindowMs,
+    smsBatchCapacity: Number.isFinite(smsBatchCapacity) ? smsBatchCapacity : null,
+    smsCappedBatchCount: 0,
     pushEligibleCount: 0,
     concurrency: options.concurrency || 1,
     batchSize,
@@ -938,10 +975,18 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
   }
 
   while (summary.batchCount < maxBatches) {
-    const subscribers = await getActiveSubscriberBatch(env, { afterCreatedAt, afterId, limit: batchSize });
-    if (!subscribers.length) {
+    const fetchedSubscribers = await getActiveSubscriberBatch(env, { afterCreatedAt, afterId, limit: batchSize });
+    if (!fetchedSubscribers.length) {
       summary.complete = true;
       break;
+    }
+    const smsBudget = limitSubscribersBySmsBudget(fetchedSubscribers, smsMinIntervalMs, smsBatchWindowMs);
+    const subscribers = smsBudget.subscribers;
+    if (!subscribers.length) {
+      throw new Error(`Alert fanout SMS budget selected no subscribers for ${options.alertId}.`);
+    }
+    if (smsBudget.smsCapped) {
+      summary.smsCappedBatchCount += 1;
     }
     const lastSubscriber = subscribers[subscribers.length - 1];
     const nextAfterCreatedAt = String(lastSubscriber.created_at || "");
@@ -968,7 +1013,7 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
     if (!progressUpdated) {
       throw new Error(`Alert fanout lease lost before recording progress for ${options.alertId}.`);
     }
-    if (subscribers.length < batchSize) {
+    if (!smsBudget.smsCapped && fetchedSubscribers.length < batchSize) {
       summary.complete = true;
       break;
     }
@@ -1546,7 +1591,64 @@ export async function continueAlertFanoutBatch(env, { limit = 10 } = {}) {
   };
 }
 
-export async function sendAlertEventNotifications(env, rawEvent, { source = "alert_event_bridge" } = {}) {
+async function queueClaimedAlertForFanout(env, alertId, claim) {
+  if (claim.inserted) {
+    return {
+      ok: true,
+      sent: false,
+      queued: true,
+      alertId,
+      status: "processing",
+    };
+  }
+
+  const existing = await getAlertRecordById(env, alertId);
+  if (existing?.status === "sent") {
+    return {
+      ok: true,
+      sent: false,
+      queued: false,
+      reason: "already_recorded",
+      alertId,
+      status: existing.status,
+    };
+  }
+  if (existing?.status === "processing") {
+    return {
+      ok: true,
+      sent: false,
+      queued: true,
+      reason: "already_processing",
+      alertId,
+      status: existing.status,
+    };
+  }
+  if (existing && await beginAlertRecordSend(env, alertId)) {
+    return {
+      ok: true,
+      sent: false,
+      queued: true,
+      reason: "queued_existing",
+      alertId,
+      status: "processing",
+    };
+  }
+
+  const latest = await getAlertRecordById(env, alertId);
+  return {
+    ok: false,
+    sent: false,
+    queued: false,
+    reason: latest ? "alert_record_not_queued" : "alert_record_missing",
+    alertId,
+    status: latest?.status || null,
+  };
+}
+
+export async function sendAlertEventNotifications(env, rawEvent, { source = "alert_event_bridge", deliveryMode = "inline" } = {}) {
+  if (!["inline", "queued"].includes(deliveryMode)) {
+    throw new Error(`Unknown alert event delivery mode: ${deliveryMode}`);
+  }
   const event = normalizeExternalAlertEvent(rawEvent);
   if (!ALERTABLE_EVENT_KINDS.has(event.kind)) {
     return {
@@ -1561,7 +1663,7 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
   const alertId = externalAlertRecordId(event);
   const messageText = formatExternalAlertMessage(env, event);
   const smsMessageText = formatExternalAlertSms(event);
-  const lease = createAlertFanoutLease(env);
+  const lease = deliveryMode === "inline" ? createAlertFanoutLease(env) : { token: null, expiresAt: null };
   const claim = await claimAlertRecord(env, {
     id: alertId,
     kind: event.kind,
@@ -1575,6 +1677,14 @@ export async function sendAlertEventNotifications(env, rawEvent, { source = "ale
     fanoutLeaseToken: lease.token,
     fanoutLeaseExpiresAt: lease.expiresAt,
   });
+  if (deliveryMode === "queued") {
+    const queued = await queueClaimedAlertForFanout(env, alertId, claim);
+    return {
+      ...queued,
+      kind: event.kind,
+      cohort: event.cohort,
+    };
+  }
   const prepared = await prepareClaimedAlertForSend(env, alertId, claim);
   if (!prepared.ready) {
     return prepared.response;

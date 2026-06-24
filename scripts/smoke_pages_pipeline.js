@@ -133,13 +133,15 @@ function isCloudflareAccessLogin(response, text) {
         /Cloudflare Access|cloudflareaccess\.com|Log in to EWS Admin/i.test(text)),
   );
 }
-const WEBHOOK_EVIDENCE_STATUSES = new Set(['sent', 'delivered', 'failed', 'undelivered', 'unconfirmed']);
+const WEBHOOK_SUCCESS_STATUSES = new Set(['sent', 'delivered']);
+const deliveryEvidenceTimeoutMs = Math.max(1000, Number(process.env.EWS_SMOKE_DELIVERY_TIMEOUT_MS || 180_000));
+const deliveryEvidencePollMs = Math.max(100, Number(process.env.EWS_SMOKE_DELIVERY_POLL_MS || 3000));
 
-function hasWebhookStatusEvidence(delivery) {
+function hasWebhookSuccessEvidence(delivery) {
   return Boolean(
     delivery?.provider_message_id &&
       delivery?.provider_status &&
-      WEBHOOK_EVIDENCE_STATUSES.has(String(delivery.delivery_status || '').trim()) &&
+      WEBHOOK_SUCCESS_STATUSES.has(String(delivery.delivery_status || '').trim()) &&
       delivery.delivery_created_at &&
       delivery.delivery_updated_at &&
       delivery.delivery_updated_at !== delivery.delivery_created_at,
@@ -149,7 +151,7 @@ function hasWebhookStatusEvidence(delivery) {
 async function pollTestDeliveryEvidence(alertId, requestedChannels) {
   const startedAt = Date.now();
   let latestDeliveries = [];
-  while (Date.now() - startedAt < 180_000) {
+  while (Date.now() - startedAt < deliveryEvidenceTimeoutMs) {
     const { response, payload, text } = await readJson(`${targetUrl}/api/admin/test-alert?limit=100`, {
       headers: getAdminHeaders(),
     });
@@ -158,13 +160,13 @@ async function pollTestDeliveryEvidence(alertId, requestedChannels) {
     const matchingDeliveries = latestDeliveries.filter((delivery) => delivery.alert_id === alertId);
     const observedChannels = new Set(
       matchingDeliveries
-        .filter(hasWebhookStatusEvidence)
+        .filter(hasWebhookSuccessEvidence)
         .map((delivery) => delivery.channel),
     );
     if (requestedChannels.every((channel) => observedChannels.has(channel))) {
       return matchingDeliveries.filter((delivery) => requestedChannels.includes(delivery.channel));
     }
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await new Promise((resolve) => setTimeout(resolve, deliveryEvidencePollMs));
   }
   const latestChannels = latestDeliveries
     .filter((delivery) => delivery.alert_id === alertId)

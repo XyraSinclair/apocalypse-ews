@@ -89,7 +89,7 @@ function listAlertEvents(db, limit) {
       WHERE kind IN ('statistical_anomaly', 'takeoff_anomaly', 'takeoff_rate_anomaly')
         AND status <> 'observed'
         AND bridged_at IS NULL
-      ORDER BY occurred_at DESC, id DESC
+      ORDER BY occurred_at ASC, id ASC
       LIMIT ?
     `)
     .all(limit)
