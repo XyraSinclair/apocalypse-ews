@@ -309,6 +309,15 @@ function assertDeploySecretCoverage() {
   const smokeArgs = getPagesPipelineSmokeArgs('https://alerts.example.test');
   assert(smokeArgs.includes('--require-providers'), 'Pages deploy smoke does not require configured providers.');
   assert(smokeArgs.includes('--require-test-delivery'), 'Pages deploy smoke does not require provider delivery evidence.');
+  const deployScript = fs.readFileSync(path.join(ROOT_DIR, 'scripts', 'deploy_pages.js'), 'utf8');
+  const configurePagesSecretsIndex = deployScript.indexOf('configurePagesFunctionSecrets(projectName);');
+  const deployPagesIndex = deployScript.indexOf('run("npx", deployArgs);');
+  assert(configurePagesSecretsIndex >= 0, 'Pages deploy script does not configure Pages Function secrets.');
+  assert(deployPagesIndex >= 0, 'Pages deploy script does not run the Pages deploy command.');
+  assert(
+    configurePagesSecretsIndex < deployPagesIndex,
+    'Pages Function secrets must be configured before the Pages deploy command so the deployed Functions can read them.',
+  );
 }
 
 function sendJson(response, status, payload) {

@@ -250,8 +250,8 @@ async function main() {
     deployArgs.push("--commit-hash", commitHash);
   }
 
-  run("npx", deployArgs);
   configurePagesFunctionSecrets(projectName);
+  run("npx", deployArgs);
   run("npm", ["run", "smoke:live", "--", smokePublicUrl]);
   run("npm", getPagesPipelineSmokeArgs(smokePublicUrl));
 }
