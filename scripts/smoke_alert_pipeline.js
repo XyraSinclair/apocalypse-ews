@@ -190,6 +190,8 @@ function assertDeployEnvFileLoading(tempRoot) {
   const vapidEnv = createSmokeVapidEnv();
   fs.writeFileSync(envPath, [
     'CLOUDFLARE_API_TOKEN=smoke-cloudflare-token',
+    'CF_ACCESS_CLIENT_ID=smoke-access-client-id',
+    'CF_ACCESS_CLIENT_SECRET=smoke-access-client-secret',
     'INTERNAL_ALERT_TOKEN=smoke-internal-token',
     'EWS_PUBLIC_URL=https://alerts.example.test/',
     'EWS_ALERT_EVENTS_WEBHOOK_URL=https://alerts.example.test/api/internal/alert-events',
@@ -219,6 +221,15 @@ function assertDeployEnvFileLoading(tempRoot) {
   const env = getEnvWithDotEnv({}, { envFiles: [envPath] });
   assert(env.CLOUDFLARE_API_TOKEN === 'smoke-cloudflare-token', 'Deploy env loader did not read the explicit env file.');
   assert(validateDeployEnv(env).length === 0, 'Deploy env validation rejected the explicit env file.');
+  const withoutAccess = { ...env, CF_ACCESS_CLIENT_ID: '', CF_ACCESS_CLIENT_SECRET: '' };
+  assert(
+    validateDeployEnv(withoutAccess).some((error) => error === 'CF_ACCESS_CLIENT_ID is missing.'),
+    'Deploy env validation accepted a missing Cloudflare Access client ID.',
+  );
+  assert(
+    validateDeployEnv(withoutAccess).some((error) => error === 'CF_ACCESS_CLIENT_SECRET is missing.'),
+    'Deploy env validation accepted a missing Cloudflare Access client secret.',
+  );
   const {
     SENDGRID_WEBHOOK_URL: _explicitSendGridWebhookUrl,
     EWS_ALERT_EVENTS_WEBHOOK_URL: _explicitAlertEventsWebhookUrl,
