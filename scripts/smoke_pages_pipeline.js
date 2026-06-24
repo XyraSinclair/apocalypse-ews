@@ -13,6 +13,21 @@ const token = String(process.env.INTERNAL_ALERT_TOKEN || env.INTERNAL_ALERT_TOKE
 const testEmail = String(parsedArgs.options.testEmail || process.env.EWS_SMOKE_TEST_EMAIL || env.EWS_SMOKE_TEST_EMAIL || '').trim();
 const testPhone = String(parsedArgs.options.testPhone || process.env.EWS_SMOKE_TEST_PHONE || env.EWS_SMOKE_TEST_PHONE || '').trim();
 
+const accessClientId = String(
+  process.env.CF_ACCESS_CLIENT_ID ||
+    process.env.CLOUDFLARE_ACCESS_CLIENT_ID ||
+    env.CF_ACCESS_CLIENT_ID ||
+    env.CLOUDFLARE_ACCESS_CLIENT_ID ||
+    '',
+).trim();
+const accessClientSecret = String(
+  process.env.CF_ACCESS_CLIENT_SECRET ||
+    process.env.CLOUDFLARE_ACCESS_CLIENT_SECRET ||
+    env.CF_ACCESS_CLIENT_SECRET ||
+    env.CLOUDFLARE_ACCESS_CLIENT_SECRET ||
+    '',
+).trim();
+
 function normalizeBaseUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '');
 }
@@ -71,11 +86,52 @@ function assert(condition, message) {
   }
 }
 
-async function readJson(url, options = {}) {
+async function readText(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
+  return { response, text };
+}
+
+async function readJson(url, options = {}) {
+  const { response, text } = await readText(url, options);
+  let payload = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch (error) {
+      throw new Error(`${url} returned non-JSON HTTP ${response.status}: ${text.slice(0, 240)}`);
+    }
+  }
   return { response, payload, text };
+}
+function getCloudflareAccessHeaders() {
+  if (!accessClientId && !accessClientSecret) {
+    return {};
+  }
+  assert(accessClientId && accessClientSecret, 'Both CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET are required for Cloudflare Access service-token auth.');
+  return {
+    'cf-access-client-id': accessClientId,
+    'cf-access-client-secret': accessClientSecret,
+  };
+}
+
+function getAdminHeaders(extraHeaders = {}) {
+  return {
+    ...getCloudflareAccessHeaders(),
+    authorization: `Bearer ${token}`,
+    ...extraHeaders,
+  };
+}
+
+function isCloudflareAccessLogin(response, text) {
+  const contentType = response.headers.get('content-type') || '';
+  const responseUrl = response.url || '';
+  return Boolean(
+    response.ok &&
+      contentType.includes('text/html') &&
+      (responseUrl.includes('/cdn-cgi/access/') ||
+        /Cloudflare Access|cloudflareaccess\.com|Log in to EWS Admin/i.test(text)),
+  );
 }
 const WEBHOOK_EVIDENCE_STATUSES = new Set(['sent', 'delivered', 'failed', 'undelivered', 'unconfirmed']);
 
@@ -95,7 +151,7 @@ async function pollTestDeliveryEvidence(alertId, requestedChannels) {
   let latestDeliveries = [];
   while (Date.now() - startedAt < 180_000) {
     const { response, payload, text } = await readJson(`${targetUrl}/api/admin/test-alert?limit=100`, {
-      headers: { authorization: `Bearer ${token}` },
+      headers: getAdminHeaders(),
     });
     assert(response.ok, `Delivery history returned HTTP ${response.status}: ${text}`);
     latestDeliveries = Array.isArray(payload?.deliveries) ? payload.deliveries : [];
@@ -129,13 +185,22 @@ async function expectPublicJson(pathname, itemKey) {
 async function main() {
   assert(token, 'INTERNAL_ALERT_TOKEN is required for the Pages pipeline smoke.');
 
-  const unauthorized = await fetch(`${targetUrl}/api/admin/pipeline-status`);
-  assert(unauthorized.status === 401, `Unauthenticated pipeline status returned HTTP ${unauthorized.status}, not 401.`);
+  const { response: unauthorized, text: unauthorizedText } = await readText(`${targetUrl}/api/admin/pipeline-status`);
+  const accessProtected = isCloudflareAccessLogin(unauthorized, unauthorizedText);
+  assert(
+    unauthorized.status === 401 || accessProtected,
+    `Unauthenticated pipeline status returned HTTP ${unauthorized.status}, not 401 or Cloudflare Access login.`,
+  );
+  if (accessProtected) {
+    assert(
+      accessClientId && accessClientSecret,
+      'Cloudflare Access protects the admin smoke target; set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET.',
+    );
+  }
 
   const { response, payload, text } = await readJson(`${targetUrl}/api/admin/pipeline-status`, {
-    headers: { authorization: `Bearer ${token}` },
+    headers: getAdminHeaders(),
   });
-  assert(response.ok, `Authenticated pipeline status returned HTTP ${response.status}: ${text}`);
   const readinessFailures = Array.isArray(payload?.readiness?.failures) ? payload.readiness.failures : [];
   assert(payload?.ok === true, `Pipeline status did not return ok=true. Failures: ${readinessFailures.join(', ') || 'unknown'}.`);
   assert(readinessFailures.length === 0, `Pipeline readiness failures: ${readinessFailures.join(', ')}.`);
@@ -185,10 +250,9 @@ async function main() {
   if (testEmail || testPhone) {
     const { response: testResponse, payload: testPayload, text: testText } = await readJson(`${targetUrl}/api/admin/test-alert`, {
       method: 'POST',
-      headers: {
-        authorization: `Bearer ${token}`,
+      headers: getAdminHeaders({
         'content-type': 'application/json',
-      },
+      }),
       body: JSON.stringify({
         email: testEmail || undefined,
         phone: testPhone || undefined,

@@ -18,6 +18,8 @@ jobs:
     environment: production
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID || secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET || secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}
       INTERNAL_ALERT_TOKEN: ${{ secrets.INTERNAL_ALERT_TOKEN }}
       EWS_PUBLIC_URL: ${{ vars.EWS_PUBLIC_URL || 'https://ews.kylemcdonald.net/' }}
       APP_BASE_URL: ${{ vars.APP_BASE_URL || 'https://ews.kylemcdonald.net' }}
