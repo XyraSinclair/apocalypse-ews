@@ -1282,6 +1282,41 @@ async function assertAlertEventEndpointFailureStatus(token) {
     assert(skipResponse.status === 200, `Non-alertable event returned ${skipResponse.status}: ${JSON.stringify(skipPayload)}`);
     assert(skipPayload.ok === true, 'Non-alertable event did not return ok=true.');
     assert(skipPayload.results?.[0]?.reason === 'non_alertable_event_kind', 'Non-alertable event was not skipped before fanout.');
+    const multiResponse = await onRequestPost({
+      request: new Request('https://alerts.example.test/api/internal/alert-events', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          events: [
+            {
+              eventKey: 'smoke-multi-event-a',
+              kind: 'takeoff_anomaly',
+              cohort: 'global_business_jet',
+              title: 'Multi A',
+              message: 'Multi A message',
+              severity: 'high',
+              level: 4,
+              occurredAt: '2026-06-23T00:00:00.000Z',
+            },
+            {
+              eventKey: 'smoke-multi-event-b',
+              kind: 'takeoff_anomaly',
+              cohort: 'global_business_jet',
+              title: 'Multi B',
+              message: 'Multi B message',
+              severity: 'high',
+              level: 4,
+              occurredAt: '2026-06-23T00:00:00.000Z',
+            },
+          ],
+        }),
+      }),
+      env,
+    });
+    assert(multiResponse.status === 400, `Multi-event bridge request returned ${multiResponse.status}, not 400.`);
     const rawAlertCount = db.prepare("SELECT COUNT(*) AS count FROM notification_alerts WHERE kind = 'takeoff_batch'").get().count;
     assert(rawAlertCount === 0, 'Non-alertable raw telemetry created a notification alert record.');
   } finally {
@@ -1398,6 +1433,124 @@ async function assertTakeoffRateDetection() {
   assert(ratePayload.windowStart && ratePayload.windowEnd, 'Takeoff-rate anomaly did not include window bounds.');
   assert(ratePayload.signalFamily === 'takeoff_rate', 'Takeoff-rate anomaly did not include the signal family.');
   assert(ratePayload.takeoffCount === 5, 'Takeoff-rate anomaly recorded the wrong takeoff count.');
+  db.close();
+}
+
+async function assertAlertEventDetectionPreservesDispatchState() {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-alert-state-'));
+  const dbPath = path.join(tempRoot, 'ews.sqlite');
+  const snapshotPath = path.join(tempRoot, 'dashboard.json');
+  const db = new Database(dbPath);
+  db.exec(fs.readFileSync(path.join(ROOT_DIR, 'schema.sql'), 'utf8'));
+  const observedAtMs = Date.UTC(2026, 5, 23, 12, 0, 0);
+  const observedAt = new Date(observedAtMs).toISOString();
+  const halfHourMs = 30 * 60 * 1000;
+  const insertMetric = db.prepare('INSERT INTO concurrent_metrics (sampled_at, concurrent_count) VALUES (?, ?)');
+  const insertTakeoff = db.prepare(`
+    INSERT INTO takeoff_events (
+      cohort,
+      hex,
+      registration,
+      label,
+      source,
+      observed_at,
+      previous_observed_at,
+      altitude_ft,
+      ground_speed_kt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (let index = 1; index <= 337; index += 1) {
+    const sampledAt = new Date(observedAtMs - (index * halfHourMs)).toISOString();
+    insertMetric.run(sampledAt, 10);
+  }
+  insertMetric.run(observedAt, 10);
+  for (let index = 0; index < 5; index += 1) {
+    insertTakeoff.run(
+      'global_business_jet',
+      `fed${String(index).padStart(3, '0')}`,
+      `N8${index}`,
+      `State Current ${index}`,
+      'smoke',
+      observedAt,
+      new Date(observedAtMs - halfHourMs).toISOString(),
+      1600 + index,
+      180 + index,
+    );
+  }
+  const windowStart = new Date(observedAtMs - halfHourMs).toISOString();
+  const eventKey = `takeoff_rate_anomaly:global_business_jet:${windowStart}:${observedAt}`;
+  db.prepare(`
+    INSERT INTO alert_events (
+      kind,
+      severity,
+      cohort,
+      event_key,
+      occurred_at,
+      title,
+      message,
+      payload_json,
+      status,
+      dispatched_at,
+      dispatch_summary_json,
+      bridged_at,
+      bridge_summary_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'takeoff_rate_anomaly',
+    'high',
+    'global_business_jet',
+    eventKey,
+    observedAt,
+    'Old title',
+    'Old message',
+    JSON.stringify({ stale: true }),
+    'sent',
+    '2026-06-23T12:01:00.000Z',
+    JSON.stringify({ sent: 2 }),
+    '2026-06-23T12:02:00.000Z',
+    JSON.stringify({ ok: true }),
+  );
+  writeJson(snapshotPath, {
+    current: {
+      asOf: observedAt,
+      concurrentCount: 10,
+      baselineMean: 10,
+      zScore: 0,
+      emergencyLevel: 1,
+    },
+    signals: {
+      composite: {
+        emergencyLevel: 1,
+        sigmaShift: 0,
+        expectedConcurrentCount: 10,
+      },
+    },
+  });
+
+  await execNode([
+    'scripts/detect_alert_events.js',
+    '--db',
+    dbPath,
+    '--snapshot',
+    snapshotPath,
+    '--cohort',
+    'global_business_jet',
+    '--takeoff-batch-min',
+    '3',
+    '--takeoff-rate-min-count',
+    '3',
+    '--takeoff-rate-min-samples',
+    '336',
+    '--takeoff-rate-min-days',
+    '7',
+    '--takeoff-rate-z-score',
+    '3',
+  ]);
+  const alert = db.prepare('SELECT status, title, payload_json AS payloadJson, bridged_at AS bridgedAt FROM alert_events WHERE event_key = ?').get(eventKey);
+  assert(alert.status === 'sent', 'Alert detector reset a dispatched alert event back to pending.');
+  assert(alert.bridgedAt === '2026-06-23T12:02:00.000Z', 'Alert detector cleared existing bridge state.');
+  assert(alert.title.includes('takeoffs vs'), 'Alert detector did not refresh event metadata while preserving dispatch state.');
+  assert(JSON.parse(alert.payloadJson).takeoffCount === 5, 'Alert detector did not refresh the event payload while preserving dispatch state.');
   db.close();
 }
 
@@ -1581,7 +1734,7 @@ async function assertAlertEventBridgePosts(dbPath, token, statusPath) {
 
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  let receivedPayload = null;
+  const receivedPayloads = [];
   let receivedAuth = null;
   const server = http.createServer((request, response) => {
     const requestUrl = new URL(request.url, baseUrl);
@@ -1596,10 +1749,12 @@ async function assertAlertEventBridgePosts(dbPath, token, statusPath) {
     });
     request.on('end', () => {
       const text = Buffer.concat(chunks).toString('utf8');
-      receivedPayload = JSON.parse(text);
+      const receivedPayload = JSON.parse(text);
+      receivedPayloads.push(receivedPayload);
+      const events = Array.isArray(receivedPayload.events) ? receivedPayload.events : [receivedPayload.event];
       sendJson(response, 200, {
         ok: true,
-        results: receivedPayload.events.map((event) => ({ ok: true, eventKey: event.eventKey })),
+        results: events.map((event) => ({ ok: true, eventKey: event.eventKey })),
       });
     });
   });
@@ -1611,29 +1766,40 @@ async function assertAlertEventBridgePosts(dbPath, token, statusPath) {
     });
   });
   try {
-    const bridgeRun = await execNode(
-      [
-        'scripts/bridge_alert_events.js',
-        '--db',
-        dbPath,
-        '--limit',
-        '5',
-        '--url',
-        `${baseUrl}/api/internal/alert-events`,
-        '--status-path',
-        statusPath,
-      ],
-      { env: { ...process.env, INTERNAL_ALERT_TOKEN: token } },
-    );
+    const bridgeArgs = [
+      'scripts/bridge_alert_events.js',
+      '--db',
+      dbPath,
+      '--limit',
+      '5',
+      '--url',
+      `${baseUrl}/api/internal/alert-events`,
+      '--status-path',
+      statusPath,
+    ];
+    const bridgeRun = await execNode(bridgeArgs, { env: { ...process.env, INTERNAL_ALERT_TOKEN: token } });
     const bridgeOutput = JSON.parse(bridgeRun.stdout.trim());
     const bridgeStatus = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
     assert(receivedAuth === `Bearer ${token}`, 'Bridge did not authenticate with the configured internal token.');
-    assert(receivedPayload?.source === 'local_refresh', 'Bridge did not identify the local refresh source.');
-    assert(Array.isArray(receivedPayload?.events), 'Bridge did not post an events array.');
-    assert(receivedPayload.events.some((event) => event.eventKey === alertEventKey), 'Bridge did not post the queued alert event.');
+    assert(receivedPayloads.length === 1, 'Bridge did not post exactly one request for one queued event.');
+    assert(receivedPayloads[0]?.source === 'local_refresh', 'Bridge did not identify the local refresh source.');
+    assert(Array.isArray(receivedPayloads[0]?.events), 'Bridge did not post an events array.');
+    assert(receivedPayloads[0].events.length === 1, 'Bridge did not limit each bridge request to one event.');
+    assert(receivedPayloads[0].events[0]?.eventKey === alertEventKey, 'Bridge did not post the queued alert event.');
     assert(bridgeOutput.ok === true && bridgeOutput.skipped === false, 'Bridge success run did not report ok=true.');
-    assert(bridgeOutput.postedEvents >= 1, 'Bridge success run did not report posted events.');
+    assert(bridgeOutput.postedEvents === 1, 'Bridge success run did not report the single posted event.');
     assert(bridgeStatus.ok === true && bridgeStatus.skipped === false, 'Bridge status file did not persist successful posting.');
+
+    const bridgedDb = new Database(dbPath);
+    const bridged = bridgedDb.prepare('SELECT bridged_at AS bridgedAt, bridge_summary_json AS bridgeSummaryJson FROM alert_events WHERE event_key = ?').get(alertEventKey);
+    bridgedDb.close();
+    assert(bridged?.bridgedAt, 'Bridge did not mark the local alert event as bridged.');
+    assert(JSON.parse(bridged.bridgeSummaryJson).ok === true, 'Bridge did not store the provider bridge response summary.');
+
+    const secondBridgeRun = await execNode(bridgeArgs, { env: { ...process.env, INTERNAL_ALERT_TOKEN: token } });
+    const secondBridgeOutput = JSON.parse(secondBridgeRun.stdout.trim());
+    assert(secondBridgeOutput.skipped === true && secondBridgeOutput.reason === 'no_alert_events', 'Bridge reposted an already bridged alert event.');
+    assert(receivedPayloads.length === 1, 'Bridge made a second POST for an already bridged alert event.');
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => {
@@ -1893,6 +2059,7 @@ async function main() {
     await assertPagesPipelineStatus(token);
     await assertPagesWebPushSubscriptionAndFanout();
     await assertTakeoffRateDetection();
+    await assertAlertEventDetectionPreservesDispatchState();
     await assertSingleTakeoffDuringConcurrentAnomalySuppressed();
     await assertConcurrentAnomalyRequiresReadyBaseline();
     await assertPagesPipelineSmokeScript(token);

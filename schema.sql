@@ -156,7 +156,9 @@ CREATE TABLE IF NOT EXISTS alert_events (
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   dispatched_at TEXT,
-  dispatch_summary_json TEXT
+  dispatch_summary_json TEXT,
+  bridged_at TEXT,
+  bridge_summary_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_alert_events_status_created

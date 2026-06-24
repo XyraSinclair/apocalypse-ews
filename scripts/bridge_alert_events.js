@@ -54,6 +54,20 @@ function parseArgs(argv) {
   return args;
 }
 
+function tableColumns(db, tableName) {
+  return new Set(db.prepare(`PRAGMA table_info(${tableName})`).all().map((row) => row.name));
+}
+
+function ensureAlertEventBridgeColumns(db) {
+  const columns = tableColumns(db, 'alert_events');
+  if (!columns.has('bridged_at')) {
+    db.prepare('ALTER TABLE alert_events ADD COLUMN bridged_at TEXT').run();
+  }
+  if (!columns.has('bridge_summary_json')) {
+    db.prepare('ALTER TABLE alert_events ADD COLUMN bridge_summary_json TEXT').run();
+  }
+}
+
 function listAlertEvents(db, limit) {
   return db
     .prepare(`
@@ -69,10 +83,12 @@ function listAlertEvents(db, limit) {
         payload_json AS payloadJson,
         status,
         created_at AS createdAt,
-        dispatched_at AS dispatchedAt
+        dispatched_at AS dispatchedAt,
+        bridged_at AS bridgedAt
       FROM alert_events
       WHERE kind IN ('statistical_anomaly', 'takeoff_anomaly', 'takeoff_rate_anomaly')
         AND status <> 'observed'
+        AND bridged_at IS NULL
       ORDER BY occurred_at DESC, id DESC
       LIMIT ?
     `)
@@ -102,14 +118,14 @@ function writeBridgeStatus(args, status) {
   return payload;
 }
 
-async function postEvents(url, token, events) {
+async function postEvent(url, token, event) {
   const response = await fetch(url, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${token}`,
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ source: 'local_refresh', events }),
+    body: JSON.stringify({ source: 'local_refresh', events: [event] }),
   });
   const text = await response.text();
   const payload = text ? JSON.parse(text) : null;
@@ -117,6 +133,26 @@ async function postEvents(url, token, events) {
     throw new Error(payload?.error || text || `Alert event bridge failed with HTTP ${response.status}`);
   }
   return payload;
+}
+
+function markEventBridged(db, event, result) {
+  db.prepare(`
+    UPDATE alert_events
+    SET bridged_at = ?,
+        bridge_summary_json = ?
+    WHERE id = ?
+      AND bridged_at IS NULL
+  `).run(new Date().toISOString(), JSON.stringify(result), event.id);
+}
+
+async function postEvents(db, url, token, events) {
+  const results = [];
+  for (const event of events) {
+    const result = await postEvent(url, token, event);
+    markEventBridged(db, event, result);
+    results.push({ eventKey: event.eventKey, result });
+  }
+  return { ok: results.every((entry) => entry.result?.ok !== false), results };
 }
 
 async function main() {
@@ -143,7 +179,8 @@ async function main() {
     }
 
     const dbPath = path.resolve(args.db);
-    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const db = new Database(dbPath, { fileMustExist: true });
+    ensureAlertEventBridgeColumns(db);
     try {
       const events = listAlertEvents(db, args.limit);
       if (!events.length) {
@@ -156,7 +193,7 @@ async function main() {
         console.log(JSON.stringify(status));
         return;
       }
-      const result = await postEvents(args.url, token, events);
+      const result = await postEvents(db, args.url, token, events);
       const status = writeBridgeStatus(args, {
         ok: true,
         skipped: false,

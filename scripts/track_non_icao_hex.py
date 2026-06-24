@@ -628,8 +628,7 @@ def parse_latest_non_icao_snapshot(cache_path):
         index += 1
 
     latest_sampled_at = None
-    peak_rows = []
-    peak_sampled_at = None
+    latest_rows = []
 
     while index < len(points):
         now = int(points_u[index + 2]) / 1000 + int(points_u[index + 1]) * 4294967.296
@@ -654,40 +653,43 @@ def parse_latest_non_icao_snapshot(cache_path):
             altitude = point3 & 65535
             if altitude & 32768:
                 altitude |= -65536
-            if altitude == -123:
-                index += 4
-                continue
-            altitude *= 25
+            is_airborne = altitude != -123
+            altitude_ft = altitude * 25 if is_airborne else None
 
             ground_speed = point3 >> 16
             ground_speed = None if ground_speed == -1 else ground_speed / 10
             hex_value = point_to_non_icao_hex(point0_u)
             type_index = (point0_u >> 27) & 0x1F
             message_type = TYPE_LIST[type_index] if type_index < len(TYPE_LIST) else "unknown"
-            rows_by_hex[hex_value] = {
+            row = {
                 "hex": hex_value,
                 "registration": None,
                 "label": f"{hex_value} {message_type}",
                 "observed_at": sampled_at.isoformat(),
                 "lat": point1 / 1e6,
                 "lon": point2 / 1e6,
-                "altitude_ft": altitude,
+                "altitude_ft": altitude_ft,
                 "ground_speed_kt": ground_speed,
                 "track": None,
-                "is_airborne": 1,
+                "is_airborne": 1 if is_airborne else 0,
                 "source": "adsbx_heatmap",
             }
+            existing = rows_by_hex.get(hex_value)
+            if (
+                existing is None
+                or (row["is_airborne"] and not existing["is_airborne"])
+                or row["is_airborne"] == existing["is_airborne"]
+            ):
+                rows_by_hex[hex_value] = row
             index += 4
 
         latest_sampled_at = sampled_at
-        if len(rows_by_hex) > len(peak_rows):
-            peak_sampled_at = sampled_at
-            peak_rows = sorted(rows_by_hex.values(), key=lambda row: row["hex"])
+        latest_rows = sorted(rows_by_hex.values(), key=lambda row: row["hex"])
 
     if latest_sampled_at is None:
         return None, []
 
-    return (peak_sampled_at or latest_sampled_at).isoformat(), peak_rows
+    return latest_sampled_at.isoformat(), latest_rows
 
 
 def load_previous_live_snapshot(connection):
@@ -707,6 +709,8 @@ def build_takeoff_rows(snapshot_rows, previous_live_snapshot):
 
     takeoff_rows = []
     for row in snapshot_rows:
+        if not row.get("is_airborne"):
+            continue
         previous_row = previous_live_snapshot.get(row["hex"])
         was_previously_airborne = bool(previous_row and previous_row["is_airborne"])
         was_previously_observed_on_ground = bool(previous_row) and not was_previously_airborne
@@ -806,6 +810,8 @@ def replace_live_snapshot(connection, cache_path):
             takeoff_rows,
         )
 
+    airborne_count = sum(1 for row in snapshot_rows if row["is_airborne"])
+
     set_meta(connection, "cohort_source", "non_icao_untracked")
     set_meta(connection, "adsbx_heatmap_sampled_at", sampled_at_iso)
     set_meta(connection, "adsbx_heatmap_cache_path", str(cache_path))
@@ -821,8 +827,8 @@ def replace_live_snapshot(connection, cache_path):
         "latestSampledAt": sampled_at_iso,
         "cachePath": str(cache_path),
         "matchedCount": len(snapshot_rows),
-        "airborneCount": len(snapshot_rows),
-        "concurrentCount": len(snapshot_rows),
+        "airborneCount": airborne_count,
+        "concurrentCount": airborne_count,
         "takeoffCount": len(takeoff_rows),
     }))
     return {

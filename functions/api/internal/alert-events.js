@@ -10,6 +10,9 @@ export async function onRequestPost({ request, env }) {
     if (!events.length) {
       throw new HttpError(400, "Provide at least one alert event.");
     }
+    if (events.length > 1) {
+      throw new HttpError(400, "Post one alert event per request.");
+    }
 
     const results = [];
     for (const event of events) {

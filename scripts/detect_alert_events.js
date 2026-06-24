@@ -174,7 +174,7 @@ function severityForLevel(level) {
 function findExistingEvent(db, event) {
   return db
     .prepare(`
-      SELECT id, event_key AS eventKey
+      SELECT id, event_key AS eventKey, status
       FROM alert_events
       WHERE event_key = @eventKey
          OR (kind = @kind AND cohort = @cohort AND occurred_at = @occurredAt)
@@ -197,7 +197,10 @@ function updateExistingEvent(db, existing, event) {
       title = @title,
       message = @message,
       payload_json = @payloadJson,
-      status = @status
+      status = CASE
+        WHEN status IN ('processing', 'sent', 'no_recipients', 'partial', 'failed') THEN status
+        ELSE @status
+      END
     WHERE id = @id
   `).run({ ...event, id: existing.id });
 }
