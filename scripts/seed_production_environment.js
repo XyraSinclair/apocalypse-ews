@@ -29,17 +29,29 @@ const TELNYX_SENDER_SECRETS = [
   'TELNYX_FROM_PHONE',
   'TELNYX_MESSAGING_PROFILE_ID',
 ];
-const OPTIONAL_SECRET_KEYS = [
+const ACCESS_CLIENT_ID_SECRETS = [
   'CF_ACCESS_CLIENT_ID',
-  'CF_ACCESS_CLIENT_SECRET',
   'CLOUDFLARE_ACCESS_CLIENT_ID',
+];
+const ACCESS_CLIENT_SECRET_SECRETS = [
+  'CF_ACCESS_CLIENT_SECRET',
   'CLOUDFLARE_ACCESS_CLIENT_SECRET',
+];
+const OPTIONAL_SECRET_KEYS = [
   'STRIPE_PRODUCT_ID',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_CHANNEL',
   'TELNYX_WEBHOOK_FAILOVER_URL',
 ];
-const SEEDABLE_SECRET_KEYS = [...new Set([...REQUIRED_SECRET_KEYS, ...TELNYX_SENDER_SECRETS, ...OPTIONAL_SECRET_KEYS])];
+const SEEDABLE_SECRET_KEYS = [
+  ...new Set([
+    ...REQUIRED_SECRET_KEYS,
+    ...TELNYX_SENDER_SECRETS,
+    ...ACCESS_CLIENT_ID_SECRETS,
+    ...ACCESS_CLIENT_SECRET_SECRETS,
+    ...OPTIONAL_SECRET_KEYS,
+  ]),
+];
 
 function parseArgs(argv) {
   const args = {
@@ -151,12 +163,23 @@ function hasSecretValue(env, existingSecrets, key) {
   return isFilled(env.get(key)) || existingSecrets.has(key);
 }
 
+function hasAnySecretValue(env, existingSecrets, keys) {
+  return keys.some((key) => hasSecretValue(env, existingSecrets, key));
+}
+
 function requireSecrets(env, existingSecrets) {
   const missing = REQUIRED_SECRET_KEYS.filter((key) => !hasSecretValue(env, existingSecrets, key));
-  const hasTelnyxSender = TELNYX_SENDER_SECRETS.some((key) => hasSecretValue(env, existingSecrets, key));
 
-  if (!hasTelnyxSender) {
+  if (!hasAnySecretValue(env, existingSecrets, TELNYX_SENDER_SECRETS)) {
     missing.push(TELNYX_SENDER_SECRETS.join(' or '));
+  }
+
+  if (!hasAnySecretValue(env, existingSecrets, ACCESS_CLIENT_ID_SECRETS)) {
+    missing.push(ACCESS_CLIENT_ID_SECRETS.join(' or '));
+  }
+
+  if (!hasAnySecretValue(env, existingSecrets, ACCESS_CLIENT_SECRET_SECRETS)) {
+    missing.push(ACCESS_CLIENT_SECRET_SECRETS.join(' or '));
   }
 
   if (missing.length) {
