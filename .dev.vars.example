@@ -1,6 +1,8 @@
 APP_BASE_URL=http://localhost:8788
 EWS_PUBLIC_URL=https://ews.kylemcdonald.net/
 EWS_NOTIFICATION_URL=https://aews.cc/
+CF_ACCESS_CLIENT_ID=replace_me
+CF_ACCESS_CLIENT_SECRET=replace_me
 
 STRIPE_SECRET_KEY=sk_test_replace_me
 STRIPE_WEBHOOK_SECRET=whsec_replace_me
