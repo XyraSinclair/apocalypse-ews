@@ -3,27 +3,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { REQUIRED_DEPLOY_ENV_VARS } = require('./_deploy_env');
 
 const REPO = 'XyraSinclair/apocalypse-ews';
 const ENVIRONMENT = 'production';
 const DEFAULT_SECRET_FILE = path.join(process.env.HOME || process.cwd(), 'Desktop', 'ews-prod-secrets.env');
-
-const REQUIRED_SECRETS = [
-  'CLOUDFLARE_API_TOKEN',
-  'SENDGRID_API_KEY',
-  'SENDGRID_FROM_EMAIL',
-  'SENDGRID_WEBHOOK_PUBLIC_KEY',
-  'TELNYX_API_KEY',
-  'TELNYX_PUBLIC_KEY',
-  'EWS_SMOKE_TEST_EMAIL',
-  'EWS_SMOKE_TEST_PHONE',
-];
-
-const TELNYX_SENDER_SECRETS = [
-  'TELNYX_NUMBER',
-  'TELNYX_FROM_PHONE',
-  'TELNYX_MESSAGING_PROFILE_ID',
-];
 
 const PRODUCTION_VARIABLES = {
   EWS_PUBLIC_URL: 'https://ews.kylemcdonald.net/',
@@ -38,6 +22,20 @@ const PRODUCTION_VARIABLES = {
   VITE_MILITARY_DASHBOARD_URL: 'https://ews.kylemcdonald.net/military-dashboard.json',
   VITE_UNTRACKED_DASHBOARD_URL: 'https://ews.kylemcdonald.net/untracked-dashboard.json',
 };
+
+const REQUIRED_SECRET_KEYS = REQUIRED_DEPLOY_ENV_VARS.filter((key) => !Object.hasOwn(PRODUCTION_VARIABLES, key));
+const TELNYX_SENDER_SECRETS = [
+  'TELNYX_NUMBER',
+  'TELNYX_FROM_PHONE',
+  'TELNYX_MESSAGING_PROFILE_ID',
+];
+const OPTIONAL_SECRET_KEYS = [
+  'STRIPE_PRODUCT_ID',
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_CHANNEL',
+  'TELNYX_WEBHOOK_FAILOVER_URL',
+];
+const SEEDABLE_SECRET_KEYS = [...new Set([...REQUIRED_SECRET_KEYS, ...TELNYX_SENDER_SECRETS, ...OPTIONAL_SECRET_KEYS])];
 
 function parseArgs(argv) {
   const args = {
@@ -85,24 +83,18 @@ function isFilled(value) {
   return Boolean(value && value !== '...');
 }
 
-function requireSecrets(env) {
-  const missing = REQUIRED_SECRETS.filter((key) => !isFilled(env.get(key)));
-  const hasTelnyxSender = TELNYX_SENDER_SECRETS.some((key) => isFilled(env.get(key)));
-
-  if (!hasTelnyxSender) {
-    missing.push(TELNYX_SENDER_SECRETS.join(' or '));
-  }
-
-  if (missing.length) {
-    throw new Error(`Missing required production secret values: ${missing.join(', ')}`);
-  }
-}
-
 function run(command, args, options = {}) {
+  const { quiet = false, ...spawnOptions } = options;
+  const stdio =
+    options.input === undefined
+      ? quiet
+        ? ['ignore', 'ignore', 'inherit']
+        : 'inherit'
+      : ['pipe', quiet ? 'ignore' : 'inherit', 'inherit'];
   const result = spawnSync(command, args, {
-    ...options,
+    ...spawnOptions,
     encoding: 'utf8',
-    stdio: options.input === undefined ? 'inherit' : ['pipe', 'inherit', 'inherit'],
+    stdio,
   });
 
   if (result.error) {
@@ -113,10 +105,59 @@ function run(command, args, options = {}) {
   }
 }
 
+function capture(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    ...options,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`${command} ${args.join(' ')} exited with status ${result.status}: ${result.stderr.trim()}`);
+  }
+  return result.stdout;
+}
+
+function parseSecretList(output) {
+  return new Set(
+    output
+      .split(/\r?\n/)
+      .map((line) => line.trim().split(/\s+/)[0])
+      .filter((name) => name && name !== 'NAME'),
+  );
+}
+
 function ensureProductionEnvironment() {
   run('gh', ['api', '--method', 'PUT', `repos/${REPO}/environments/${ENVIRONMENT}`, '--input', '-'], {
     input: '{}',
+    quiet: true,
   });
+}
+
+function listExistingSecretNames() {
+  const repoSecrets = parseSecretList(capture('gh', ['secret', 'list', '--repo', REPO]));
+  const envSecrets = parseSecretList(capture('gh', ['secret', 'list', '--env', ENVIRONMENT, '--repo', REPO]));
+  return new Set([...repoSecrets, ...envSecrets]);
+}
+
+function hasSecretValue(env, existingSecrets, key) {
+  return isFilled(env.get(key)) || existingSecrets.has(key);
+}
+
+function requireSecrets(env, existingSecrets) {
+  const missing = REQUIRED_SECRET_KEYS.filter((key) => !hasSecretValue(env, existingSecrets, key));
+  const hasTelnyxSender = TELNYX_SENDER_SECRETS.some((key) => hasSecretValue(env, existingSecrets, key));
+
+  if (!hasTelnyxSender) {
+    missing.push(TELNYX_SENDER_SECRETS.join(' or '));
+  }
+
+  if (missing.length) {
+    throw new Error(`Missing required production secret values: ${missing.join(', ')}`);
+  }
 }
 
 function setSecret(key, value) {
@@ -134,14 +175,12 @@ function setVariable(key, value) {
 function main() {
   const args = parseArgs(process.argv);
   const env = parseEnvFile(args.file);
-  requireSecrets(env);
 
   ensureProductionEnvironment();
+  const existingSecrets = listExistingSecretNames();
+  requireSecrets(env, existingSecrets);
 
-  for (const key of REQUIRED_SECRETS) {
-    setSecret(key, env.get(key));
-  }
-  for (const key of TELNYX_SENDER_SECRETS) {
+  for (const key of SEEDABLE_SECRET_KEYS) {
     if (isFilled(env.get(key))) {
       setSecret(key, env.get(key));
     }

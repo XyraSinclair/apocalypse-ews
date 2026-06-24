@@ -56,7 +56,7 @@ function getProviderConfig(env) {
     telnyxDeliveryStatusConfigured: hasText(env.TELNYX_PUBLIC_KEY) && hasTelnyxDeliveryStatusPath(env),
     webPushConfigured:
       hasText(env.WEB_PUSH_VAPID_PUBLIC_KEY) && hasText(env.WEB_PUSH_VAPID_PRIVATE_KEY) && hasText(env.WEB_PUSH_CONTACT),
-    stripeConfigured: hasText(env.STRIPE_SECRET_KEY) && hasText(env.STRIPE_PRICE_ID),
+    stripeConfigured: hasText(env.STRIPE_SECRET_KEY) && hasText(env.STRIPE_WEBHOOK_SECRET) && hasText(env.STRIPE_PRICE_ID),
     telegramEmergencyConfigured: hasText(env.TELEGRAM_BOT_TOKEN) && hasText(env.TELEGRAM_CHANNEL),
   };
 }
@@ -96,6 +96,7 @@ function buildReadinessFailures(status) {
   addFailure(failures, status.providerConfig.telnyxWebhookVerificationConfigured, "telnyx_webhook_verification_not_configured");
   addFailure(failures, status.providerConfig.telnyxDeliveryStatusConfigured, "telnyx_delivery_status_not_configured");
   addFailure(failures, status.providerConfig.webPushConfigured, "web_push_not_configured");
+  addFailure(failures, status.providerConfig.stripeConfigured, "stripe_not_configured");
   addFailure(failures, status.feeds.alerts.available && Number(status.feeds.alerts.itemCount || 0) > 0, "alerts_feed_empty_or_unavailable");
   addFailure(failures, status.feeds.takeoffs.available && Number(status.feeds.takeoffs.itemCount || 0) > 0, "takeoffs_feed_empty_or_unavailable");
   addFailure(failures, status.feeds.eventSignals.available && Number(status.feeds.eventSignals.itemCount || 0) > 0, "event_signals_feed_empty_or_unavailable");

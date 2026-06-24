@@ -10,7 +10,7 @@ const {
   validateMaintenanceWranglerConfig,
   validateWranglerConfig,
 } = require("./_deploy_env");
-const { copyPublishedAssets } = require("./copy_published_assets");
+const { REQUIRED_PUBLISHED_ASSETS, copyPublishedAssets } = require("./copy_published_assets");
 
 const env = getEnvWithDotEnv();
 const publicUrl = env.EWS_PUBLIC_URL || "https://ews.kylemcdonald.net/";
@@ -70,6 +70,29 @@ function normalizeBaseUrl(value) {
 
 function getPagesPipelineSmokeArgs(targetPublicUrl) {
   return ["run", "smoke:pages-pipeline", "--", targetPublicUrl, "--require-providers", "--require-test-delivery"];
+}
+
+function getMissingPublishedAssets() {
+  const publishedDir = path.join(REPO_ROOT, "data", "published");
+  if (!fs.existsSync(publishedDir)) {
+    return [...REQUIRED_PUBLISHED_ASSETS];
+  }
+  const available = new Set(
+    fs
+      .readdirSync(publishedDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name),
+  );
+  return REQUIRED_PUBLISHED_ASSETS.filter((fileName) => !available.has(fileName));
+}
+
+function ensurePublishedAssets() {
+  const missingAssets = getMissingPublishedAssets();
+  if (!missingAssets.length) {
+    return;
+  }
+  console.log(`Published data missing ${missingAssets.join(", ")}; refreshing live snapshots before build.`);
+  run("npm", ["run", "refresh:all", "--", "--skip-alerts"]);
 }
 
 
@@ -203,6 +226,7 @@ async function main() {
   }
 
   const smokePublicUrl = wranglerPublicUrl || localPublicUrl;
+  ensurePublishedAssets();
   run("npm", ["run", "build"]);
   copyPublishedAssets();
   await restoreCurrentRss(smokePublicUrl);

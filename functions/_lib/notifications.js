@@ -35,6 +35,7 @@ const DEFAULT_NOTIFICATION_URL = "https://aews.cc/";
 const LEVEL5_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_LEVEL5_NOTIFICATION_CONCURRENCY = 8;
 const DEFAULT_LEVEL5_SMS_MIN_INTERVAL_MS = 250;
+const DEFAULT_LEVEL5_SMS_BATCH_WINDOW_MS = 25 * 1000;
 const DEFAULT_RENEWAL_REMINDER_DAYS_BEFORE = 30;
 const DEFAULT_RENEWAL_REMINDER_BATCH_LIMIT = 100;
 const DEFAULT_RENEWAL_REMINDER_CONCURRENCY = 4;
@@ -189,6 +190,22 @@ function getLevel5SmsMinIntervalMs(env) {
     min: 0,
     max: 60_000,
   });
+}
+
+function getLevel5SmsBatchWindowMs(env) {
+  return getPositiveIntegerEnv(env, "LEVEL5_SMS_BATCH_WINDOW_MS", DEFAULT_LEVEL5_SMS_BATCH_WINDOW_MS, {
+    min: 1,
+    max: 10 * 60 * 1000,
+  });
+}
+
+function getLevel5SubscriberBatchSize(env, smsMinIntervalMs = getLevel5SmsMinIntervalMs(env), smsBatchWindowMs = getLevel5SmsBatchWindowMs(env)) {
+  const configuredBatchSize = getPositiveIntegerEnv(env, "LEVEL5_SUBSCRIBER_BATCH_SIZE", 500, { min: 1, max: 5000 });
+  if (smsMinIntervalMs <= 0) {
+    return configuredBatchSize;
+  }
+  const pacedSmsCap = Math.max(1, Math.floor(smsBatchWindowMs / smsMinIntervalMs));
+  return Math.min(configuredBatchSize, pacedSmsCap);
 }
 
 function sleep(ms) {
@@ -875,7 +892,9 @@ function getAlertFanoutSubject(record) {
 }
 
 async function sendAlertToActiveSubscriberBatches(env, options) {
-  const batchSize = getPositiveIntegerEnv(env, "LEVEL5_SUBSCRIBER_BATCH_SIZE", 500, { min: 1, max: 5000 });
+  const smsMinIntervalMs = options.smsMinIntervalMs ?? getLevel5SmsMinIntervalMs(env);
+  const smsBatchWindowMs = getLevel5SmsBatchWindowMs(env);
+  const batchSize = getLevel5SubscriberBatchSize(env, smsMinIntervalMs, smsBatchWindowMs);
   const maxBatches = normalizeMaxBatches(options.maxBatches);
   const summary = {
     subscriberCount: 0,
@@ -885,7 +904,8 @@ async function sendAlertToActiveSubscriberBatches(env, options) {
     emailEligibleCount: 0,
     smsEligibleCount: 0,
     pushSentCount: 0,
-    smsMinIntervalMs: options.smsMinIntervalMs || 0,
+    smsMinIntervalMs,
+    smsBatchWindowMs,
     pushEligibleCount: 0,
     concurrency: options.concurrency || 1,
     batchSize,
@@ -1643,7 +1663,8 @@ export async function maybeSendLevel5Notifications(env, snapshot, { source = "sc
     leaseToken: prepared.leaseToken,
     leaseMs: prepared.leaseMs,
   });
-  const deliveredCount = Number(summary.emailSentCount || 0) + Number(summary.smsSentCount || 0);
+  const deliveredCount =
+    Number(summary.emailSentCount || 0) + Number(summary.smsSentCount || 0) + Number(summary.pushSentCount || 0);
   if (summary.errorCount === 0 && deliveredCount > 0) {
     await setMetaValue(env, LEVEL5_COOLDOWN_META_KEY, triggeredAt);
   }

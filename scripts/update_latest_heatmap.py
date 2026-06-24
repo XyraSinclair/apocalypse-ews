@@ -337,7 +337,8 @@ def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=
             )
             previous_row = previous_live_snapshot.get(hex_value)
             was_previously_airborne = bool(previous_row and previous_row["is_airborne"])
-            if has_previous_live_snapshot and not was_previously_airborne:
+            was_previously_observed_on_ground = bool(previous_row) and not was_previously_airborne
+            if has_previous_live_snapshot and was_previously_observed_on_ground:
                 takeoff_rows.append(
                     {
                         "cohort": cohort,

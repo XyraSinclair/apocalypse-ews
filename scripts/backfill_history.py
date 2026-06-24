@@ -187,6 +187,29 @@ def download_heatmap(date_value, index, destination, rate_limit_seconds, timeout
     return True
 
 
+def get_meta(connection, key):
+    row = connection.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def get_cohort_source(connection):
+    return get_meta(connection, "cohort_source") or "tracked_aircraft"
+
+
+def normalize_float(value):
+    if value is None:
+        return None
+
+    return float(value)
+
+
+def normalize_altitude(value):
+    if value is None or value == "ground":
+        return None
+
+    return int(value)
+
+
 def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_download, rate_limit_seconds, keep_cache):
     tracked_hex_filter = {str_to_point(hex_value) for hex_value in tracked_by_hex}
     range_start_iso = f"{start_date.isoformat()}T00:00:00+00:00"
@@ -217,6 +240,15 @@ def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_downlo
         """,
         (start_date.isoformat(), end_date.isoformat()),
     )
+    connection.execute(
+        """
+        DELETE FROM takeoff_events
+        WHERE source = 'adsbx_history'
+          AND observed_at >= ?
+          AND observed_at < ?
+        """,
+        (range_start_iso, range_end_iso),
+    )
     total_files = (end_date - start_date).days * 48
     processed_files = 0
     concurrent_rows = []
@@ -225,6 +257,9 @@ def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_downlo
     day_unique = set()
     day_peak_concurrent = 0
     day_sample_count = 0
+    cohort = get_cohort_source(connection)
+    previous_state_by_hex = {}
+    takeoff_rows = []
 
     def flush_day(day_value):
         nonlocal day_unique, day_peak_concurrent, day_sample_count
@@ -263,14 +298,47 @@ def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_downlo
             file_peak_concurrent = 0
             file_timestamp = None
 
-            for heatmap_slice in slices:
+            for heatmap_slice in sorted(slices, key=lambda value: value.timestamp):
                 slice_active_hexes = set()
+                slice_states = {}
+                slice_takeoff_hexes = set()
+                sampled_at_iso = heatmap_slice.timestamp.isoformat()
                 for telemetry in heatmap_slice.telemetry:
-                    if telemetry.alt == "ground":
+                    hex_value = telemetry.hex.lower()
+                    tracked_entry = tracked_by_hex.get(hex_value)
+                    if not tracked_entry:
                         continue
 
-                    hex_value = telemetry.hex.lower()
+                    is_airborne = telemetry.alt != "ground"
+                    slice_states[hex_value] = {
+                        "observed_at": sampled_at_iso,
+                        "is_airborne": is_airborne,
+                    }
+                    if not is_airborne:
+                        continue
+
                     slice_active_hexes.add(hex_value)
+                    previous_state = previous_state_by_hex.get(hex_value)
+                    if previous_state and not previous_state["is_airborne"] and hex_value not in slice_takeoff_hexes:
+                        takeoff_rows.append(
+                            {
+                                "cohort": cohort,
+                                "hex": hex_value,
+                                "registration": tracked_entry.get("registration"),
+                                "label": tracked_entry.get("label") or tracked_entry.get("registration") or hex_value.upper(),
+                                "source": "adsbx_history",
+                                "observed_at": sampled_at_iso,
+                                "previous_observed_at": previous_state["observed_at"],
+                                "lat": normalize_float(telemetry.lat),
+                                "lon": normalize_float(telemetry.lon),
+                                "altitude_ft": normalize_altitude(telemetry.alt),
+                                "ground_speed_kt": normalize_float(telemetry.gs),
+                                "track": None,
+                            }
+                        )
+                        slice_takeoff_hexes.add(hex_value)
+
+                previous_state_by_hex.update(slice_states)
 
                 if not slice_active_hexes:
                     continue
@@ -317,6 +385,40 @@ def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_downlo
             VALUES (:sampled_at, :concurrent_count)
             """,
             concurrent_rows,
+        )
+
+    if takeoff_rows:
+        connection.executemany(
+            """
+            INSERT INTO takeoff_events (
+              cohort,
+              hex,
+              registration,
+              label,
+              source,
+              observed_at,
+              previous_observed_at,
+              lat,
+              lon,
+              altitude_ft,
+              ground_speed_kt,
+              track
+            ) VALUES (
+              :cohort,
+              :hex,
+              :registration,
+              :label,
+              :source,
+              :observed_at,
+              :previous_observed_at,
+              :lat,
+              :lon,
+              :altitude_ft,
+              :ground_speed_kt,
+              :track
+            )
+            """,
+            takeoff_rows,
         )
 
     final_daily_rows = []

@@ -210,6 +210,9 @@ function assertDeployEnvFileLoading(tempRoot) {
     `WEB_PUSH_VAPID_PUBLIC_KEY=${vapidEnv.WEB_PUSH_VAPID_PUBLIC_KEY}`,
     `WEB_PUSH_VAPID_PRIVATE_KEY=${vapidEnv.WEB_PUSH_VAPID_PRIVATE_KEY}`,
     `WEB_PUSH_CONTACT=${vapidEnv.WEB_PUSH_CONTACT}`,
+    'STRIPE_SECRET_KEY=sk_test_smoke',
+    'STRIPE_WEBHOOK_SECRET=whsec_smoke',
+    'STRIPE_PRICE_ID=price_smoke',
     '',
   ].join('\n'));
 
@@ -265,6 +268,7 @@ function assertDeploySecretCoverage() {
     'TELNYX_PUBLIC_KEY',
     'STRIPE_SECRET_KEY',
     'STRIPE_WEBHOOK_SECRET',
+    'STRIPE_PRICE_ID',
   ];
   assert(
     new Set(MAINTENANCE_WORKER_SECRET_NAMES).size === MAINTENANCE_WORKER_SECRET_NAMES.length,
@@ -314,6 +318,7 @@ async function assertPagesPipelineSmokeScript(token) {
           telnyxWebhookVerificationConfigured: true,
           telnyxDeliveryStatusConfigured: true,
           webPushConfigured: true,
+          stripeConfigured: true,
         },
         feeds: {
           alerts: { available: true },
@@ -674,7 +679,9 @@ async function assertResumableAlertFanout() {
     NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 12).toString('base64'),
     SENDGRID_API_KEY: 'smoke-sendgrid-key',
     SENDGRID_FROM_EMAIL: 'alerts@example.test',
-    LEVEL5_SUBSCRIBER_BATCH_SIZE: '2',
+    LEVEL5_SUBSCRIBER_BATCH_SIZE: '500',
+    LEVEL5_SMS_BATCH_WINDOW_MS: '500',
+    LEVEL5_SMS_MIN_INTERVAL_MS: '250',
     ALERT_EVENT_MAX_BATCHES_PER_INVOCATION: '1',
     ALERT_FANOUT_LEASE_MS: '1800000',
     LEVEL5_NOTIFICATION_CONCURRENCY: '4',
@@ -735,6 +742,8 @@ async function assertResumableAlertFanout() {
     });
     assert(first.status === 'processing' && first.queued === true, 'Initial resumable fanout did not leave the alert queued.');
     assert(first.emailSentCount === 2, 'Initial resumable fanout did not send exactly one bounded batch.');
+    assert(first.batchSize === 2, 'Initial resumable fanout did not cap the oversized batch to the paced SMS window.');
+    assert(first.smsBatchWindowMs === 500, 'Initial resumable fanout did not report the paced SMS batch window.');
     assert(sendCount === 2, 'Initial resumable fanout sent the wrong number of provider requests.');
     const afterFirst = db.prepare('SELECT status, subscriber_count, email_sent_count, fanout_after_id, fanout_lease_token, fanout_lease_expires_at FROM notification_alerts WHERE id = ?').get('alert_event:resumable-fanout-smoke');
     assert(afterFirst.status === 'processing', 'Bounded fanout did not persist processing status.');
@@ -781,6 +790,7 @@ async function assertPagesPipelineStatus(token) {
     TELNYX_PUBLIC_KEY: 'smoke-public-key',
     STRIPE_SECRET_KEY: 'smoke-stripe-key',
     STRIPE_PRICE_ID: 'price_smoke',
+    STRIPE_WEBHOOK_SECRET: 'whsec_smoke',
     NOTIFICATION_HASH_SECRET: 'smoke-hash-secret',
     NOTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
     WEB_PUSH_VAPID_PUBLIC_KEY: vapidEnv.WEB_PUSH_VAPID_PUBLIC_KEY,
@@ -885,6 +895,20 @@ async function assertPagesPipelineStatus(token) {
   assert(
     malformedFeedPayload.readiness?.failures?.includes('alerts_feed_empty_or_unavailable'),
     'Pages pipeline status did not identify the malformed alerts feed readiness failure.',
+  );
+
+  feedPayloads.set('/alerts.json', { generatedAt: '2026-06-23T00:00:00.000Z', events: [{ id: 'alert-1' }] });
+  const stripeMissingResponse = await onRequestGet({
+    request: new Request('https://alerts.example.test/api/admin/pipeline-status', {
+      headers: { authorization: `Bearer ${token}` },
+    }),
+    env: { ...env, STRIPE_WEBHOOK_SECRET: '' },
+  });
+  const stripeMissingPayload = await stripeMissingResponse.json();
+  assert(stripeMissingPayload.ok === false, 'Pages pipeline status accepted missing Stripe webhook configuration.');
+  assert(
+    stripeMissingPayload.readiness?.failures?.includes('stripe_not_configured'),
+    'Pages pipeline status did not identify missing Stripe readiness.',
   );
 }
 
@@ -1632,7 +1656,7 @@ async function assertPagesWebPushSubscriptionAndFanout() {
   const notificationsModuleUrl = pathToFileURL(path.join(moduleRoot, 'functions', '_lib', 'notifications.js')).href;
   const { onRequestGet: getPushPublicKey } = await import(publicKeyEndpointUrl);
   const { onRequestPost: postPushSubscription } = await import(subscribeEndpointUrl);
-  const { sendAlertEventNotifications } = await import(notificationsModuleUrl);
+  const { maybeSendLevel5Notifications, sendAlertEventNotifications } = await import(notificationsModuleUrl);
   const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'apocalypse-ews-web-push-')), 'notify.sqlite');
   const db = new Database(dbPath);
   applyD1Migrations(db);
@@ -1703,6 +1727,23 @@ async function assertPagesWebPushSubscriptionAndFanout() {
     assert(pushRequests[0].bodyLength > 0, 'Web push request had an empty encrypted body.');
     const delivery = db.prepare('SELECT channel, status, provider_message_id FROM notification_deliveries').get();
     assert(delivery?.channel === 'push' && delivery?.status === 'sent', 'Web push delivery was not recorded as sent.');
+
+    const level5Summary = await maybeSendLevel5Notifications(env, {
+      liveStatus: { latestSlotKey: 'push-cooldown-smoke' },
+      signals: {
+        composite: {
+          emergencyLevel: 5,
+          actualConcurrentCount: 521,
+          expectedConcurrentCount: 400,
+          asOf: '2026-06-23T00:30:00.000Z',
+        },
+      },
+    });
+    assert(level5Summary.status === 'sent', `Push-only level-5 fanout did not complete: ${JSON.stringify(level5Summary)}`);
+    assert(level5Summary.pushSentCount === 1, 'Push-only level-5 fanout did not count the pushed alert.');
+    assert(pushRequests.length === 2, 'Push-only level-5 fanout did not post the second push request.');
+    const cooldown = db.prepare("SELECT value FROM notification_meta WHERE key = 'level5_notification_last_sent_at'").get();
+    assert(cooldown?.value, 'Push-only level-5 fanout did not start the level-5 cooldown.');
   } finally {
     globalThis.fetch = originalFetch;
     db.close();
@@ -1750,6 +1791,10 @@ async function main() {
     SENDGRID_WEBHOOK_URL: 'https://alerts.example.test/api/sendgrid/webhook',
     TELNYX_API_KEY: 'smoke-telnyx-key',
     TELNYX_NUMBER: '+14155552671',
+    TELNYX_PUBLIC_KEY: 'smoke-telnyx-public-key',
+    STRIPE_SECRET_KEY: 'sk_test_smoke',
+    STRIPE_WEBHOOK_SECRET: 'whsec_smoke',
+    STRIPE_PRICE_ID: 'price_smoke',
     TELEGRAM_BOT_TOKEN: 'smoke-telegram-token',
     TELEGRAM_CHANNEL: 'alerts-channel',
     WEB_PUSH_VAPID_PUBLIC_KEY: vapidEnv.WEB_PUSH_VAPID_PUBLIC_KEY,

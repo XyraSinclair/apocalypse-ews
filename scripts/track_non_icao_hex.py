@@ -709,7 +709,8 @@ def build_takeoff_rows(snapshot_rows, previous_live_snapshot):
     for row in snapshot_rows:
         previous_row = previous_live_snapshot.get(row["hex"])
         was_previously_airborne = bool(previous_row and previous_row["is_airborne"])
-        if was_previously_airborne:
+        was_previously_observed_on_ground = bool(previous_row) and not was_previously_airborne
+        if not was_previously_observed_on_ground:
             continue
 
         takeoff_rows.append(

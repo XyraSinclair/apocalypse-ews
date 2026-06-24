@@ -5,8 +5,8 @@ EWS_NOTIFICATION_URL=https://aews.cc/
 STRIPE_SECRET_KEY=sk_test_replace_me
 STRIPE_WEBHOOK_SECRET=whsec_replace_me
 STRIPE_PRODUCT_ID=prod_USlMnoY4GL7OAn
-# Optional. If unset, the function resolves the active $5/year price for STRIPE_PRODUCT_ID.
-STRIPE_PRICE_ID=
+# Required for production deploy readiness; local checkout can still resolve a price from STRIPE_PRODUCT_ID.
+STRIPE_PRICE_ID=price_replace_me
 
 SENDGRID_API_KEY=SG.replace_me
 SENDGRID_FROM_EMAIL=alerts@example.com
