@@ -35,6 +35,7 @@
     "telegram:alert": "node scripts/send_telegram_alert.js",
     "verify:dashboard-urls": "node scripts/verify_dashboard_bundle.js",
     "check:deploy": "node scripts/check_deploy_env.js",
+    "seed:production-env": "node scripts/seed_production_environment.js",
     "deploy:pages": "node scripts/deploy_pages.js",
     "smoke:live": "node scripts/smoke_live_site.js",
     "smoke:alert-pipeline": "node scripts/smoke_alert_pipeline.js",
