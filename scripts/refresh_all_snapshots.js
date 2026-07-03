@@ -202,6 +202,7 @@ function updateAlerts() {
   run('node', ['scripts/send_telegram_alert.js'], { env: { EWS_DB_PATH: MAIN_DB } });
   run('node', ['scripts/dispatch_alert_events.js', '--db', MAIN_DB]);
   run('node', ['scripts/bridge_alert_events.js', '--db', MAIN_DB]);
+  run('node', ['scripts/notify_local_push.js', '--db', MAIN_DB]);
 }
 
 function exportOperationsFeed() {

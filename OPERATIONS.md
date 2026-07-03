@@ -47,6 +47,7 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.xyra.apocalypse-ews.refr
 |---|---|---|
 | RSS | **live locally** | nothing |
 | Web dashboard | **live locally** | nothing |
+| Owner push (xmsg → iMessage/email/desktop by severity) | **live locally** | nothing — `scripts/notify_local_push.js`, cursor in meta table |
 | Telegram channel | code ready | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL` in `.env` — cheapest push channel, one BotFather chat away |
 | Email (SendGrid) | code ready | production deploy (below) |
 | SMS (Telnyx) | code ready | production deploy (below) |
