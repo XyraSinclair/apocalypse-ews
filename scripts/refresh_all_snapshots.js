@@ -40,6 +40,7 @@ function trackedAircraftCount(dbPath) {
   }
 
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  db.pragma('busy_timeout = 30000');
   try {
     return db
       .prepare('SELECT hex FROM tracked_aircraft')
@@ -56,6 +57,7 @@ function purgeDemoTrackedAircraft(dbPath) {
   }
 
   const db = new Database(dbPath);
+  db.pragma('busy_timeout = 30000');
   try {
     db.prepare("DELETE FROM tracked_aircraft WHERE source = 'demo'").run();
   } finally {
@@ -222,7 +224,44 @@ function exportEventSignalsFeed() {
 
 
 
+const LOCK_DIR = path.join(ROOT_DIR, 'tmp', 'refresh.lock');
+const LOCK_STALE_MS = 45 * 60 * 1000;
+
+function acquireRefreshLock() {
+  try {
+    const stat = fs.statSync(LOCK_DIR);
+    if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+      fs.rmdirSync(LOCK_DIR);
+    }
+  } catch {
+    // No existing lock.
+  }
+
+  try {
+    fs.mkdirSync(LOCK_DIR);
+  } catch {
+    return false;
+  }
+
+  const release = () => {
+    try {
+      fs.rmdirSync(LOCK_DIR);
+    } catch {
+      // Already released.
+    }
+  };
+  process.on('exit', release);
+  process.on('SIGINT', () => process.exit(130));
+  process.on('SIGTERM', () => process.exit(143));
+  return true;
+}
+
 fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(path.dirname(LOCK_DIR), { recursive: true });
+if (!acquireRefreshLock()) {
+  console.log(JSON.stringify({ ok: true, skipped: true, reason: 'refresh lock held' }));
+  process.exit(0);
+}
 ensureMainCohort();
 ensureMilitaryCohort();
 refreshLiveData();

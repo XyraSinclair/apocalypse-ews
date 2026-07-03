@@ -12,6 +12,7 @@ function initDb() {
 
   ensureDirectories();
   database = new Database(DB_PATH);
+  database.pragma("busy_timeout = 30000");
   database.pragma("journal_mode = WAL");
   database.pragma("synchronous = NORMAL");
   database.pragma("foreign_keys = ON");

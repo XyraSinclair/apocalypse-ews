@@ -53,6 +53,7 @@ async function main() {
   const dbPath = path.resolve(args.db);
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
+  db.pragma('busy_timeout = 30000');
   try {
     db.exec(fs.readFileSync(path.join(__dirname, '..', 'schema.sql'), 'utf8'));
     const summary = await dispatchPendingAlerts(db, process.env, { limit: args.limit });

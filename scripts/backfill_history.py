@@ -249,6 +249,12 @@ def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_downlo
         """,
         (range_start_iso, range_end_iso),
     )
+    # Commit the range DELETEs immediately: the download/parse phase below can
+    # run for hours, and holding the write transaction open across it starves
+    # every other consumer of the database (live pipeline, server). The
+    # backfill is idempotent per range, so a crash mid-run is repaired by
+    # rerunning the same range.
+    connection.commit()
     total_files = (end_date - start_date).days * 48
     processed_files = 0
     concurrent_rows = []

@@ -530,6 +530,10 @@ function main() {
   const eventsDbPath = path.resolve(args.eventsDb);
   const sourceDb = new Database(sourceDbPath);
   const eventsDb = eventsDbPath === sourceDbPath ? sourceDb : new Database(eventsDbPath);
+  sourceDb.pragma('busy_timeout = 30000');
+  if (eventsDb !== sourceDb) {
+    eventsDb.pragma('busy_timeout = 30000');
+  }
   try {
     const schema = fs.readFileSync(path.resolve(__dirname, '..', 'schema.sql'), 'utf8');
     sourceDb.exec(schema);
