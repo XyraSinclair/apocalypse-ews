@@ -64,7 +64,12 @@ function assertSnapshotFresh(snapshotPath, snapshot, dbPath) {
   if (!Number.isFinite(observedMs) || !Number.isFinite(latestMs)) {
     throw new Error(`Current signal freshness comparison has invalid timestamps: ${snapshotPath}`);
   }
-  if (observedMs !== latestMs) {
+  // Snapshot timestamps use raw heatmap slot stamps (…:29:50 / …:59:50) while
+  // some cohorts round concurrent_metrics.sampled_at to the half hour, so exact
+  // equality can never hold there. Tolerate one 30-minute slot of skew; anything
+  // beyond that is genuine staleness and still fails hard.
+  const SLOT_TOLERANCE_MS = 35 * 60 * 1000;
+  if (Math.abs(observedMs - latestMs) > SLOT_TOLERANCE_MS) {
     throw new Error(`Current signal snapshot timestamp mismatch: ${snapshotPath} observes ${observedAt}, database latest is ${latestSampledAt}.`);
   }
   return observedAt;

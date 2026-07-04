@@ -33,7 +33,9 @@ function parseArgs(argv) {
 function channelsForSeverity(severity) {
   if (severity === 'critical') return 'imessage,email,desktop';
   if (severity === 'high') return 'desktop,email';
-  return 'desktop';
+  if (severity === 'elevated') return 'desktop';
+  // watch-level events are ambient signal: dashboard/RSS only, never a push.
+  return null;
 }
 
 function main() {
@@ -59,14 +61,19 @@ function main() {
 
     let sent = 0;
     for (const event of events) {
+      const channels = channelsForSeverity(event.severity);
+      if (!channels) {
+        db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(CURSOR_KEY, String(event.id));
+        continue;
+      }
       const subject = `EWS ${event.severity.toUpperCase()}: ${event.title}`;
       const body = `${event.message}\n\ncohort=${event.cohort} occurred_at=${event.occurred_at}`;
       if (args.dryRun || !hasXmsg) {
-        console.log(JSON.stringify({ wouldSend: subject, channels: channelsForSeverity(event.severity), dryRun: args.dryRun, hasXmsg }));
+        console.log(JSON.stringify({ wouldSend: subject, channels, dryRun: args.dryRun, hasXmsg }));
       } else {
         const result = spawnSync(args.xmsg, [
           'send',
-          '--channels', channelsForSeverity(event.severity),
+          '--channels', channels,
           '--subject', subject,
           body,
         ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
