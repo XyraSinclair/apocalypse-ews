@@ -203,6 +203,7 @@ function updateAlerts() {
   run('node', ['scripts/dispatch_alert_events.js', '--db', MAIN_DB]);
   run('node', ['scripts/bridge_alert_events.js', '--db', MAIN_DB]);
   run('node', ['scripts/notify_local_push.js', '--db', MAIN_DB]);
+  run('node', ['scripts/publish_ntfy_alert.js', '--db', MAIN_DB]);
 }
 
 function exportOperationsFeed() {

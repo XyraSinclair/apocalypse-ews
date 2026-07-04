@@ -48,7 +48,8 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.xyra.apocalypse-ews.refr
 | RSS | **live locally** | nothing |
 | Web dashboard | **live locally** | nothing |
 | Owner push (xmsg → iMessage/email/desktop by severity) | **live locally** | nothing — `scripts/notify_local_push.js`, cursor in meta table |
-| Telegram channel | code ready | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL` in `.env` — cheapest push channel, one BotFather chat away |
+| **ntfy public push** | **live** | nothing — topic `apocalypse-ews-alerts-caaea5` on ntfy.sh; subscribers install the ntfy app and subscribe to the topic. Publishes elevated+ only (`scripts/publish_ntfy_alert.js`). Caveat: ntfy.sh topics are public-write; self-host with auth on the Hetzner box (Phase 2) to close the spoof vector |
+| Telegram channel | token wired (@XyraClawdBot, reused from xyra_claw — sends don't conflict with its polling) | one 45-second phone step: create channel, add bot as admin, set `TELEGRAM_CHANNEL` in `.env` |
 | Email (SendGrid) | code ready | production deploy (below) |
 | SMS (Telnyx) | code ready | production deploy (below) |
 | Browser push (VAPID) | keys generated in `.env` | production deploy (below) |
