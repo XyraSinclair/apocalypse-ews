@@ -2,7 +2,7 @@ import { hmacHex } from "./crypto.js";
 import { timingSafeEqualHex } from "./encoding.js";
 import { HttpError } from "./http.js";
 
-const DEFAULT_PUBLIC_URL = "https://ews.kylemcdonald.net/";
+const DEFAULT_PUBLIC_URL = "https://ews.example.com/";
 
 export function getPublicBaseUrl(env) {
   return String(env.APP_BASE_URL || env.EWS_PUBLIC_URL || DEFAULT_PUBLIC_URL)

@@ -635,8 +635,8 @@ function HeroPanel() {
       </p>
       <p className="hero-credit">independent implementation from observed behavior</p>
       <p className="hero-link-row">
-        <a href="https://ews.kylemcdonald.net/">Reference site</a> / <a href="https://t.me/apocalypse_ews">Telegram</a> /{' '}
-        <a href="https://ews.kylemcdonald.net/rss.xml">RSS</a> / <a href="/event-signals">Event signals</a>
+        <a href="https://ews.kylemcdonald.net/">Original EWS by Kyle McDonald</a> /{' '}
+        <a href="/rss.xml">RSS</a> / <a href="/event-signals">Event signals</a>
       </p>
     </section>
   );

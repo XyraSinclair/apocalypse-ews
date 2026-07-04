@@ -612,7 +612,7 @@ function getRenewalReminderEmailContent({ renewalDate, amount, billingFrequency,
     "You can manage your notification settings and billing information here:",
     managementUrl,
     "",
-    "Questions: ews@kylemcdonald.net",
+    "Questions: reply to this email.",
   ];
   const html = [
     formatHtmlParagraphs([
@@ -624,7 +624,7 @@ function getRenewalReminderEmailContent({ renewalDate, amount, billingFrequency,
       "No action is needed if you want to stay subscribed.",
     ]),
     `<p><a href="${escapeHtml(managementUrl)}">You can manage your notification settings and billing information here.</a></p>`,
-    formatHtmlParagraphs(["Questions: ews@kylemcdonald.net"]),
+    formatHtmlParagraphs(["Questions: reply to this email."]),
   ]
     .filter(Boolean)
     .join("\n");
@@ -1102,13 +1102,13 @@ function getSignupConfirmationEmailContent(subscriber, managementUrl) {
     bodyLines.push("Your credit card statement will show EWS.KYLEMCDONALD.NET", "");
   }
 
-  const footerLines = [managementLinkText, managementUrl, "", "Questions: ews@kylemcdonald.net", "", "Thank you for subscribing,\nKyle"];
+  const footerLines = [managementLinkText, managementUrl, "", "Questions: reply to this email.", "", "Thank you for subscribing,\nApocalypse EWS"];
   const textLines = [...bodyLines, ...footerLines];
   const text = textLines.join("\n");
   const html = [
     formatHtmlParagraphs(bodyLines),
     `<p><a href="${escapeHtml(managementUrl)}">${escapeHtml(managementLinkText)}</a></p>`,
-    formatHtmlParagraphs(["Questions: ews@kylemcdonald.net", "", "Thank you for subscribing,\nKyle"]),
+    formatHtmlParagraphs(["Questions: reply to this email.", "", "Thank you for subscribing,\nApocalypse EWS"]),
   ]
     .filter(Boolean)
     .join("\n");

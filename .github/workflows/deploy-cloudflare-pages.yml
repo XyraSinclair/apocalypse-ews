@@ -21,9 +21,9 @@ jobs:
       CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID || secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET || secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}
       INTERNAL_ALERT_TOKEN: ${{ secrets.INTERNAL_ALERT_TOKEN }}
-      EWS_PUBLIC_URL: ${{ vars.EWS_PUBLIC_URL || 'https://ews.kylemcdonald.net/' }}
-      APP_BASE_URL: ${{ vars.APP_BASE_URL || 'https://ews.kylemcdonald.net' }}
-      EWS_NOTIFICATION_URL: ${{ vars.EWS_NOTIFICATION_URL || 'https://ews.kylemcdonald.net' }}
+      EWS_PUBLIC_URL: ${{ vars.EWS_PUBLIC_URL || 'https://ews.example.com/' }}
+      APP_BASE_URL: ${{ vars.APP_BASE_URL || 'https://ews.example.com' }}
+      EWS_NOTIFICATION_URL: ${{ vars.EWS_NOTIFICATION_URL || 'https://ews.example.com' }}
       CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'apocalypse-ews' }}
       SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
       SENDGRID_FROM_EMAIL: ${{ secrets.SENDGRID_FROM_EMAIL }}
@@ -43,9 +43,9 @@ jobs:
       EWS_ALERT_EVENTS_WEBHOOK_URL: ${{ vars.EWS_ALERT_EVENTS_WEBHOOK_URL }}
       EWS_SMOKE_TEST_EMAIL: ${{ secrets.EWS_SMOKE_TEST_EMAIL }}
       EWS_SMOKE_TEST_PHONE: ${{ secrets.EWS_SMOKE_TEST_PHONE }}
-      VITE_DASHBOARD_URL: ${{ vars.VITE_DASHBOARD_URL || 'https://ews.kylemcdonald.net/dashboard.json' }}
-      VITE_MILITARY_DASHBOARD_URL: ${{ vars.VITE_MILITARY_DASHBOARD_URL || 'https://ews.kylemcdonald.net/military-dashboard.json' }}
-      VITE_UNTRACKED_DASHBOARD_URL: ${{ vars.VITE_UNTRACKED_DASHBOARD_URL || 'https://ews.kylemcdonald.net/untracked-dashboard.json' }}
+      VITE_DASHBOARD_URL: ${{ vars.VITE_DASHBOARD_URL || 'https://ews.example.com/dashboard.json' }}
+      VITE_MILITARY_DASHBOARD_URL: ${{ vars.VITE_MILITARY_DASHBOARD_URL || 'https://ews.example.com/military-dashboard.json' }}
+      VITE_UNTRACKED_DASHBOARD_URL: ${{ vars.VITE_UNTRACKED_DASHBOARD_URL || 'https://ews.example.com/untracked-dashboard.json' }}
       NOTIFICATION_HASH_SECRET: ${{ secrets.NOTIFICATION_HASH_SECRET }}
       NOTIFICATION_ENCRYPTION_KEY: ${{ secrets.NOTIFICATION_ENCRYPTION_KEY }}
       STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}

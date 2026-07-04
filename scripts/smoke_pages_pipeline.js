@@ -7,7 +7,7 @@ const parsedArgs = parseArgs(process.argv.slice(2));
 const requireProviders = parsedArgs.flags.has('require-providers');
 const requireTestDelivery = parsedArgs.flags.has('require-test-delivery');
 const targetUrl = normalizeBaseUrl(
-  parsedArgs.positionals[0] || process.env.EWS_SMOKE_URL || env.EWS_PUBLIC_URL || 'https://ews.kylemcdonald.net/',
+  parsedArgs.positionals[0] || process.env.EWS_SMOKE_URL || env.EWS_PUBLIC_URL || 'https://ews.example.com/',
 );
 const token = String(process.env.INTERNAL_ALERT_TOKEN || env.INTERNAL_ALERT_TOKEN || '').trim();
 const testEmail = String(parsedArgs.options.testEmail || process.env.EWS_SMOKE_TEST_EMAIL || env.EWS_SMOKE_TEST_EMAIL || '').trim();

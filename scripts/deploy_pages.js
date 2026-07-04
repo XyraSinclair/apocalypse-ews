@@ -14,7 +14,7 @@ const {
 const { REQUIRED_PUBLISHED_ASSETS, copyPublishedAssets } = require("./copy_published_assets");
 
 const env = getEnvWithDotEnv();
-const publicUrl = env.EWS_PUBLIC_URL || "https://ews.kylemcdonald.net/";
+const publicUrl = env.EWS_PUBLIC_URL || "https://ews.example.com/";
 const projectName = env.CLOUDFLARE_PAGES_PROJECT || "apocalypse-ews";
 const distDir = path.join(REPO_ROOT, "dist");
 const MAINTENANCE_WORKER_SECRET_NAMES = [

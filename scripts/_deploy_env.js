@@ -312,8 +312,8 @@ function ensureWranglerConfig(env = process.env, filePath = WRANGLER_CONFIG_PATH
     return false;
   }
 
-  const ewsPublicUrl = env.EWS_PUBLIC_URL || "https://ews.kylemcdonald.net/";
-  const appBaseUrl = env.APP_BASE_URL || "https://ews.kylemcdonald.net";
+  const ewsPublicUrl = env.EWS_PUBLIC_URL || "https://ews.example.com/";
+  const appBaseUrl = env.APP_BASE_URL || "https://ews.example.com";
   const notificationUrl = env.EWS_NOTIFICATION_URL || appBaseUrl;
   const configText = [
     'name = "apocalypse-ews"',

@@ -12,7 +12,7 @@ const targetUrl =
   args.find((arg) => !arg.startsWith("--")) ||
   process.env.EWS_SMOKE_URL ||
   env.EWS_PUBLIC_URL ||
-  "https://ews.kylemcdonald.net/";
+  "https://ews.example.com/";
 const outputDir = process.env.EWS_SMOKE_OUTPUT_DIR || path.join(REPO_ROOT, "tmp", "smoke");
 
 function isDashboardResponse(response) {

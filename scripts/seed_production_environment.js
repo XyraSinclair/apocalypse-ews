@@ -10,17 +10,17 @@ const ENVIRONMENT = 'production';
 const DEFAULT_SECRET_FILE = path.join(process.env.HOME || process.cwd(), 'Desktop', 'ews-prod-secrets.env');
 
 const PRODUCTION_VARIABLES = {
-  EWS_PUBLIC_URL: 'https://ews.kylemcdonald.net/',
-  APP_BASE_URL: 'https://ews.kylemcdonald.net',
-  EWS_NOTIFICATION_URL: 'https://ews.kylemcdonald.net',
+  EWS_PUBLIC_URL: 'https://ews.example.com/',
+  APP_BASE_URL: 'https://ews.example.com',
+  EWS_NOTIFICATION_URL: 'https://ews.example.com',
   CLOUDFLARE_PAGES_PROJECT: 'apocalypse-ews',
   SENDGRID_FROM_NAME: 'Apocalypse EWS',
-  SENDGRID_WEBHOOK_URL: 'https://ews.kylemcdonald.net/api/sendgrid/webhook',
-  TELNYX_WEBHOOK_URL: 'https://ews.kylemcdonald.net/api/telnyx/webhook',
-  EWS_ALERT_EVENTS_WEBHOOK_URL: 'https://ews.kylemcdonald.net/api/internal/alert-events',
-  VITE_DASHBOARD_URL: 'https://ews.kylemcdonald.net/dashboard.json',
-  VITE_MILITARY_DASHBOARD_URL: 'https://ews.kylemcdonald.net/military-dashboard.json',
-  VITE_UNTRACKED_DASHBOARD_URL: 'https://ews.kylemcdonald.net/untracked-dashboard.json',
+  SENDGRID_WEBHOOK_URL: 'https://ews.example.com/api/sendgrid/webhook',
+  TELNYX_WEBHOOK_URL: 'https://ews.example.com/api/telnyx/webhook',
+  EWS_ALERT_EVENTS_WEBHOOK_URL: 'https://ews.example.com/api/internal/alert-events',
+  VITE_DASHBOARD_URL: 'https://ews.example.com/dashboard.json',
+  VITE_MILITARY_DASHBOARD_URL: 'https://ews.example.com/military-dashboard.json',
+  VITE_UNTRACKED_DASHBOARD_URL: 'https://ews.example.com/untracked-dashboard.json',
 };
 
 const TELNYX_SENDER_SECRETS = [
