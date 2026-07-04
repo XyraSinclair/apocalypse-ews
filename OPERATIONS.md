@@ -5,14 +5,34 @@ airborne (the "elite exodus" cohort, 31k+ tracked airframes), plus batch-takeoff
 rate anomalies (z-score over a 28-day baseline), across three cohorts:
 `global_business_jet`, `global_military_aircraft`, `non_icao_untracked`.
 
-## What runs on this machine (installed 2026-07-03)
+## Re-entry protocol (start here after any absence)
 
-Two launchd agents (in `~/Library/LaunchAgents/`):
+```sh
+npm run status        # one JSON report: cohort freshness, baselines, services, verdict
+```
+
+If `verdict.healthy` is true, the system has been running the whole time and
+there is nothing to do. If not, the `problems` array names each issue and its
+fix. The common one after the laptop was off is stale history — the repair
+agent fixes it automatically within 6 hours, or force it now:
+
+```sh
+npm run repair:gaps   # detects + backfills missing history, bounded to 30 days
+```
+
+Continuation work is tracked as beads: `br ready` lists what is unblocked
+(see ROADMAP.md for the full arc). The single most valuable next step is
+Phase 2: move this off the laptop onto a Hetzner box.
+
+## What runs on this machine (installed 2026-07-03/04)
+
+Three launchd agents (in `~/Library/LaunchAgents/`):
 
 | Agent | What | Cadence |
 |---|---|---|
-| `com.xyra.apocalypse-ews.refresh` | `node scripts/refresh_all_snapshots.js` → full pipeline pass (ingest ADS-B slot → snapshots → detection → RSS/Telegram/dispatch/bridge → feeds) | every 10 min (lock-guarded in-script; skips if no new 30-min slot) |
+| `com.xyra.apocalypse-ews.refresh` | `node scripts/refresh_all_snapshots.js` → full pipeline pass (ingest ADS-B slot → snapshots → detection → RSS/Telegram/dispatch/bridge → owner push → ntfy → feeds) | every 10 min (lock-guarded in-script; skips if no new 30-min slot) |
 | `com.xyra.apocalypse-ews.server` | `server/index.js` Express server | always on (KeepAlive) |
+| `com.xyra.apocalypse-ews.repair` | `node scripts/repair_history_gaps.js` — self-healing: detects history holes (laptop sleep) and backfills exactly the missing range | every 6 h + on load |
 
 Local endpoints (subscribe-able today, no credentials needed):
 
@@ -84,6 +104,37 @@ npm run smoke:pages-pipeline  # signup → alert → fanout, real providers
 The local refresh loop bridges alert events to production automatically once
 `EWS_ALERT_EVENTS_WEBHOOK_URL` (or `APP_BASE_URL`) is set — the bridge no-ops
 until then (`missing_EWS_ALERT_EVENTS_WEBHOOK_URL`).
+
+## Codebase map (for cold-start agents)
+
+- **`server/` + `scripts/` is the real implementation** — the Express server,
+  ingestion, detection, and all channel publishers. This is what runs.
+- **`functions/` + `workers/` is a PARALLEL implementation** for Cloudflare
+  Pages/D1 (signup, Stripe, SendGrid/Telnyx fanout). It duplicates large parts
+  of the logic (`functions/_lib/db.js` ~106KB). ROADMAP.md recommends retiring
+  it in favor of one Hetzner box; do not extend both sides.
+- `scripts/refresh_all_snapshots.js` is the pipeline entrypoint and the
+  authoritative ordering of stages.
+- `detect_alert_events.js` writes `alert_events` rows (UNIQUE event_key,
+  idempotent). Channel publishers each keep their own cursor in the `meta`
+  table: `local_push_last_alert_id` (owner xmsg push, elevated+ paged),
+  `ntfy_last_alert_id` (public ntfy topic, elevated+). Cursors advance past
+  skipped events; a failed send halts cursor advance so the event retries.
+- Severity ladder: watch < elevated < high < critical (see
+  `severityForLevel` / `takeoffSeverityForZScore` in detect_alert_events.js).
+- Python does ingestion/backfill (`update_latest_heatmap.py`,
+  `backfill_history.py`, `track_non_icao_hex.py`); Node does everything else.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `npm run status` → history stale | machine was asleep/off | `npm run repair:gaps` (or wait ≤6 h for the repair agent) |
+| SQLITE_BUSY crashes | long writer + missing busy_timeout on a new DB open | every `new Database()` must be followed by `pragma('busy_timeout = 30000')` |
+| launchd agent "Operation not permitted" | macOS TCC denies `/bin/sh` under `~/Documents` | invoke the node binary directly in the plist (see existing plists) |
+| refresh exits 1 on `export_event_signals_feed` | snapshot vs DB timestamp skew > 35 min | genuine staleness — check ingestion; the 35-min slot tolerance is intentional (untracked cohort rounds `sampled_at`) |
+| backfill locks everything | running an unpatched/old backfill | range DELETEs must commit before the download phase (fixed 2026-07-03); never run with default `--days 365` |
+| ntfy topic spammed | ntfy.sh topics are public-write | Phase 2: self-host ntfy with write auth on the Hetzner box; rotate topic |
 
 ## Known operational notes
 
