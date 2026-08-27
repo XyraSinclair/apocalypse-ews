@@ -13,6 +13,7 @@ from collections import Counter, defaultdict
 
 import numpy as np
 
+from adsbx_http import GLOBE_HEADERS
 from db_migrations import migrate_schema
 
 
@@ -169,7 +170,7 @@ def download_heatmap(date_value, index, destination, rate_limit_seconds, timeout
     if destination.exists():
         return True
 
-    request = urllib.request.Request(heatmap_url_for(date_value, index), headers={"User-Agent": "Mozilla/5.0"})
+    request = urllib.request.Request(heatmap_url_for(date_value, index), headers=GLOBE_HEADERS)
     for attempt in range(1, max_retries + 1):
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds) as response:

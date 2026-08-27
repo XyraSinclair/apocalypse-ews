@@ -8,8 +8,11 @@ import json
 import pathlib
 import re
 import sqlite3
+import sys
 import urllib.request
 from collections import Counter
+
+from adsbx_http import DOWNLOAD_HEADERS
 
 from db_migrations import migrate_schema
 
@@ -176,7 +179,7 @@ def download_file(url, destination, refresh=False):
     if destination.exists() and not refresh:
         return destination
 
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    request = urllib.request.Request(url, headers=DOWNLOAD_HEADERS)
     with urllib.request.urlopen(request, timeout=180) as response:
         destination.write_bytes(response.read())
 
@@ -219,13 +222,29 @@ PATTERNS = {
 
 def load_adsbx_records(path):
     records = {}
+    malformed = 0
+    total = 0
     with gzip.open(path, "rt", encoding="utf8") as file_handle:
         for line in file_handle:
             line = line.strip()
             if not line:
                 continue
 
-            row = json.loads(line)
+            total += 1
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                # Upstream basic-ac-db occasionally ships individual malformed
+                # lines (e.g. double-escaped quotes, seen 2026-08). One bad
+                # record must not kill the whole cohort import; a large bad
+                # fraction means the feed itself changed and must fail loudly.
+                malformed += 1
+                if malformed <= 5:
+                    print(
+                        f"Skipping malformed basic-ac-db line {total}: {error}: {line[:160]!r}",
+                        file=sys.stderr,
+                    )
+                continue
             hex_value = normalize_hex(row.get("icao"))
             if not hex_value:
                 continue
@@ -245,6 +264,15 @@ def load_adsbx_records(path):
                 "sources": ["adsbx_basic_ac_db"],
             }
 
+    if malformed:
+        print(
+            f"basic-ac-db: skipped {malformed} malformed of {total} lines",
+            file=sys.stderr,
+        )
+    if total and malformed / total > 0.005:
+        raise ValueError(
+            f"basic-ac-db looks broken: {malformed} of {total} lines failed to parse"
+        )
     return records
 
 

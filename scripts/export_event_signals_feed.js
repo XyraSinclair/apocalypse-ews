@@ -12,9 +12,9 @@ const MILITARY_DB = process.env.EWS_MILITARY_DB_PATH || path.join(DATA_DIR, 'ews
 const UNTRACKED_DB = process.env.EWS_UNTRACKED_DB_PATH || path.join(DATA_DIR, 'ews-untracked.sqlite');
 const RESEARCH_JSON = path.join(ROOT_DIR, 'localized_event_signal_research.json');
 const SNAPSHOT_FILES = [
-  { fileName: 'dashboard.json', dbPath: MAIN_DB, fallbackCohort: 'global_business_jet', label: 'Business jet cohort' },
-  { fileName: 'military-dashboard.json', dbPath: MILITARY_DB, fallbackCohort: 'global_military_aircraft', label: 'Military aircraft cohort' },
-  { fileName: 'untracked-dashboard.json', dbPath: UNTRACKED_DB, fallbackCohort: 'non_icao_untracked', label: 'Untracked aircraft cohort' },
+  { fileName: 'dashboard.json', dbPath: MAIN_DB, fallbackCohort: 'global_business_jet', label: 'Business jet cohort', freshnessTable: 'concurrent_metrics' },
+  { fileName: 'military-dashboard.json', dbPath: MILITARY_DB, fallbackCohort: 'global_military_aircraft', label: 'Military aircraft cohort', freshnessTable: 'concurrent_metrics' },
+  { fileName: 'untracked-dashboard.json', dbPath: UNTRACKED_DB, fallbackCohort: 'non_icao_untracked', label: 'Untracked aircraft cohort', freshnessTable: 'non_icao_metrics' },
 ];
 const ALERT_SIGNAL_KINDS = new Set(['statistical_anomaly', 'takeoff_anomaly', 'takeoff_rate_anomaly']);
 
@@ -35,32 +35,35 @@ function formatCohortLabel(snapshot, fallback) {
   return snapshot?.cohort?.sourceLabel || snapshot?.cohort?.source || fallback;
 }
 
-function latestConcurrentSampledAt(dbPath) {
+function latestSampledAt(dbPath, tableName) {
   if (!fs.existsSync(dbPath)) {
     throw new Error(`Current signal source database is missing: ${dbPath}`);
   }
+  if (!/^[a-z_]+$/i.test(tableName)) {
+    throw new Error(`Unsafe freshness table name: ${tableName}`);
+  }
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
-    const row = db.prepare('SELECT MAX(sampled_at) AS latestSampledAt FROM concurrent_metrics').get();
+    const row = db.prepare(`SELECT MAX(sampled_at) AS latestSampledAt FROM ${tableName}`).get();
     return row?.latestSampledAt || null;
   } finally {
     db.close();
   }
 }
 
-function assertSnapshotFresh(snapshotPath, snapshot, dbPath) {
+function assertSnapshotFresh(snapshotPath, snapshot, dbPath, freshnessTable) {
   const current = snapshot.current || {};
   const composite = snapshot.signals?.composite || {};
   const observedAt = current.asOf || composite.asOf || snapshot.liveStatus?.latestSampledAt || null;
   if (!observedAt) {
     throw new Error(`Current signal snapshot has no observation timestamp: ${snapshotPath}`);
   }
-  const latestSampledAt = latestConcurrentSampledAt(dbPath);
-  if (!latestSampledAt) {
-    throw new Error(`Current signal source database has no concurrent_metrics rows: ${dbPath}`);
+  const latestSampledAtValue = latestSampledAt(dbPath, freshnessTable);
+  if (!latestSampledAtValue) {
+    throw new Error(`Current signal source database has no ${freshnessTable} rows: ${dbPath}`);
   }
   const observedMs = Date.parse(observedAt);
-  const latestMs = Date.parse(latestSampledAt);
+  const latestMs = Date.parse(latestSampledAtValue);
   if (!Number.isFinite(observedMs) || !Number.isFinite(latestMs)) {
     throw new Error(`Current signal freshness comparison has invalid timestamps: ${snapshotPath}`);
   }
@@ -70,13 +73,13 @@ function assertSnapshotFresh(snapshotPath, snapshot, dbPath) {
   // beyond that is genuine staleness and still fails hard.
   const SLOT_TOLERANCE_MS = 35 * 60 * 1000;
   if (Math.abs(observedMs - latestMs) > SLOT_TOLERANCE_MS) {
-    throw new Error(`Current signal snapshot timestamp mismatch: ${snapshotPath} observes ${observedAt}, database latest is ${latestSampledAt}.`);
+    throw new Error(`Current signal snapshot timestamp mismatch: ${snapshotPath} observes ${observedAt}, database latest is ${latestSampledAtValue}.`);
   }
   return observedAt;
 }
 
 function recordsFromCurrentSnapshots() {
-  return SNAPSHOT_FILES.map(({ fileName, dbPath, fallbackCohort, label }) => {
+  return SNAPSHOT_FILES.map(({ fileName, dbPath, fallbackCohort, label, freshnessTable }) => {
     const snapshotPath = path.join(PUBLISHED_DIR, fileName);
     if (!fs.existsSync(snapshotPath)) {
       throw new Error(`Current signal snapshot is missing: ${snapshotPath}`);
@@ -84,7 +87,7 @@ function recordsFromCurrentSnapshots() {
     const snapshot = parseJson(fs.readFileSync(snapshotPath, 'utf8'), {});
     const current = snapshot.current || {};
     const composite = snapshot.signals?.composite || {};
-    const observedAt = assertSnapshotFresh(snapshotPath, snapshot, dbPath);
+    const observedAt = assertSnapshotFresh(snapshotPath, snapshot, dbPath, freshnessTable);
     const cohort = snapshot.cohort?.source || fallbackCohort;
     const emergencyLevel = Number(composite.emergencyLevel ?? current.emergencyLevel ?? 1);
     const actualConcurrentCount = Number(composite.actualConcurrentCount ?? current.concurrentCount ?? 0);

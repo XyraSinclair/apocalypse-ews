@@ -9,6 +9,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from adsbx_http import GLOBE_HEADERS
 from parse_heatmap import parse_heatmap, str_to_point
 from db_migrations import migrate_schema
 
@@ -156,7 +157,7 @@ def download_heatmap(date_value, index, destination, rate_limit_seconds, timeout
 
     request = urllib.request.Request(
         heatmap_url_for(date_value, index),
-        headers={"User-Agent": "Mozilla/5.0"},
+        headers=GLOBE_HEADERS,
     )
 
     for attempt in range(1, max_retries + 1):

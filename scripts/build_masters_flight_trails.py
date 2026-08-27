@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from adsbx_http import GLOBE_HEADERS
+
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
@@ -112,7 +114,7 @@ def download_heatmap(timestamp):
         return destination, True
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(heatmap_url(timestamp), headers={"User-Agent": "Mozilla/5.0"})
+    request = urllib.request.Request(heatmap_url(timestamp), headers=GLOBE_HEADERS)
     with urllib.request.urlopen(request, timeout=180) as response:
         destination.write_bytes(response.read())
     return destination, False
