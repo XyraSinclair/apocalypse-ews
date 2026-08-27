@@ -193,17 +193,33 @@ function detectAlertEvents() {
   ]);
 }
 
+// Alert channels are independent, cursored, and retry-safe: one channel
+// failing must not stop the others (or the feed exports downstream). Failed
+// stages are collected and the run still exits nonzero at the end so the
+// failure stays visible to systemd, while the broken channel's cursor holds
+// and retries on the next pass.
+const stageFailures = [];
+
+function runStage(label, callback) {
+  try {
+    callback();
+  } catch (error) {
+    stageFailures.push({ label, message: String(error && error.message ? error.message : error) });
+    console.error(`Stage failed (continuing): ${label}: ${error}`);
+  }
+}
+
 function updateAlerts() {
   if (skipAlerts) {
     return;
   }
 
-  run('node', ['scripts/update_rss_feed.js'], { env: { EWS_DB_PATH: MAIN_DB } });
-  run('node', ['scripts/send_telegram_alert.js'], { env: { EWS_DB_PATH: MAIN_DB } });
-  run('node', ['scripts/dispatch_alert_events.js', '--db', MAIN_DB]);
-  run('node', ['scripts/bridge_alert_events.js', '--db', MAIN_DB]);
-  run('node', ['scripts/notify_local_push.js', '--db', MAIN_DB]);
-  run('node', ['scripts/publish_ntfy_alert.js', '--db', MAIN_DB]);
+  runStage('rss', () => run('node', ['scripts/update_rss_feed.js'], { env: { EWS_DB_PATH: MAIN_DB } }));
+  runStage('telegram', () => run('node', ['scripts/send_telegram_alert.js'], { env: { EWS_DB_PATH: MAIN_DB } }));
+  runStage('dispatch', () => run('node', ['scripts/dispatch_alert_events.js', '--db', MAIN_DB]));
+  runStage('bridge', () => run('node', ['scripts/bridge_alert_events.js', '--db', MAIN_DB]));
+  runStage('local-push', () => run('node', ['scripts/notify_local_push.js', '--db', MAIN_DB]));
+  runStage('ntfy', () => run('node', ['scripts/publish_ntfy_alert.js', '--db', MAIN_DB]));
 }
 
 function exportOperationsFeed() {
@@ -270,5 +286,10 @@ refreshLiveData();
 exportSnapshots();
 detectAlertEvents();
 updateAlerts();
-exportOperationsFeed();
-exportEventSignalsFeed();
+runStage('operations-feed', exportOperationsFeed);
+runStage('event-signals-feed', exportEventSignalsFeed);
+
+if (stageFailures.length > 0) {
+  console.error(JSON.stringify({ ok: false, failedStages: stageFailures }));
+  process.exit(1);
+}
