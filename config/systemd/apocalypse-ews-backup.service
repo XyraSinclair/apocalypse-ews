@@ -1,0 +1,11 @@
+[Unit]
+Description=Apocalypse EWS daily SQLite backups
+
+[Service]
+Type=oneshot
+User=xyra
+WorkingDirectory=/opt/dev/apocalypse-ews
+EnvironmentFile=/etc/apocalypse-ews.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node scripts/backup_databases.js
+NoNewPrivileges=true

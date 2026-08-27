@@ -69,7 +69,20 @@ function serviceStates() {
     systemdState('apocalypse-ews-refresh-imports.timer'),
     systemdState('apocalypse-ews-repair.timer'),
     systemdState('apocalypse-ews-watchdog.timer'),
+    systemdState('apocalypse-ews-backup.timer'),
   ];
+}
+
+function backupsReport() {
+  const backupRoot = process.env.EWS_BACKUP_DIR
+    ? path.resolve(process.env.EWS_BACKUP_DIR)
+    : path.join(DATA_DIR, 'backups');
+  const days = safe(() => fs.readdirSync(backupRoot).filter((entry) => /^\d{4}-\d{2}-\d{2}$/.test(entry)).sort(), []);
+  if (!days.length) return { latestDay: null, dayCount: 0 };
+  const latestDay = days[days.length - 1];
+  const files = safe(() => fs.readdirSync(path.join(backupRoot, latestDay)).filter((f) => f.endsWith('.sqlite')), []);
+  const ageHours = +(((Date.now() - Date.parse(`${latestDay}T02:10:00Z`)) / 3600000).toFixed(1));
+  return { latestDay, dayCount: days.length, latestFiles: files.length, ageHours };
 }
 
 function alertsReport() {
@@ -103,6 +116,7 @@ const report = {
     return 'ok';
   }, 'unreachable'),
   alerts: alertsReport(),
+  backups: process.platform === 'darwin' ? null : backupsReport(),
   verdict: null,
 };
 
@@ -116,6 +130,11 @@ for (const service of report.services) {
   else if (service.lastState === 'failed') problems.push(`${service.agent}: failed — check journalctl -u ${service.agent}`);
 }
 if (report.serverHttp !== 'ok') problems.push('dashboard server unreachable on :3030');
+if (report.backups) {
+  if (!report.backups.dayCount) problems.push('no sqlite backups yet — run npm run backup');
+  else if (report.backups.latestFiles < 3) problems.push(`latest backup day ${report.backups.latestDay} has ${report.backups.latestFiles}/3 databases`);
+  else if (report.backups.ageHours > 50) problems.push(`sqlite backups stale (${report.backups.ageHours}h) — check apocalypse-ews-backup.timer`);
+}
 report.verdict = problems.length ? { healthy: false, problems } : { healthy: true };
 
 console.log(JSON.stringify(report, null, 2));
