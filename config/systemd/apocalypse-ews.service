@@ -1,0 +1,20 @@
+[Unit]
+Description=Apocalypse EWS backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xyra
+WorkingDirectory=/opt/dev/apocalypse-ews
+EnvironmentFile=/etc/apocalypse-ews.env
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=3030
+ExecStart=/usr/bin/node server/index.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

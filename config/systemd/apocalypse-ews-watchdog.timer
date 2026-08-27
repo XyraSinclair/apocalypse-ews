@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Apocalypse EWS operations watchdog hourly
+
+[Timer]
+OnCalendar=*-*-* *:20:00
+Persistent=true
+Unit=apocalypse-ews-watchdog.service
+
+[Install]
+WantedBy=timers.target

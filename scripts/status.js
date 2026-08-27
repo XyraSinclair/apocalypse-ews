@@ -15,21 +15,24 @@ function safe(fn, fallback = null) {
   try { return fn(); } catch { return fallback; }
 }
 
-function dbReport(dbPath, label) {
+function dbReport(dbPath, label, freshnessTable) {
   if (!fs.existsSync(dbPath)) {
     return { label, missing: true };
   }
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   db.pragma('busy_timeout = 5000');
   try {
-    const latest = safe(() => db.prepare('SELECT MAX(sampled_at) AS v FROM concurrent_metrics').get()?.v);
+    const latest = safe(() => db.prepare(`SELECT MAX(sampled_at) AS v FROM ${freshnessTable}`).get()?.v);
     const latestMs = latest ? Date.parse(latest) : null;
     const staleHours = latestMs ? +((Date.now() - latestMs) / 3600000).toFixed(1) : null;
     const sampleCount7d = safe(() => db.prepare(
-      "SELECT COUNT(*) AS c FROM concurrent_metrics WHERE sampled_at >= datetime('now', '-7 days')"
+      `SELECT COUNT(DISTINCT sampled_at) AS c FROM ${freshnessTable} WHERE sampled_at >= datetime('now', '-7 days')`
+    ).get()?.c, 0);
+    const sampleCount30d = safe(() => db.prepare(
+      `SELECT COUNT(DISTINCT sampled_at) AS c FROM ${freshnessTable} WHERE sampled_at >= datetime('now', '-30 days')`
     ).get()?.c, 0);
     const baselineReady = sampleCount7d >= 7 * 48 * 0.95; // tolerate a few missed slots
-    return { label, latestSample: latest, staleHours, sampleCount7d, baselineReady };
+    return { label, latestSample: latest, staleHours, sampleCount7d, sampleCount30d, baselineReady };
   } finally {
     db.close();
   }
@@ -41,6 +44,32 @@ function launchdState(agent) {
   const running = /\bstate = running\b/.test(output);
   const lastExit = output.match(/last exit code = ([^\n]+)/)?.[1]?.trim() || null;
   return { agent, loaded: true, running, lastExit };
+}
+
+function systemdState(unit) {
+  const active = safe(() => execFileSync('systemctl', ['is-active', unit], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(), 'unknown');
+  const enabled = safe(() => execFileSync('systemctl', ['is-enabled', unit], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(), 'unknown');
+  // Timers report as loaded when waiting; oneshot services as inactive between
+  // runs — both count as loaded. "failed" is the state that matters.
+  const loaded = active !== 'unknown' && enabled !== 'not-found';
+  return { agent: unit, loaded, running: active === 'active', lastState: active, enabled };
+}
+
+function serviceStates() {
+  if (process.platform === 'darwin') {
+    return [
+      launchdState('com.xyra.apocalypse-ews.refresh'),
+      launchdState('com.xyra.apocalypse-ews.server'),
+      launchdState('com.xyra.apocalypse-ews.repair'),
+    ];
+  }
+  return [
+    systemdState('apocalypse-ews.service'),
+    systemdState('apocalypse-ews-refresh.timer'),
+    systemdState('apocalypse-ews-refresh-imports.timer'),
+    systemdState('apocalypse-ews-repair.timer'),
+    systemdState('apocalypse-ews-watchdog.timer'),
+  ];
 }
 
 function alertsReport() {
@@ -64,15 +93,11 @@ function alertsReport() {
 const report = {
   generatedAt: new Date().toISOString(),
   cohorts: [
-    dbReport(path.join(DATA_DIR, 'ews-main.sqlite'), 'global_business_jet'),
-    dbReport(path.join(DATA_DIR, 'ews-military.sqlite'), 'global_military_aircraft'),
-    dbReport(path.join(DATA_DIR, 'ews-untracked.sqlite'), 'non_icao_untracked'),
+    dbReport(path.join(DATA_DIR, 'ews-main.sqlite'), 'global_business_jet', 'concurrent_metrics'),
+    dbReport(path.join(DATA_DIR, 'ews-military.sqlite'), 'global_military_aircraft', 'concurrent_metrics'),
+    dbReport(path.join(DATA_DIR, 'ews-untracked.sqlite'), 'non_icao_untracked', 'non_icao_metrics'),
   ],
-  services: [
-    launchdState('com.xyra.apocalypse-ews.refresh'),
-    launchdState('com.xyra.apocalypse-ews.server'),
-    launchdState('com.xyra.apocalypse-ews.repair'),
-  ],
+  services: serviceStates(),
   serverHttp: safe(() => {
     execFileSync('curl', ['-sf', '-o', '/dev/null', '--max-time', '5', 'http://127.0.0.1:3030/dashboard.json']);
     return 'ok';
@@ -88,6 +113,7 @@ for (const cohort of report.cohorts) {
 }
 for (const service of report.services) {
   if (!service.loaded) problems.push(`${service.agent}: not loaded — see OPERATIONS.md`);
+  else if (service.lastState === 'failed') problems.push(`${service.agent}: failed — check journalctl -u ${service.agent}`);
 }
 if (report.serverHttp !== 'ok') problems.push('dashboard server unreachable on :3030');
 report.verdict = problems.length ? { healthy: false, problems } : { healthy: true };

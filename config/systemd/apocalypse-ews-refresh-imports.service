@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh Apocalypse EWS metadata imports
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=xyra
+WorkingDirectory=/opt/dev/apocalypse-ews
+EnvironmentFile=/etc/apocalypse-ews.env
+Environment=NODE_ENV=production
+Environment=PATH=/opt/dev/apocalypse-ews/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/node scripts/refresh_all_snapshots.js --refresh-imports
+NoNewPrivileges=true
