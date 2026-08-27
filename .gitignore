@@ -9,3 +9,4 @@ tmp/
 .dev.vars
 wrangler.toml
 .venv/
+__pycache__/
