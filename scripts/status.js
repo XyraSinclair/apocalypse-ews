@@ -70,6 +70,8 @@ function serviceStates() {
     systemdState('apocalypse-ews-repair.timer'),
     systemdState('apocalypse-ews-watchdog.timer'),
     systemdState('apocalypse-ews-backup.timer'),
+    systemdState('cloudflared.service'),
+    systemdState('ntfy.service'),
   ];
 }
 

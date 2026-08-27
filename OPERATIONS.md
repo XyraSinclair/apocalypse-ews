@@ -45,7 +45,8 @@ Systemd units — canonical sources in `config/systemd/`, installed to
 | `apocalypse-ews-repair.timer` | `repair_history_gaps.js` — self-heals trailing gaps AND interior holes across all three cohorts, bounded to 30 days | every 6 h |
 | `apocalypse-ews-watchdog.timer` | `ops_alert.js` — status verdict → ops ntfy topic (deduped, 6 h re-alert, recovery note) | hourly |
 | `apocalypse-ews-backup.timer` | `backup_databases.js` — `VACUUM INTO data/backups/<day>/` for all three DBs, integrity-checked, 14 days kept; staleness feeds the status verdict (and therefore the watchdog). Restore = stop service, copy the day's file over `data/*.sqlite`, start | daily 02:10 |
-| `cloudflared.service` | Cloudflare tunnel `apocalypse-ews` (id `d27a04ac-5b8a-4d84-a4c9-ccf61978694d`) — serves <https://warning.watch> from loopback:3030 with no open inbound ports. Installed via `cloudflared service install <token>`; ingress config lives in the CF dashboard/API (`config_src: cloudflare`), not on disk | always on |
+| `cloudflared.service` | Cloudflare tunnel `apocalypse-ews` (id `d27a04ac-5b8a-4d84-a4c9-ccf61978694d`) — serves <https://warning.watch> from loopback:3030 and <https://ntfy.warning.watch> from loopback:2586 with no open inbound ports. Installed via `cloudflared service install <token>`; ingress config lives in the CF dashboard/API (`config_src: cloudflare`), not on disk | always on |
+| `ntfy.service` | self-hosted ntfy 2.27.0 (`/etc/ntfy/server.yml`): loopback:2586, `auth-default-access: read-only`, user `publisher` has rw on both topics, `upstream-base-url: ntfy.sh` for iOS instant delivery. Auth DB `/var/lib/ntfy/user.db` | always on |
 
 **Public site: <https://warning.watch>** (apoc.watch and earlywarning.watch
 301-redirect there). All three domains are on Xyra's Porkbun account with
@@ -84,8 +85,8 @@ ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-o
 |---|---|---|
 | RSS | **live on the box** | nothing |
 | Web dashboard | **live publicly at <https://warning.watch>** (Cloudflare tunnel; box keeps zero open inbound ports) | nothing |
-| **ntfy public push** | **live from the box** | nothing — topic `apocalypse-ews-alerts-caaea5` on ntfy.sh; subscribers install the ntfy app and subscribe to the topic. Publishes elevated+ only (`scripts/publish_ntfy_alert.js`). Caveat: ntfy.sh topics are public-write; self-host ntfy with auth to close the spoof vector |
-| **ntfy ops watchdog** | **live from the box** | `EWS_NTFY_OPS_TOPIC` in `/etc/apocalypse-ews.env`; unhealthy verdicts and recoveries only |
+| **ntfy public push** | **live, self-hosted with write auth** — subscribe to `https://ntfy.warning.watch/apocalypse-ews-alerts` in the ntfy app. Anonymous read, writes require the publisher token (`EWS_NTFY_TOKEN`), so the old ntfy.sh public-write spoof vector is closed. Publishes elevated+ only (`scripts/publish_ntfy_alert.js`) | nothing |
+| **ntfy ops watchdog** | **live, self-hosted** — subscribe to `https://ntfy.warning.watch/apocalypse-ews-ops`; unhealthy verdicts and recoveries only | nothing |
 | Owner push (xmsg → iMessage/email/desktop by severity) | retired with the laptop deployment (xmsg is Mac-only; `notify_local_push.js` silently no-ops on the box) | a box-reachable owner channel, if ever wanted |
 | Telegram channel | token wired (@XyraClawdBot, reused from xyra_claw — sends don't conflict with its polling) | one 45-second phone step: create channel, add bot as admin, set `TELEGRAM_CHANNEL` in `.env` |
 | Email (SendGrid) | code ready, **double opt-in enforced** (signup sends a confirm link; only confirmed addresses are ever alerted; without `SENDGRID_API_KEY` the confirm path is logged to the journal instead) | production deploy (below) |
