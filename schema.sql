@@ -190,6 +190,10 @@ CREATE TABLE IF NOT EXISTS notification_subscribers (
   push_expired_at TEXT,
   push_opted_out_at TEXT,
   push_opt_out_source TEXT,
+  email_confirmed_at TEXT,
+  phone_confirmed_at TEXT,
+  email_confirm_sent_at TEXT,
+  phone_confirm_sent_at TEXT,
   source TEXT NOT NULL DEFAULT 'local_api',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

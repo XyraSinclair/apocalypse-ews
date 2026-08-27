@@ -21,12 +21,14 @@ const { maybeSendEmergencyLevelTelegramAlert } = require("./telegram-alert");
 const { buildEmergencyRssFeedXml, dedupeRssItems, getRssItems, maybeRecordEmergencyLevelRssItem, rssItemFromAlertEvent } = require("./rss-feed");
 const {
   HttpError,
+  confirmSubscriberChannel,
   countActiveSubscribers,
   getVapidPublicKey,
   isWebPushConfigured,
   getManagedSubscriber,
   listAlertEvents,
   listTakeoffEvents,
+  sendPendingConfirmations,
   upsertSubscriber,
   unsubscribePushSubscriber,
   upsertPushSubscriber,
@@ -397,13 +399,47 @@ app.get("/api/event-signals", (_request, response) => {
   response.set("cache-control", "no-store").json(readPublishedJson("event-signals.json"));
 });
 
-app.post("/api/notifications/signup", (request, response) => {
-  const subscriber = upsertSubscriber(getDb(), request.body, process.env);
+app.post("/api/notifications/signup", async (request, response) => {
+  const db = getDb();
+  const subscriber = upsertSubscriber(db, request.body, process.env);
+  const confirmations = await sendPendingConfirmations(db, process.env, subscriber.id);
   response.json({
     ok: true,
     ...subscriber,
     subscriber,
+    confirmations,
   });
+});
+
+app.get("/api/notifications/confirm", (request, response) => {
+  const result = confirmSubscriberChannel(getDb(), process.env, {
+    subscriberId: request.query.subscriber,
+    channel: String(request.query.channel || ""),
+    token: String(request.query.token || ""),
+  });
+  response.set("cache-control", "no-store").json({ ok: true, ...result });
+});
+
+app.get("/confirm", (request, response) => {
+  const result = confirmSubscriberChannel(getDb(), process.env, {
+    subscriberId: request.query.subscriber,
+    channel: String(request.query.channel || ""),
+    token: String(request.query.token || ""),
+  });
+  const channelLabel = result.channel === "sms" ? "phone number" : "email address";
+  response
+    .set("cache-control", "no-store")
+    .type("html")
+    .send([
+      "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+      "<title>Subscription confirmed</title>",
+      "<style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:15vh auto;padding:0 1.5rem;color:#1a1a1a}a{color:#0a5}</style>",
+      "</head><body>",
+      "<h1>Confirmed</h1>",
+      `<p>Your ${channelLabel} is confirmed. You will now receive airborne-anomaly alerts from this instrument.</p>`,
+      `<p><a href="${result.managementPath}">Manage or unsubscribe</a> &middot; <a href="/">Dashboard</a></p>`,
+      "</body></html>",
+    ].join(""));
 });
 
 app.get("/api/push/vapid-public-key", (_request, response) => {

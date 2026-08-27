@@ -74,6 +74,135 @@ function createSubscriberManagementUrl(env, subscriber) {
   return new URL(createSubscriberManagementPath(env, subscriber), baseUrl).toString();
 }
 
+const CONFIRMABLE_CHANNELS = ['email', 'sms'];
+
+function subscriberConfirmToken(env, subscriber, channel) {
+  const createdAt = subscriber?.created_at || subscriber?.createdAt;
+  if (!subscriber?.id || !createdAt || !CONFIRMABLE_CHANNELS.includes(channel)) {
+    throw new HttpError(500, 'Subscriber is missing confirmation fields.');
+  }
+  return crypto
+    .createHmac('sha256', requireEnv(env, 'NOTIFICATION_HASH_SECRET'))
+    .update(`confirm:${channel}:${subscriber.id}:${createdAt}`)
+    .digest('hex');
+}
+
+function createConfirmPath(env, subscriber, channel) {
+  const params = new URLSearchParams({
+    subscriber: String(subscriber.id),
+    channel,
+    token: subscriberConfirmToken(env, subscriber, channel),
+  });
+  return `/confirm?${params.toString()}`;
+}
+
+function createConfirmUrl(env, subscriber, channel) {
+  const publicUrl = cleanPublicUrl(env.EWS_PUBLIC_URL);
+  if (!publicUrl) {
+    return null;
+  }
+  const baseUrl = publicUrl.endsWith('/') ? publicUrl : `${publicUrl}/`;
+  return new URL(createConfirmPath(env, subscriber, channel), baseUrl).toString();
+}
+
+function confirmSubscriberChannel(db, env, { subscriberId, channel, token }) {
+  if (!CONFIRMABLE_CHANNELS.includes(channel)) {
+    throw new HttpError(400, 'Unknown confirmation channel.');
+  }
+  const subscriber = getSubscriberById(db, subscriberId);
+  if (!timingSafeEqualHex(token, subscriberConfirmToken(env, subscriber, channel))) {
+    throw new HttpError(403, 'Invalid confirmation token.');
+  }
+  const column = channel === 'sms' ? 'phone_confirmed_at' : 'email_confirmed_at';
+  db.prepare(`
+    UPDATE notification_subscribers
+    SET ${column} = COALESCE(${column}, CURRENT_TIMESTAMP),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(subscriber.id);
+  const updated = getSubscriberById(db, subscriber.id);
+  return {
+    id: updated.id,
+    channel,
+    confirmed: true,
+    managementPath: createSubscriberManagementPath(env, updated),
+  };
+}
+
+const CONFIRM_RESEND_MIN_MS = 10 * 60 * 1000;
+
+function confirmationMessage(env, subscriber, channel) {
+  const confirmUrl = createConfirmUrl(env, subscriber, channel) || createConfirmPath(env, subscriber, channel);
+  if (channel === 'sms') {
+    return {
+      text: `Apocalypse EWS: confirm this number to receive airborne-anomaly alerts: ${confirmUrl} . Reply STOP to any alert to opt out.`,
+    };
+  }
+  return {
+    subject: 'Confirm your Apocalypse EWS alert subscription',
+    text: [
+      'Someone (hopefully you) asked to receive Apocalypse EWS airborne-anomaly alerts at this address.',
+      `Confirm to start receiving alerts: ${confirmUrl}`,
+      'If this was not you, ignore this message and nothing will be sent.',
+    ].join('\n\n'),
+  };
+}
+
+// Send pending confirmation messages for the enabled-but-unconfirmed channels
+// of one subscriber. Provider-unconfigured environments log the confirmation
+// URL instead of sending (dev mode) so the flow stays exercisable end to end.
+async function sendPendingConfirmations(db, env, subscriberId) {
+  const subscriber = getSubscriberById(db, subscriberId);
+  const results = [];
+  const channels = [
+    subscriber.email_enabled && !subscriber.email_confirmed_at
+      ? { channel: 'email', sentAt: subscriber.email_confirm_sent_at, sentColumn: 'email_confirm_sent_at' }
+      : null,
+    subscriber.sms_enabled && !subscriber.phone_confirmed_at
+      ? { channel: 'sms', sentAt: subscriber.phone_confirm_sent_at, sentColumn: 'phone_confirm_sent_at' }
+      : null,
+  ].filter(Boolean);
+
+  for (const entry of channels) {
+    const sentMs = entry.sentAt ? Date.parse(`${entry.sentAt}Z`) : null;
+    if (sentMs && Date.now() - sentMs < CONFIRM_RESEND_MIN_MS) {
+      results.push({ channel: entry.channel, sent: false, reason: 'recently_sent' });
+      continue;
+    }
+    const message = confirmationMessage(env, subscriber, entry.channel);
+    try {
+      if (entry.channel === 'sms') {
+        await sendSms(env, { to: decryptString(env, subscriber.phone_cipher), text: message.text });
+      } else {
+        await sendEmail(env, { to: decryptString(env, subscriber.email_cipher), subject: message.subject, text: message.text });
+      }
+      results.push({ channel: entry.channel, sent: true });
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 503) {
+        // Provider not configured: surface the confirm link in the server log.
+        console.log(JSON.stringify({
+          confirmationLink: true,
+          subscriberId: subscriber.id,
+          channel: entry.channel,
+          path: createConfirmPath(env, subscriber, entry.channel),
+          reason: error.message,
+        }));
+        results.push({ channel: entry.channel, sent: false, reason: 'provider_not_configured' });
+      } else {
+        results.push({ channel: entry.channel, sent: false, reason: error.message });
+        continue; // do not stamp sent_at on a real send failure
+      }
+    }
+    db.prepare(`
+      UPDATE notification_subscribers
+      SET ${entry.sentColumn} = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(subscriber.id);
+  }
+  return results;
+}
+
 function getEncryptionKey(env) {
   const key = Buffer.from(requireEnv(env, 'NOTIFICATION_ENCRYPTION_KEY'), 'base64');
   if (key.length !== 32) {
@@ -168,11 +297,16 @@ function getSubscriberById(db, subscriberId) {
 }
 
 function mapSubscriberResult(env, subscriber, reused = false) {
+  const confirmationPending = [
+    subscriber.email_enabled && !subscriber.email_confirmed_at ? 'email' : null,
+    subscriber.sms_enabled && !subscriber.phone_confirmed_at ? 'sms' : null,
+  ].filter(Boolean);
   return {
     id: subscriber.id,
     emailEnabled: Boolean(subscriber.email_enabled),
     smsEnabled: Boolean(subscriber.sms_enabled),
     pushEnabled: Boolean(subscriber.push_enabled),
+    confirmationPending,
     managementPath: createSubscriberManagementPath(env, subscriber),
     reused,
   };
@@ -202,6 +336,12 @@ function upsertSubscriber(db, payload, env = process.env) {
     phone_cipher: contacts.phone ? encryptString(env, contacts.phone) : existing?.phone_cipher || null,
     email_enabled: contacts.email ? 1 : Number(existing?.email_enabled || 0),
     sms_enabled: contacts.phone ? 1 : Number(existing?.sms_enabled || 0),
+    // Double opt-in: a confirmed stamp survives only while the contact value
+    // is unchanged; a new or changed address/number must re-confirm.
+    email_confirmed_at:
+      existing && existing.email_hash === (emailHash || existing.email_hash) ? existing.email_confirmed_at : null,
+    phone_confirmed_at:
+      existing && existing.phone_hash === (phoneHash || existing.phone_hash) ? existing.phone_confirmed_at : null,
     source: 'local_api',
   };
 
@@ -215,6 +355,8 @@ function upsertSubscriber(db, payload, env = process.env) {
           phone_cipher = @phone_cipher,
           email_enabled = @email_enabled,
           sms_enabled = @sms_enabled,
+          email_confirmed_at = @email_confirmed_at,
+          phone_confirmed_at = @phone_confirmed_at,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = @id
     `).run({ ...row, id: existing.id });
@@ -230,6 +372,8 @@ function upsertSubscriber(db, payload, env = process.env) {
       phone_cipher,
       email_enabled,
       sms_enabled,
+      email_confirmed_at,
+      phone_confirmed_at,
       source
     ) VALUES (
       @status,
@@ -239,6 +383,8 @@ function upsertSubscriber(db, payload, env = process.env) {
       @phone_cipher,
       @email_enabled,
       @sms_enabled,
+      @email_confirmed_at,
+      @phone_confirmed_at,
       @source
     )
   `).run(row);
@@ -347,8 +493,9 @@ function hydrateSubscriber(env, subscriber) {
   return {
     id: subscriber.id,
     createdAt: subscriber.created_at,
-    email: subscriber.email_enabled ? decryptString(env, subscriber.email_cipher) : null,
-    phone: subscriber.sms_enabled ? decryptString(env, subscriber.phone_cipher) : null,
+    // Alert channels require double opt-in: enabled AND confirmed.
+    email: subscriber.email_enabled && subscriber.email_confirmed_at ? decryptString(env, subscriber.email_cipher) : null,
+    phone: subscriber.sms_enabled && subscriber.phone_confirmed_at ? decryptString(env, subscriber.phone_cipher) : null,
     emailHash: subscriber.email_hash,
     phoneHash: subscriber.phone_hash,
     pushEndpoint,
@@ -468,7 +615,7 @@ function countActiveSubscribers(db) {
       SELECT COUNT(*) AS count
       FROM notification_subscribers
       WHERE status = 'active'
-        AND (email_enabled = 1 OR sms_enabled = 1 OR (push_enabled = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL))
+        AND ((email_enabled = 1 AND email_confirmed_at IS NOT NULL) OR (sms_enabled = 1 AND phone_confirmed_at IS NOT NULL) OR (push_enabled = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL))
     `)
     .get().count;
 }
@@ -479,7 +626,7 @@ function getActiveSubscriberBatch(db, env = process.env, { afterId = 0, limit = 
       SELECT *
       FROM notification_subscribers
       WHERE status = 'active'
-        AND (email_enabled = 1 OR sms_enabled = 1 OR (push_enabled = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL))
+        AND ((email_enabled = 1 AND email_confirmed_at IS NOT NULL) OR (sms_enabled = 1 AND phone_confirmed_at IS NOT NULL) OR (push_enabled = 1 AND push_endpoint_hash IS NOT NULL AND push_expired_at IS NULL AND push_opted_out_at IS NULL))
         AND id > ?
       ORDER BY id ASC
       LIMIT ?
@@ -943,6 +1090,7 @@ module.exports = {
   createSubscriberManagementUrl,
   countActiveSubscribers,
   dispatchPendingAlerts,
+  getActiveSubscriberBatch,
   getVapidPublicKey,
   isWebPushConfigured,
   getManagedSubscriber,
@@ -951,6 +1099,8 @@ module.exports = {
   normalizeEmail,
   normalizePhone,
   upsertSubscriber,
+  confirmSubscriberChannel,
+  sendPendingConfirmations,
   unsubscribePushSubscriber,
   updateManagedSubscriber,
   upsertPushSubscriber,

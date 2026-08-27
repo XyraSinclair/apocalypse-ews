@@ -80,8 +80,8 @@ ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-o
 | **ntfy ops watchdog** | **live from the box** | `EWS_NTFY_OPS_TOPIC` in `/etc/apocalypse-ews.env`; unhealthy verdicts and recoveries only |
 | Owner push (xmsg → iMessage/email/desktop by severity) | retired with the laptop deployment (xmsg is Mac-only; `notify_local_push.js` silently no-ops on the box) | a box-reachable owner channel, if ever wanted |
 | Telegram channel | token wired (@XyraClawdBot, reused from xyra_claw — sends don't conflict with its polling) | one 45-second phone step: create channel, add bot as admin, set `TELEGRAM_CHANNEL` in `.env` |
-| Email (SendGrid) | code ready | production deploy (below) |
-| SMS (Telnyx) | code ready | production deploy (below) |
+| Email (SendGrid) | code ready, **double opt-in enforced** (signup sends a confirm link; only confirmed addresses are ever alerted; without `SENDGRID_API_KEY` the confirm path is logged to the journal instead) | production deploy (below) |
+| SMS (Telnyx) | code ready, **double opt-in enforced** (same as email; without `TELNYX_API_KEY` the confirm path is logged) | production deploy (below) |
 | Browser push (VAPID) | keys generated in `.env` | production deploy (below) |
 | Paid signup (Stripe) | code ready | production deploy (below) |
 

@@ -95,6 +95,11 @@ function migrateSchema(db) {
     ["push_expired_at", "TEXT"],
     ["push_opted_out_at", "TEXT"],
     ["push_opt_out_source", "TEXT"],
+    // Double opt-in (2026-08): email/SMS alerts only go to confirmed contacts.
+    ["email_confirmed_at", "TEXT"],
+    ["phone_confirmed_at", "TEXT"],
+    ["email_confirm_sent_at", "TEXT"],
+    ["phone_confirm_sent_at", "TEXT"],
   ];
   for (const [columnName, columnDefinition] of pushColumns) {
     if (!notificationSubscriberColumns.has(columnName)) {

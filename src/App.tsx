@@ -216,7 +216,7 @@ type SignupContacts = { email: string | null; phone: string | null; smsConsent: 
 
 type SignupResult =
   | { mode: 'checkout'; checkoutUrl: string; sessionId: string | null; reused: boolean }
-  | { mode: 'local'; emailEnabled: boolean; smsEnabled: boolean; managementPath: string | null };
+  | { mode: 'local'; emailEnabled: boolean; smsEnabled: boolean; confirmationPending: string[]; managementPath: string | null };
 
 class CheckoutUnavailableError extends Error {}
 
@@ -276,6 +276,9 @@ async function createLocalNotificationSignup(contacts: SignupContacts): Promise<
     mode: 'local',
     emailEnabled: payload.emailEnabled === true,
     smsEnabled: payload.smsEnabled === true,
+    confirmationPending: Array.isArray(payload.confirmationPending)
+      ? payload.confirmationPending.filter((entry): entry is string => typeof entry === 'string')
+      : [],
     managementPath: typeof payload.managementPath === 'string' ? payload.managementPath : null,
   };
 }
@@ -1128,7 +1131,14 @@ function SignupPage() {
       }
 
       setManagementPath(result.managementPath);
-      setStatus('Notification subscription saved. You will receive takeoff and anomaly alerts when delivery providers are configured.');
+      if (result.confirmationPending.length > 0) {
+        const channels = result.confirmationPending
+          .map((channel) => (channel === 'sms' ? 'text message' : 'email'))
+          .join(' and ');
+        setStatus(`Subscription saved. Check for a confirmation ${channels} and click the link to activate alerts.`);
+      } else {
+        setStatus('Notification subscription saved. You will receive takeoff and anomaly alerts.');
+      }
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Notification signup failed.');
     } finally {
