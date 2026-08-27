@@ -49,13 +49,16 @@ async function publish(server, topic, event, dryRun) {
     console.log(JSON.stringify({ wouldPublish: title, topic }));
     return true;
   }
+  const headers = {
+    Title: title,
+    Priority: PRIORITY_BY_SEVERITY[event.severity] || 'default',
+    Tags: 'rotating_light,airplane',
+  };
+  const token = String(process.env.EWS_NTFY_TOKEN || '').trim();
+  if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`${server}/${topic}`, {
     method: 'POST',
-    headers: {
-      Title: title,
-      Priority: PRIORITY_BY_SEVERITY[event.severity] || 'default',
-      Tags: 'rotating_light,airplane',
-    },
+    headers,
     body,
     signal: AbortSignal.timeout(30000),
   });

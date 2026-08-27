@@ -399,7 +399,40 @@ app.get("/api/event-signals", (_request, response) => {
   response.set("cache-control", "no-store").json(readPublishedJson("event-signals.json"));
 });
 
-app.post("/api/notifications/signup", async (request, response) => {
+// In-process fixed-window rate limiter for the public write endpoints. The
+// server sits behind the Cloudflare tunnel, so the socket address is always
+// loopback — CF-Connecting-IP is the real client (loopback fallback covers
+// direct ssh-tunnel access).
+const rateBuckets = new Map();
+function rateLimit(name, limit, windowMs) {
+  return (request, _response, next) => {
+    const ip = String(request.get("cf-connecting-ip") || request.ip || "local").trim();
+    const key = `${name}:${ip}`;
+    const now = Date.now();
+    const bucket = rateBuckets.get(key);
+    if (!bucket || now - bucket.windowStart >= windowMs) {
+      rateBuckets.set(key, { windowStart: now, count: 1 });
+      return next();
+    }
+    bucket.count += 1;
+    if (bucket.count > limit) {
+      throw new HttpError(429, "Too many requests. Try again later.");
+    }
+    next();
+  };
+}
+setInterval(() => {
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const [key, bucket] of rateBuckets) {
+    if (bucket.windowStart < cutoff) rateBuckets.delete(key);
+  }
+}, 10 * 60 * 1000).unref();
+
+const signupLimiter = rateLimit("signup", 10, 60 * 60 * 1000);
+const confirmLimiter = rateLimit("confirm", 30, 60 * 60 * 1000);
+const pushLimiter = rateLimit("push", 30, 60 * 60 * 1000);
+
+app.post("/api/notifications/signup", signupLimiter, async (request, response) => {
   const db = getDb();
   const subscriber = upsertSubscriber(db, request.body, process.env);
   const confirmations = await sendPendingConfirmations(db, process.env, subscriber.id);
@@ -411,7 +444,7 @@ app.post("/api/notifications/signup", async (request, response) => {
   });
 });
 
-app.get("/api/notifications/confirm", (request, response) => {
+app.get("/api/notifications/confirm", confirmLimiter, (request, response) => {
   const result = confirmSubscriberChannel(getDb(), process.env, {
     subscriberId: request.query.subscriber,
     channel: String(request.query.channel || ""),
@@ -420,7 +453,7 @@ app.get("/api/notifications/confirm", (request, response) => {
   response.set("cache-control", "no-store").json({ ok: true, ...result });
 });
 
-app.get("/confirm", (request, response) => {
+app.get("/confirm", confirmLimiter, (request, response) => {
   const result = confirmSubscriberChannel(getDb(), process.env, {
     subscriberId: request.query.subscriber,
     channel: String(request.query.channel || ""),
@@ -454,7 +487,7 @@ app.get("/api/push/vapid-public-key", (_request, response) => {
   });
 });
 
-app.post("/api/push/subscribe", (request, response) => {
+app.post("/api/push/subscribe", pushLimiter, (request, response) => {
   if (!isWebPushConfigured(process.env)) {
     response.status(503).json({ error: "Browser push is not configured." });
     return;

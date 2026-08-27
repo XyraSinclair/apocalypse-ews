@@ -49,13 +49,16 @@ function writeState(state) {
 }
 
 async function publish(title, body, priority) {
+  const headers = {
+    Title: title,
+    Priority: priority,
+    Tags: 'wrench',
+  };
+  const token = String(process.env.EWS_NTFY_TOKEN || '').trim();
+  if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`${server}/${topic}`, {
     method: 'POST',
-    headers: {
-      Title: title,
-      Priority: priority,
-      Tags: 'wrench',
-    },
+    headers,
     body,
   });
   if (!response.ok) {
