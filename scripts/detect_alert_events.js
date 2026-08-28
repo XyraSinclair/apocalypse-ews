@@ -344,6 +344,18 @@ function getTakeoffRateStats(db, cohort, observedAt, options) {
     `)
     .all(cohort, options.takeoffLiveSource, lookbackStart, window.windowStart);
 
+  return {
+    ...buildTakeoffBaseline(rows, window, options),
+    lookbackStart,
+    lookbackDays: options.takeoffRateLookbackDays,
+  };
+}
+
+// Pure baseline computation over prefetched rows
+// [{ sampledAt, takeoffCount, slotSource }] — shared by live detection and
+// the backtest harness (which fetches the whole replay range once instead of
+// re-querying per slot).
+function buildTakeoffBaseline(rows, window, options) {
   // Slots known to come from trace backfill carry a structural zero for the
   // live process — excluding them keeps repaired outages from dragging the
   // baseline down. Slots with no provenance row (pre-provenance history) are
@@ -413,8 +425,6 @@ function getTakeoffRateStats(db, cohort, observedAt, options) {
     sampleDayCount: sampleDays.size,
     requiredSampleCount,
     requiredDayCount,
-    lookbackStart,
-    lookbackDays: options.takeoffRateLookbackDays,
     expectedTakeoffCount: baselineStats.median,
     takeoffStdDev: baselineStats.rawSigma,
     effectiveTakeoffStdDev: baselineStats.sigma,
@@ -867,6 +877,7 @@ if (require.main === module) {
 
 module.exports = {
   getTakeoffRateStats,
+  buildTakeoffBaseline,
   getTakeoffEvents,
   getTakeoffWindow,
   getDataQuality,

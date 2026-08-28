@@ -74,11 +74,35 @@ ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-o
 
 ## Signal semantics
 
-- `emergencyLevel` 1–5 from concurrent-airborne deviation vs. a 7-day (336-sample)
-  baseline; level ≥ `EWS_ANOMALY_ALERT_LEVEL` (default 5) generates an alert event.
-- Takeoff-batch anomaly: ≥ N takeoffs in a 30-min window with rate z-score ≥ 3.5
-  vs. 28-day lookback (min 7 days of history) → level-4 event.
-- Detection is calm-by-default: no baseline → no alert (fail-quiet, not fail-noisy).
+- `emergencyLevel` 1–5 from concurrent-airborne deviation vs. a weekday×slot
+  seasonal baseline (7-day/336-sample minimum warm-up, US-holiday calendar
+  model, alarm threshold self-calibrated to the second-highest historical
+  daily peak); level ≥ `EWS_ANOMALY_ALERT_LEVEL` (default 5) generates an
+  alert event.
+- Takeoff-rate anomaly (`takeoff-rate-seasonal-robust`): live-process window
+  count vs a (weekday/weekend × slot-of-day) median/MAD baseline over
+  `EWS_TAKEOFF_RATE_LOOKBACK_DAYS` (28), z ≥ 3.5 → elevated, ≥ 4.5 high,
+  ≥ 6 critical. **Both numerator and baseline count only
+  `source='adsbx_heatmap'` events** — trace-backfilled events (`adsbx_history`,
+  ~45× denser, written by repair with sub-slot timestamps) are a different
+  counting process and are excluded, so a repair pass touching the current
+  window cannot manufacture a false critical.
+- `sustained_shift` (CUSUM): S ← max(0, S + σ-shift − k) per slot over the
+  concurrent signal; crossing `EWS_CUSUM_THRESHOLD` (8) fires high, crossing
+  `EWS_CUSUM_CRITICAL` (12) fires critical; re-arms after S falls below half
+  the threshold. Catches slow exoduses that never spike the instantaneous
+  gauge. State in `meta` key `cusum_state:<cohort>`.
+- L0 data-quality gate: the live ingester records the global feed total per
+  slot in `ingest_slots`; if the current slot carries under
+  `EWS_DATA_QUALITY_MIN_RATIO` (0.6) × the 14-day same-slot median, all
+  statistical events are suppressed and a `data_quality` event is emitted
+  instead — an infrastructure failure must not read as an exodus.
+- Detection is calm-by-default: no baseline → no alert (fail-quiet, not
+  fail-noisy); degraded feed → suppressed + surfaced, never scored.
+- `npm run backtest -- --db data/ews-main.sqlite --cohort global_business_jet
+  --inject-exodus` replays history through the production code paths:
+  frequency tables for every layer plus the 3×-exodus injection acceptance
+  test (must reach level 5 within 60 minutes).
 
 ## Subscription channels
 

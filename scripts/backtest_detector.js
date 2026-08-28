@@ -27,8 +27,8 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 
 const {
-  getTakeoffRateStats,
-  getTakeoffEvents,
+  buildTakeoffBaseline,
+  getTakeoffWindow,
   takeoffSeverityForZScore,
   cusumStep,
 } = require('./detect_alert_events');
@@ -154,34 +154,67 @@ function cusumReplay(context, args) {
 }
 
 // Strict walk-forward: at each historical slot, both the numerator (window
-// takeoffs) and the baseline (getTakeoffRateStats) only read data at or
-// before that slot — the same view live detection had at that moment.
+// takeoffs) and the baseline only see data before/at that slot — the same
+// view live detection had at that moment. One query fetches the whole
+// replay range plus lookback; the shared buildTakeoffBaseline pure function
+// then scores each slot in memory.
 function takeoffReplay(db, args) {
-  const slots = db
+  const lookbackDays = Math.max(1, args.takeoffRateLookbackDays);
+  const replayDays = Math.max(1, args.takeoffDays);
+  const rows = db
     .prepare(`
-      SELECT sampled_at AS sampledAt FROM concurrent_metrics
-      WHERE sampled_at >= datetime('now', ?)
-      ORDER BY sampled_at ASC
+      SELECT
+        m.sampled_at AS sampledAt,
+        (
+          SELECT COUNT(DISTINCT t.hex)
+          FROM takeoff_events t
+          WHERE t.cohort = ?
+            AND t.source = ?
+            AND t.observed_at = m.sampled_at
+        ) AS takeoffCount,
+        ${db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingest_slots'").get()
+          ? '(SELECT s.source FROM ingest_slots s WHERE s.sampled_at = m.sampled_at)'
+          : 'NULL'} AS slotSource
+      FROM concurrent_metrics m
+      WHERE m.sampled_at >= datetime('now', ?)
+      ORDER BY m.sampled_at ASC
     `)
-    .all(`-${Math.max(1, args.takeoffDays)} days`);
+    .all(args.cohort, args.takeoffLiveSource, `-${lookbackDays + replayDays} days`);
+  for (const row of rows) {
+    row.sampledAtMs = Date.parse(row.sampledAt);
+  }
+  const replayStartMs = Date.now() - replayDays * 24 * 60 * 60 * 1000;
+  const lookbackMs = lookbackDays * 24 * 60 * 60 * 1000;
   const options = {
     takeoffWindowMinutes: args.takeoffWindowMinutes,
-    takeoffRateLookbackDays: args.takeoffRateLookbackDays,
     takeoffRateMinSamples: null,
     takeoffRateMinDays: null,
+    takeoffRateLookbackDays: lookbackDays,
     takeoffLiveSource: args.takeoffLiveSource,
   };
+  const slots = rows.filter((row) => row.sampledAtMs >= replayStartMs);
   const fired = [];
   const zValues = [];
   let readySlots = 0;
+  let lowerIndex = 0;
+  let upperIndex = 0;
   for (const slot of slots) {
-    const stats = getTakeoffRateStats(db, args.cohort, slot.sampledAt, options);
+    const window = getTakeoffWindow(slot.sampledAt, args.takeoffWindowMinutes);
+    const windowStartMs = Date.parse(window.windowStart);
+    while (upperIndex < rows.length && rows[upperIndex].sampledAtMs < windowStartMs) {
+      upperIndex += 1;
+    }
+    while (lowerIndex < rows.length && rows[lowerIndex].sampledAtMs < windowStartMs - lookbackMs) {
+      lowerIndex += 1;
+    }
+    const stats = buildTakeoffBaseline(rows.slice(lowerIndex, upperIndex), window, options);
     if (!stats.modelReady) {
       continue;
     }
     readySlots += 1;
-    const windowTakeoffs = getTakeoffEvents(db, args.cohort, slot.sampledAt, args.takeoffWindowMinutes, args.takeoffLiveSource);
-    const count = windowTakeoffs.takeoffs.length;
+    // Live-process events sit exactly on slot timestamps, so the window
+    // count ending at this slot is the slot's own live count.
+    const count = slot.slotSource && slot.slotSource !== args.takeoffLiveSource ? 0 : Number(slot.takeoffCount || 0);
     const z = (count - stats.expectedTakeoffCount) / stats.effectiveTakeoffStdDev;
     zValues.push(z);
     if (count >= args.takeoffRateMinCount && z >= args.takeoffRateZScore) {

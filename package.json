@@ -38,6 +38,7 @@
     "smoke:alert-pipeline": "node scripts/smoke_alert_pipeline.js",
     "smoke:takeoff-ingest": "if [ -x .venv/bin/python ]; then .venv/bin/python scripts/smoke_takeoff_ingest.py; else python3 scripts/smoke_takeoff_ingest.py; fi",
     "webpush:keys": "node scripts/generate_web_push_keys.js",
+    "backtest": "node scripts/backtest_detector.js",
     "status": "node scripts/status.js",
     "repair:gaps": "node scripts/repair_history_gaps.js",
     "backup": "node scripts/backup_databases.js",

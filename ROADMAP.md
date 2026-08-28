@@ -169,9 +169,21 @@ DNS on the existing domain or a new one; Cloudflare proxy in front optional
 > **Phase 2 exit: met** (box-only for weeks; restore drilled; bootstrap.sh
 > still unwritten — the one gap). **Phase 3: ntfy + RSS + web push live;
 > email needs a provider account (operator gate); Telegram needs one phone
-> step; canary not built.** **Phase 1 (statistical hardening) is now the
-> highest-leverage open engineering.** Next in order: seasonal (dow × slot)
-> robust baselines → backtest harness → canary → calibration page.
+> step; weekly public-path canary live.**
+>
+> **Phase 1 update 2026-08-28.** Landed: seasonal (weekday-class × slot)
+> median/MAD takeoff-rate baseline with source-consistent counting (the old
+> model mixed the live slot-transition process with ~45×-denser trace
+> backfill — a repair pass touching the current window would have
+> manufactured a false critical; S2's pooled-seasonality critique was the
+> smaller half of the defect), L0 feed-volume gate over new `ingest_slots`
+> provenance (S1), CUSUM `sustained_shift` layer (S4), and
+> `npm run backtest` replaying production code paths with the 3×-exodus
+> injection test (passes). The concurrent model needed no rewrite — it
+> already had dow×slot baselines, holiday calendar, and peak-calibrated
+> thresholds; the plan's S2 critique applied to the takeoff model only.
+> Open: 365-day backfill (deepens calibration + enables Davos-week replay),
+> threshold tuning against box backtest tables, CF-era → bootstrap.sh.
 
 **Phase 0 — local operational.** ✅ 2026-07-03. Signal computes on live data,
 10-min loop + always-on server under launchd, RSS + owner push live, smoke
