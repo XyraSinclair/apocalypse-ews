@@ -3,7 +3,7 @@ const path = require("node:path");
 const readline = require("node:readline/promises");
 const { stdin: input, stdout: output } = require("node:process");
 const { chromium } = require("@playwright/test");
-const { REPO_ROOT, getEnvWithDotEnv } = require("./_deploy_env");
+const { REPO_ROOT, getEnvWithDotEnv } = require("./_env");
 
 const env = getEnvWithDotEnv();
 const args = process.argv.slice(2);

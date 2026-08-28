@@ -10,3 +10,4 @@ tmp/
 wrangler.toml
 .venv/
 __pycache__/
+tsconfig.tsbuildinfo

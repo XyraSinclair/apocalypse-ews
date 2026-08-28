@@ -5,7 +5,7 @@ const {
   REQUIRED_DASHBOARD_ENV_VARS,
   getEnvWithDotEnv,
   validateDashboardEnv,
-} = require("./_deploy_env");
+} = require("./_env");
 
 const env = getEnvWithDotEnv();
 const errors = validateDashboardEnv(env);
