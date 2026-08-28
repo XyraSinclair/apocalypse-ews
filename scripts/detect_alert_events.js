@@ -32,9 +32,13 @@ function parseArgs(argv) {
     // the baseline, or every repair pass that touches the current window
     // manufactures a false critical.
     takeoffLiveSource: process.env.EWS_TAKEOFF_LIVE_SOURCE || 'adsbx_heatmap',
-    cusumK: Number(process.env.EWS_CUSUM_K || 0.5),
-    cusumThreshold: Number(process.env.EWS_CUSUM_THRESHOLD || 8),
-    cusumCritical: Number(process.env.EWS_CUSUM_CRITICAL || 12),
+    // Tuned 2026-08-28 against 66d of box data with robust (median/MAD)
+    // concurrent baselines: k=1.5 h=12 crit=20 fires high twice (the two
+    // hottest real sustained days), never critical on history, while a 3x
+    // exodus reaches S~13 within one hour and crosses critical soon after.
+    cusumK: Number(process.env.EWS_CUSUM_K || 1.5),
+    cusumThreshold: Number(process.env.EWS_CUSUM_THRESHOLD || 12),
+    cusumCritical: Number(process.env.EWS_CUSUM_CRITICAL || 20),
     dataQualityMinRatio: Number(process.env.EWS_DATA_QUALITY_MIN_RATIO || 0.6),
   };
 

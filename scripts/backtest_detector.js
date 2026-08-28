@@ -50,9 +50,9 @@ function parseArgs(argv) {
     takeoffRateMinCount: Number(process.env.EWS_TAKEOFF_RATE_MIN_COUNT || 3),
     takeoffRateZScore: Number(process.env.EWS_TAKEOFF_RATE_Z_SCORE || 3.5),
     takeoffLiveSource: process.env.EWS_TAKEOFF_LIVE_SOURCE || 'adsbx_heatmap',
-    cusumK: Number(process.env.EWS_CUSUM_K || 0.5),
-    cusumThreshold: Number(process.env.EWS_CUSUM_THRESHOLD || 8),
-    cusumCritical: Number(process.env.EWS_CUSUM_CRITICAL || 12),
+    cusumK: Number(process.env.EWS_CUSUM_K || 1.5),
+    cusumThreshold: Number(process.env.EWS_CUSUM_THRESHOLD || 12),
+    cusumCritical: Number(process.env.EWS_CUSUM_CRITICAL || 20),
   };
   for (let index = 2; index < argv.length; index += 1) {
     const value = argv[index];

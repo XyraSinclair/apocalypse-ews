@@ -78,7 +78,11 @@ ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-o
   seasonal baseline (7-day/336-sample minimum warm-up, US-holiday calendar
   model, alarm threshold self-calibrated to the second-highest historical
   daily peak); level ≥ `EWS_ANOMALY_ALERT_LEVEL` (default 5) generates an
-  alert event.
+  alert event. Slot baselines are **median + scaled-MAD**, not mean/stdDev:
+  each weekly slot group holds one sample per week, and mean/variance stats
+  let the live exodus being scored (present in its own baseline group) drag
+  the mean and explode the sigma — a 3× injection scored σ2.4 under
+  mean/stdDev vs σ27.9 under median/MAD.
 - Takeoff-rate anomaly (`takeoff-rate-seasonal-robust`): live-process window
   count vs a (weekday/weekend × slot-of-day) median/MAD baseline over
   `EWS_TAKEOFF_RATE_LOOKBACK_DAYS` (28), z ≥ 3.5 → elevated, ≥ 4.5 high,
@@ -88,10 +92,14 @@ ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-o
   counting process and are excluded, so a repair pass touching the current
   window cannot manufacture a false critical.
 - `sustained_shift` (CUSUM): S ← max(0, S + σ-shift − k) per slot over the
-  concurrent signal; crossing `EWS_CUSUM_THRESHOLD` (8) fires high, crossing
-  `EWS_CUSUM_CRITICAL` (12) fires critical; re-arms after S falls below half
-  the threshold. Catches slow exoduses that never spike the instantaneous
-  gauge. State in `meta` key `cusum_state:<cohort>`.
+  concurrent signal with k = `EWS_CUSUM_K` (1.5); crossing
+  `EWS_CUSUM_THRESHOLD` (12) fires high, crossing `EWS_CUSUM_CRITICAL` (20)
+  fires critical; re-arms after S falls below half the threshold. Catches
+  slow exoduses that never spike the instantaneous gauge. Tuned 2026-08-28
+  on 66 days of box data: fires high on exactly the two hottest real
+  sustained days, never critical on history (peak S 16.1); a 3× exodus
+  accumulates S≈13 in the first hour. State in `meta` key
+  `cusum_state:<cohort>`.
 - L0 data-quality gate: the live ingester records the global feed total per
   slot in `ingest_slots`; if the current slot carries under
   `EWS_DATA_QUALITY_MIN_RATIO` (0.6) × the 14-day same-slot median, all
