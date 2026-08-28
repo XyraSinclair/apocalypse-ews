@@ -1,0 +1,272 @@
+#!/usr/bin/env node
+
+// Backtest harness for the detection stack (ROADMAP Phase 1 acceptance).
+//
+// Replays history through the same code paths production uses:
+//   - concurrent model: buildConcurrentPredictionContext scores every
+//     historical slot with the calibrated alarm threshold (note: baselines
+//     and calibration see the full history, exactly as the live gauge's
+//     calibration does — this is the model's own view of its past, not a
+//     strict walk-forward)
+//   - CUSUM: the shared cusumStep law over the scored sigma-shift sequence
+//   - takeoff-rate model: strict walk-forward — getTakeoffRateStats at each
+//     slot only reads data before that slot
+//   - --inject-exodus: multiplies the trailing hour's concurrent counts and
+//     verifies the model reaches emergency level 5 within 60 minutes
+//     (the "3x exodus fires critical" exit criterion)
+//
+// Output: JSON frequency tables — what would have fired, how often, and on
+// which days. The acceptance question is legibility: does the alarm budget
+// match intent (~1 critical/year of concurrent alarm, takeoff highs rare)?
+//
+// Usage:
+//   node scripts/backtest_detector.js --db data/ews-main.sqlite --cohort global_business_jet
+//     [--takeoff-days 30] [--inject-exodus] [--inject-factor 3]
+
+const path = require('node:path');
+const Database = require('better-sqlite3');
+
+const {
+  getTakeoffRateStats,
+  getTakeoffEvents,
+  takeoffSeverityForZScore,
+  cusumStep,
+} = require('./detect_alert_events');
+const {
+  buildConcurrentPredictionContext,
+  CONCURRENT_WEEKLY_BASELINE_TIME_ZONE,
+  CONCURRENT_WEEKLY_US_HOLIDAY_MODEL,
+} = require('../server/dashboard');
+
+function parseArgs(argv) {
+  const args = {
+    db: null,
+    cohort: null,
+    takeoffDays: Number(process.env.EWS_BACKTEST_TAKEOFF_DAYS || 30),
+    injectExodus: false,
+    injectFactor: 3,
+    takeoffWindowMinutes: Number(process.env.EWS_TAKEOFF_WINDOW_MINUTES || 30),
+    takeoffRateLookbackDays: Number(process.env.EWS_TAKEOFF_RATE_LOOKBACK_DAYS || 28),
+    takeoffRateMinCount: Number(process.env.EWS_TAKEOFF_RATE_MIN_COUNT || 3),
+    takeoffRateZScore: Number(process.env.EWS_TAKEOFF_RATE_Z_SCORE || 3.5),
+    takeoffLiveSource: process.env.EWS_TAKEOFF_LIVE_SOURCE || 'adsbx_heatmap',
+    cusumK: Number(process.env.EWS_CUSUM_K || 0.5),
+    cusumThreshold: Number(process.env.EWS_CUSUM_THRESHOLD || 8),
+    cusumCritical: Number(process.env.EWS_CUSUM_CRITICAL || 12),
+  };
+  for (let index = 2; index < argv.length; index += 1) {
+    const value = argv[index];
+    if (value === '--db') args.db = argv[++index];
+    else if (value === '--cohort') args.cohort = argv[++index];
+    else if (value === '--takeoff-days') args.takeoffDays = Number(argv[++index]);
+    else if (value === '--inject-exodus') args.injectExodus = true;
+    else if (value === '--inject-factor') args.injectFactor = Number(argv[++index]);
+    else throw new Error(`Unknown argument: ${value}`);
+  }
+  if (!args.db || !args.cohort) {
+    throw new Error('Usage: node scripts/backtest_detector.js --db path --cohort id [--takeoff-days n] [--inject-exodus]');
+  }
+  return args;
+}
+
+function tally(values) {
+  const counts = {};
+  for (const value of values) {
+    counts[value] = (counts[value] || 0) + 1;
+  }
+  return counts;
+}
+
+function loadConcurrentRows(db) {
+  return db
+    .prepare('SELECT sampled_at AS sampledAt, concurrent_count AS concurrentCount FROM concurrent_metrics ORDER BY sampled_at ASC')
+    .all();
+}
+
+function scoreConcurrent(rows) {
+  return buildConcurrentPredictionContext(rows, {
+    concurrentPredictionModel: CONCURRENT_WEEKLY_US_HOLIDAY_MODEL,
+    weeklyBaselineTimeZone: process.env.EWS_MODEL_TIME_ZONE || CONCURRENT_WEEKLY_BASELINE_TIME_ZONE,
+  });
+}
+
+function concurrentReplay(context) {
+  const ready = context.records.filter((record) => record.modelReady);
+  const dailyPeaks = new Map();
+  for (const record of ready) {
+    const day = record.sampledAt.slice(0, 10);
+    const current = dailyPeaks.get(day);
+    if (!current || record.sigmaShift > current.sigmaShift) {
+      dailyPeaks.set(day, record);
+    }
+  }
+  const peaks = Array.from(dailyPeaks.entries())
+    .map(([day, record]) => ({
+      day,
+      sigmaShift: +record.sigmaShift.toFixed(2),
+      emergencyLevel: record.emergencyLevel,
+      alertLevel: record.alertLevel,
+      concurrentCount: record.concurrentCount,
+      expected: Math.round(record.expectedConcurrentCount),
+    }))
+    .sort((left, right) => right.sigmaShift - left.sigmaShift);
+  return {
+    scoredSlots: ready.length,
+    alarmSigmaThreshold: context.alarmSigmaThreshold,
+    emergencyLevelFrequency: tally(ready.map((record) => record.emergencyLevel)),
+    alertLevelFrequency: tally(ready.map((record) => record.alertLevel)),
+    hottestDays: peaks.slice(0, 10),
+  };
+}
+
+function cusumReplay(context, args) {
+  const ready = context.records.filter((record) => record.modelReady);
+  let s = 0;
+  let peakS = 0;
+  let armedHigh = true;
+  let armedCritical = true;
+  const crossings = [];
+  for (const record of ready) {
+    s = cusumStep(s, record.sigmaShift, args.cusumK);
+    peakS = Math.max(peakS, s);
+    if (armedCritical && s >= args.cusumCritical) {
+      crossings.push({ severity: 'critical', sampledAt: record.sampledAt, s: +s.toFixed(2) });
+      armedCritical = false;
+      armedHigh = false;
+    } else if (armedHigh && s >= args.cusumThreshold) {
+      crossings.push({ severity: 'high', sampledAt: record.sampledAt, s: +s.toFixed(2) });
+      armedHigh = false;
+    }
+    if (s < args.cusumThreshold / 2) {
+      armedHigh = true;
+      armedCritical = true;
+    }
+  }
+  return {
+    scoredSlots: ready.length,
+    k: args.cusumK,
+    threshold: args.cusumThreshold,
+    critical: args.cusumCritical,
+    peakS: +peakS.toFixed(2),
+    crossingCount: crossings.length,
+    crossings: crossings.slice(0, 20),
+  };
+}
+
+// Strict walk-forward: at each historical slot, both the numerator (window
+// takeoffs) and the baseline (getTakeoffRateStats) only read data at or
+// before that slot — the same view live detection had at that moment.
+function takeoffReplay(db, args) {
+  const slots = db
+    .prepare(`
+      SELECT sampled_at AS sampledAt FROM concurrent_metrics
+      WHERE sampled_at >= datetime('now', ?)
+      ORDER BY sampled_at ASC
+    `)
+    .all(`-${Math.max(1, args.takeoffDays)} days`);
+  const options = {
+    takeoffWindowMinutes: args.takeoffWindowMinutes,
+    takeoffRateLookbackDays: args.takeoffRateLookbackDays,
+    takeoffRateMinSamples: null,
+    takeoffRateMinDays: null,
+    takeoffLiveSource: args.takeoffLiveSource,
+  };
+  const fired = [];
+  const zValues = [];
+  let readySlots = 0;
+  for (const slot of slots) {
+    const stats = getTakeoffRateStats(db, args.cohort, slot.sampledAt, options);
+    if (!stats.modelReady) {
+      continue;
+    }
+    readySlots += 1;
+    const windowTakeoffs = getTakeoffEvents(db, args.cohort, slot.sampledAt, args.takeoffWindowMinutes, args.takeoffLiveSource);
+    const count = windowTakeoffs.takeoffs.length;
+    const z = (count - stats.expectedTakeoffCount) / stats.effectiveTakeoffStdDev;
+    zValues.push(z);
+    if (count >= args.takeoffRateMinCount && z >= args.takeoffRateZScore) {
+      fired.push({
+        sampledAt: slot.sampledAt,
+        count,
+        expected: +stats.expectedTakeoffCount.toFixed(1),
+        sigma: +stats.effectiveTakeoffStdDev.toFixed(1),
+        z: +z.toFixed(2),
+        severity: takeoffSeverityForZScore(z),
+        tier: stats.baselineTier,
+      });
+    }
+  }
+  zValues.sort((left, right) => left - right);
+  const quantileOf = (fraction) => (zValues.length ? +zValues[Math.min(zValues.length - 1, Math.floor(fraction * zValues.length))].toFixed(2) : null);
+  return {
+    replayedDays: args.takeoffDays,
+    slots: slots.length,
+    readySlots,
+    zQuantiles: { p50: quantileOf(0.5), p90: quantileOf(0.9), p99: quantileOf(0.99), max: quantileOf(1) },
+    firedCount: fired.length,
+    severityFrequency: tally(fired.map((event) => event.severity)),
+    fired: fired.slice(0, 20),
+  };
+}
+
+// Synthetic acceptance test: multiply the trailing hour's concurrent counts
+// (in memory) and check the model reads it as a level-5 alarm within 60
+// minutes, plus that CUSUM starts accumulating.
+function injectExodus(rows, args) {
+  const injectedSlotCount = Math.max(1, Math.round(60 / Math.max(1, args.takeoffWindowMinutes)));
+  const injected = rows.map((row, index) => (
+    index >= rows.length - injectedSlotCount
+      ? { ...row, concurrentCount: Math.round(Number(row.concurrentCount) * args.injectFactor) }
+      : { ...row }
+  ));
+  const context = scoreConcurrent(injected);
+  const injectedRecords = context.records.slice(-injectedSlotCount);
+  let cusumS = 0;
+  for (const record of context.records) {
+    cusumS = cusumStep(cusumS, record.sigmaShift, args.cusumK);
+  }
+  const firstCritical = injectedRecords.find((record) => record.emergencyLevel >= 5);
+  return {
+    injectFactor: args.injectFactor,
+    injectedSlots: injectedSlotCount,
+    records: injectedRecords.map((record) => ({
+      sampledAt: record.sampledAt,
+      concurrentCount: record.concurrentCount,
+      expected: Math.round(record.expectedConcurrentCount || 0),
+      sigmaShift: +Number(record.sigmaShift || 0).toFixed(2),
+      emergencyLevel: record.emergencyLevel,
+      alertLevel: record.alertLevel,
+      modelReady: record.modelReady,
+    })),
+    criticalWithin60Min: Boolean(firstCritical),
+    firstCriticalAt: firstCritical?.sampledAt ?? null,
+    cusumAfterInjection: +cusumS.toFixed(2),
+  };
+}
+
+function main() {
+  const args = parseArgs(process.argv);
+  const db = new Database(path.resolve(args.db), { readonly: true, fileMustExist: true });
+  db.pragma('busy_timeout = 30000');
+  try {
+    const rows = loadConcurrentRows(db);
+    const context = scoreConcurrent(rows);
+    const report = {
+      ok: true,
+      cohort: args.cohort,
+      db: path.resolve(args.db),
+      historyStart: rows[0]?.sampledAt ?? null,
+      historyEnd: rows[rows.length - 1]?.sampledAt ?? null,
+      historySlots: rows.length,
+      concurrent: concurrentReplay(context),
+      cusum: cusumReplay(context, args),
+      takeoffRate: takeoffReplay(db, args),
+      injectedExodus: args.injectExodus ? injectExodus(rows, args) : null,
+    };
+    console.log(JSON.stringify(report, null, 2));
+  } finally {
+    db.close();
+  }
+}
+
+main();

@@ -211,6 +211,22 @@ def normalize_altitude(value):
     return int(value)
 
 
+def ensure_ingest_slots_table(connection):
+    # Existing databases predate the ingest_slots table in schema.sql; the
+    # writers guarantee it so deploys need no migration step.
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ingest_slots (
+          sampled_at TEXT PRIMARY KEY,
+          source TEXT NOT NULL,
+          total_aircraft INTEGER,
+          cohort_airborne INTEGER,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
 def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_download, rate_limit_seconds, keep_cache):
     tracked_hex_filter = {str_to_point(hex_value) for hex_value in tracked_by_hex}
     range_start_iso = f"{start_date.isoformat()}T00:00:00+00:00"
@@ -247,6 +263,18 @@ def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_downlo
         WHERE source = 'adsbx_history'
           AND observed_at >= ?
           AND observed_at < ?
+        """,
+        (range_start_iso, range_end_iso),
+    )
+    # This pass rewrites concurrent_metrics for the whole range from trace
+    # data, so slot provenance for the range becomes adsbx_history (rows are
+    # re-inserted below for the slots that actually get data).
+    ensure_ingest_slots_table(connection)
+    connection.execute(
+        """
+        DELETE FROM ingest_slots
+        WHERE sampled_at >= ?
+          AND sampled_at < ?
         """,
         (range_start_iso, range_end_iso),
     )
@@ -390,6 +418,17 @@ def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_downlo
             """
             INSERT INTO concurrent_metrics (sampled_at, concurrent_count)
             VALUES (:sampled_at, :concurrent_count)
+            """,
+            concurrent_rows,
+        )
+        connection.executemany(
+            """
+            INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne)
+            VALUES (:sampled_at, 'adsbx_history', NULL, :concurrent_count)
+            ON CONFLICT(sampled_at) DO UPDATE SET
+              source = excluded.source,
+              total_aircraft = excluded.total_aircraft,
+              cohort_airborne = excluded.cohort_airborne
             """,
             concurrent_rows,
         )

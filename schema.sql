@@ -62,6 +62,20 @@ CREATE TABLE IF NOT EXISTS concurrent_metrics (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Slot provenance + data-quality denominators. One row per ingested 30-min
+-- slot: which process wrote it (adsbx_heatmap = live snapshot transitions,
+-- adsbx_history = trace backfill) and, on the live path, how many aircraft
+-- the global feed carried in total. Detection uses source to keep the
+-- takeoff-rate numerator/baseline counting one consistent process, and
+-- total_aircraft as the L0 feed-health gate.
+CREATE TABLE IF NOT EXISTS ingest_slots (
+  sampled_at TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  total_aircraft INTEGER,
+  cohort_airborne INTEGER,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS daily_metrics (
   day TEXT PRIMARY KEY,
   unique_airborne_count INTEGER NOT NULL,

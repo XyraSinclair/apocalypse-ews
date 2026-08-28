@@ -283,6 +283,22 @@ def load_previous_live_snapshot(connection):
     return {row["hex"]: row for row in rows}
 
 
+def ensure_ingest_slots_table(connection):
+    # Existing databases predate the ingest_slots table in schema.sql; the
+    # writers guarantee it so deploys need no migration step.
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ingest_slots (
+          sampled_at TEXT PRIMARY KEY,
+          source TEXT NOT NULL,
+          total_aircraft INTEGER,
+          cohort_airborne INTEGER,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
 def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=False):
     sampled_at_iso = latest_slice.timestamp.isoformat()
     prune_before_iso = (latest_slice.timestamp - dt.timedelta(hours=OBSERVATION_RETENTION_HOURS)).isoformat()
@@ -463,6 +479,21 @@ def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=
           concurrent_count = excluded.concurrent_count
         """,
         (sampled_at_iso, len(airborne_hexes)),
+    )
+
+    # Slot provenance + L0 denominator: record that this slot came from the
+    # live snapshot process and how many aircraft the global feed carried.
+    ensure_ingest_slots_table(connection)
+    connection.execute(
+        """
+        INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(sampled_at) DO UPDATE SET
+          source = excluded.source,
+          total_aircraft = excluded.total_aircraft,
+          cohort_airborne = excluded.cohort_airborne
+        """,
+        (sampled_at_iso, SOURCE, len(latest_slice.telemetry), len(airborne_hexes)),
     )
 
     return {
