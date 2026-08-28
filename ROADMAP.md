@@ -179,11 +179,22 @@ DNS on the existing domain or a new one; Cloudflare proxy in front optional
 > smaller half of the defect), L0 feed-volume gate over new `ingest_slots`
 > provenance (S1), CUSUM `sustained_shift` layer (S4), and
 > `npm run backtest` replaying production code paths with the 3×-exodus
-> injection test (passes). The concurrent model needed no rewrite — it
-> already had dow×slot baselines, holiday calendar, and peak-calibrated
-> thresholds; the plan's S2 critique applied to the takeoff model only.
-> Open: 365-day backfill (deepens calibration + enables Davos-week replay),
-> threshold tuning against box backtest tables, CF-era → bootstrap.sh.
+> injection test. The concurrent model kept its architecture (dow×slot
+> baselines, holiday calendar, peak-calibrated thresholds) but its slot
+> stats moved from mean/stdDev to median + scaled MAD: with one sample per
+> week per slot, the live exodus being scored sat in its own baseline
+> group and a 3× injection self-dampened to σ2.4 (level 3) — under robust
+> stats the same injection scores σ27.9 and fires level 5 in the first
+> slot. The backtest caught this live-model defect; both cohorts now pass
+> the injection exit criterion. CUSUM defaults tuned on 66 days of box
+> data (k=1.5 h=12 crit=20: high on exactly the two hottest real sustained
+> days, never critical on history, S≈13 within an hour of a 3× exodus).
+> Liveness provenance (`live_ingested`) gates the takeoff baseline so the
+> 08-13→08-26 live-ingestion gap cannot contaminate medians (was 16 false
+> criticals/30d, now 2 watch-tier fires/30d, p99 z 3.04).
+> Open: 365-day backfill running (`scripts/run_yearly_backfill.sh`,
+> launched 2026-08-28 — deepens calibration + enables the Davos-week
+> replay exit criterion), CF-era → bootstrap.sh.
 
 **Phase 0 — local operational.** ✅ 2026-07-03. Signal computes on live data,
 10-min loop + always-on server under launchd, RSS + owner push live, smoke
