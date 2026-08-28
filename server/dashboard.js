@@ -912,11 +912,19 @@ function buildConcurrentSignalCalibration(records) {
   };
 }
 
+// Robust location/scale (median + scaled MAD) instead of mean/stdDev.
+// A weekly slot group holds one sample per week, so under a mean/variance
+// accumulator a single extreme value — including a live exodus, whose own
+// slot is present in its baseline group at scoring time — drags the mean
+// toward itself and explodes the stdDev, self-dampening the very z-score
+// that should fire (observed: a 3x injection scored sigma 2.4 instead of
+// ~35). Median/MAD are immune to single-sample contamination, so no
+// leave-one-out correction is needed and past anomalies stop poisoning
+// baselines. Field names stay mean/stdDev for every downstream consumer.
 function createCountAccumulator() {
   return {
     sampleCount: 0,
-    sum: 0,
-    sumSquares: 0,
+    values: [],
   };
 }
 
@@ -926,8 +934,7 @@ function addToCountAccumulator(accumulator, value) {
   }
 
   accumulator.sampleCount += 1;
-  accumulator.sum += value;
-  accumulator.sumSquares += value * value;
+  accumulator.values.push(value);
 }
 
 function finalizeCountAccumulator(accumulator, fallbackMean = null, fallbackStdDev = null) {
@@ -939,16 +946,15 @@ function finalizeCountAccumulator(accumulator, fallbackMean = null, fallbackStdD
     };
   }
 
-  const meanValue = accumulator.sum / accumulator.sampleCount;
-  const variance =
+  const location = median(accumulator.values);
+  const scale =
     accumulator.sampleCount > 1
-      ? (accumulator.sumSquares - (accumulator.sum * accumulator.sum) / accumulator.sampleCount) /
-        (accumulator.sampleCount - 1)
+      ? 1.4826 * median(accumulator.values.map((value) => Math.abs(value - location)))
       : 0;
 
   return {
-    mean: meanValue,
-    stdDev: Math.sqrt(Math.max(0, variance)),
+    mean: location,
+    stdDev: scale,
     sampleCount: accumulator.sampleCount,
   };
 }
