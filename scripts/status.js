@@ -46,9 +46,21 @@ function launchdState(agent) {
   return { agent, loaded: true, running, lastExit };
 }
 
+function systemctlQuery(args) {
+  // is-active/is-enabled exit non-zero for inactive/failed/disabled units but
+  // still print the state — capture stdout from the thrown error, or the
+  // whole report reads "unknown" and failed oneshots become invisible.
+  try {
+    return execFileSync('systemctl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  } catch (error) {
+    const output = String(error.stdout || '').trim();
+    return output || 'unknown';
+  }
+}
+
 function systemdState(unit) {
-  const active = safe(() => execFileSync('systemctl', ['is-active', unit], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(), 'unknown');
-  const enabled = safe(() => execFileSync('systemctl', ['is-enabled', unit], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(), 'unknown');
+  const active = systemctlQuery(['is-active', unit]);
+  const enabled = systemctlQuery(['is-enabled', unit]);
   // Timers report as loaded when waiting; oneshot services as inactive between
   // runs — both count as loaded. "failed" is the state that matters.
   const loaded = active !== 'unknown' && enabled !== 'not-found';
