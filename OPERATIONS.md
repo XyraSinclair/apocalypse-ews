@@ -46,7 +46,8 @@ Systemd units — canonical sources in `config/systemd/`, installed to
 | `apocalypse-ews-watchdog.timer` | `ops_alert.js` — status verdict → ops ntfy topic (deduped, 6 h re-alert, recovery note) | hourly |
 | `apocalypse-ews-backup.timer` | `backup_databases.js` — `VACUUM INTO data/backups/<day>/` for all three DBs, integrity-checked, 14 days kept; staleness feeds the status verdict (and therefore the watchdog). Restore = stop service, copy the day's file over `data/*.sqlite`, start | daily 02:10 |
 | `cloudflared.service` | Cloudflare tunnel `apocalypse-ews` (id `d27a04ac-5b8a-4d84-a4c9-ccf61978694d`) — serves <https://warning.watch> from loopback:3030 and <https://ntfy.warning.watch> from loopback:2586 with no open inbound ports. Installed via `cloudflared service install <token>`; ingress config lives in the CF dashboard/API (`config_src: cloudflare`), not on disk | always on |
-| `ntfy.service` | self-hosted ntfy 2.27.0 (`/etc/ntfy/server.yml`): loopback:2586, `auth-default-access: read-only`, user `publisher` has rw on both topics, `upstream-base-url: ntfy.sh` for iOS instant delivery. Auth DB `/var/lib/ntfy/user.db` | always on |
+| `ntfy.service` | self-hosted ntfy 2.27.0 (`/etc/ntfy/server.yml`): loopback:2586, `auth-default-access: read-only`, user `publisher` has rw on both topics, `upstream-base-url: ntfy.sh` for iOS instant delivery. Auth DB `/var/lib/ntfy/user.db`. Box-side publishers use `EWS_NTFY_SERVER=http://127.0.0.1:2586` (loopback survives a tunnel outage; subscribers reconnect and receive cached messages) | always on |
+| `apocalypse-ews-canary.timer` | `canary_delivery.js` — synthetic end-to-end proof through the **public** path: site health, RSS, and an ops-topic ntfy publish polled back as a subscriber would. Deliberately the opposite path from the watchdog (loopback), so each pages when the other's path dies. Failure leaves the unit `failed`, which the status verdict flags | weekly Mon 17:00 UTC |
 
 **Public site: <https://warning.watch>** (apoc.watch and earlywarning.watch
 301-redirect there). All three domains are on Xyra's Porkbun account with
@@ -94,33 +95,23 @@ ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-o
 | Browser push (VAPID) | keys generated in `.env` | production deploy (below) |
 | Paid signup (Stripe) | code ready | production deploy (below) |
 
-## Production deploy (Cloudflare Pages + D1 + maintenance worker)
+## Activating email/SMS delivery
 
-Everything generable is already in `.env` (VAPID keypair, `INTERNAL_ALERT_TOKEN`,
-`NOTIFICATION_HASH_SECRET`, `NOTIFICATION_ENCRYPTION_KEY`). The irreducible
-credentials — fill these in `.env`:
+Everything generable is already configured on the box (VAPID keypair,
+`INTERNAL_ALERT_TOKEN`, `NOTIFICATION_HASH_SECRET`,
+`NOTIFICATION_ENCRYPTION_KEY`, `EWS_PUBLIC_URL=https://warning.watch`).
+The irreducible credentials — add to `/etc/apocalypse-ews.env` when the
+provider accounts exist, then `systemctl restart apocalypse-ews.service`:
 
-1. `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID`
-2. `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` (Access service token for smoke)
-3. `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, `SENDGRID_WEBHOOK_PUBLIC_KEY`
-4. `TELNYX_API_KEY`, `TELNYX_PUBLIC_KEY`, `TELNYX_NUMBER`
-5. `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`
-6. `EWS_SMOKE_TEST_EMAIL`, `EWS_SMOKE_TEST_PHONE` (live end-to-end proof targets)
-7. `EWS_PUBLIC_URL` / `APP_BASE_URL` — **your** domain. `wrangler.toml` currently
-   carries the upstream reference deployment's domain (`ews.kylemcdonald.net`);
-   change before deploying.
+1. `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL` (email; `SENDGRID_WEBHOOK_PUBLIC_KEY`
+   for delivery-status callbacks)
+2. `TELNYX_API_KEY`, `TELNYX_PUBLIC_KEY`, `TELNYX_NUMBER` (SMS — deferred per
+   ROADMAP §3; A2P compliance is the cost, not the vendor)
 
-Then:
+On activation, run `sendPendingConfirmations` for subscribers who registered
+while delivery was dark, so their double-opt-in confirmations actually go out.
 
-```sh
-npm run check:deploy          # validates every var + formats
-npm run seed:production-env   # pushes secrets to Pages + worker
-npm run deploy:pages          # build, D1 migrations, deploy, worker cron
-npm run smoke:live            # Access-authed live smoke
-npm run smoke:pages-pipeline  # signup → alert → fanout, real providers
-```
-
-The refresh loop bridges alert events to production only when
+The refresh loop bridges alert events to an external webhook only when
 `EWS_ALERT_EVENTS_WEBHOOK_URL` is **explicitly** set; it no-ops otherwise
 (`missing_EWS_ALERT_EVENTS_WEBHOOK_URL`). It is never derived from
 `APP_BASE_URL`/`EWS_PUBLIC_URL` — display URLs once pointed the bridge at
@@ -128,12 +119,11 @@ the upstream reference site.
 
 ## Codebase map (for cold-start agents)
 
-- **`server/` + `scripts/` is the real implementation** — the Express server,
+- **`server/` + `scripts/` is the implementation** — the Express server,
   ingestion, detection, and all channel publishers. This is what runs.
-- **`functions/` + `workers/` is a PARALLEL implementation** for Cloudflare
-  Pages/D1 (signup, Stripe, SendGrid/Telnyx fanout). It duplicates large parts
-  of the logic (`functions/_lib/db.js` ~106KB). ROADMAP.md recommends retiring
-  it in favor of one Hetzner box; do not extend both sides.
+- The former `functions/` + `workers/` Cloudflare Pages/D1 parallel
+  implementation was **retired 2026-08-28** per ROADMAP §4 (recoverable from
+  git history if ever needed). There is exactly one implementation now.
 - `scripts/refresh_all_snapshots.js` is the pipeline entrypoint and the
   authoritative ordering of stages.
 - `detect_alert_events.js` writes `alert_events` rows (UNIQUE event_key,

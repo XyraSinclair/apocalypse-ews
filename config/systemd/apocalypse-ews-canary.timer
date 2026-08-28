@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly Apocalypse EWS delivery canary
+
+[Timer]
+OnCalendar=Mon *-*-* 17:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

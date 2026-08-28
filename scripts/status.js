@@ -72,6 +72,8 @@ function serviceStates() {
     systemdState('apocalypse-ews-backup.timer'),
     systemdState('cloudflared.service'),
     systemdState('ntfy.service'),
+    systemdState('apocalypse-ews-canary.timer'),
+    systemdState('apocalypse-ews-canary.service'),
   ];
 }
 

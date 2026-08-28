@@ -34,17 +34,14 @@
     "rss:update": "node scripts/update_rss_feed.js",
     "telegram:alert": "node scripts/send_telegram_alert.js",
     "verify:dashboard-urls": "node scripts/verify_dashboard_bundle.js",
-    "check:deploy": "node scripts/check_deploy_env.js",
-    "seed:production-env": "node scripts/seed_production_environment.js",
-    "deploy:pages": "node scripts/deploy_pages.js",
     "smoke:live": "node scripts/smoke_live_site.js",
     "smoke:alert-pipeline": "node scripts/smoke_alert_pipeline.js",
     "smoke:takeoff-ingest": "if [ -x .venv/bin/python ]; then .venv/bin/python scripts/smoke_takeoff_ingest.py; else python3 scripts/smoke_takeoff_ingest.py; fi",
-    "smoke:pages-pipeline": "node scripts/smoke_pages_pipeline.js",
     "webpush:keys": "node scripts/generate_web_push_keys.js",
     "status": "node scripts/status.js",
     "repair:gaps": "node scripts/repair_history_gaps.js",
-    "backup": "node scripts/backup_databases.js"
+    "backup": "node scripts/backup_databases.js",
+    "canary": "node scripts/canary_delivery.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
