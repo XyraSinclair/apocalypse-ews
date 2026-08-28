@@ -166,8 +166,10 @@ DNS on the existing domain or a new one; Cloudflare proxy in front optional
 > email/SMS (L1 ✅), signup rate limiting (L4 ✅), write-authed self-hosted
 > ntfy (spoof vector closed), tunnel serving with zero open inbound ports,
 > site onboarding copy (Get Alerts / How To Read / Methodology).
-> **Phase 2 exit: met** (box-only for weeks; restore drilled; bootstrap.sh
-> still unwritten — the one gap). **Phase 3: ntfy + RSS + web push live;
+> **Phase 2 exit: met** (box-only for weeks; restore drilled;
+> `deploy/bootstrap.sh` written 2026-08-28 from live box state, unit files
+> byte-verified against production — a fresh-box drill would need a new
+> Hetzner instance, i.e. new spend). **Phase 3: ntfy + RSS + web push live;
 > email needs a provider account (operator gate); Telegram needs one phone
 > step; weekly public-path canary live.**
 >
@@ -194,7 +196,7 @@ DNS on the existing domain or a new one; Cloudflare proxy in front optional
 > criticals/30d, now 2 watch-tier fires/30d, p99 z 3.04).
 > Open: 365-day backfill running (`scripts/run_yearly_backfill.sh`,
 > launched 2026-08-28 — deepens calibration + enables the Davos-week
-> replay exit criterion), CF-era → bootstrap.sh.
+> replay exit criterion).
 
 **Phase 0 — local operational.** ✅ 2026-07-03. Signal computes on live data,
 10-min loop + always-on server under launchd, RSS + owner push live, smoke

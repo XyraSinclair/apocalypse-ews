@@ -1,0 +1,7 @@
+base-url: "https://ntfy.warning.watch"
+listen-http: "127.0.0.1:2586"
+behind-proxy: true
+cache-file: "/var/lib/ntfy/cache.db"
+auth-file: "/var/lib/ntfy/user.db"
+auth-default-access: "read-only"
+upstream-base-url: "https://ntfy.sh"

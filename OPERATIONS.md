@@ -34,8 +34,13 @@ Continuation work is tracked as beads: `br ready` lists what is unblocked
 
 ## What runs on xyra-dev-hetzner (migrated 2026-08-27)
 
-Systemd units — canonical sources in `config/systemd/`, installed to
+Systemd units — canonical sources in `config/systemd/` (incl.
+`cloudflared.service`; ntfy config in `config/ntfy-server.yml`), installed to
 `/etc/systemd/system/`. Config in `/etc/apocalypse-ews.env` (not in git).
+**Fresh-box rebuild: `deploy/bootstrap.sh`** (run as root on Ubuntu 24.04;
+idempotent; installs packages/units from the canonical sources and prints
+TODOs for the two secrets it cannot invent — the env file and the tunnel
+token).
 
 | Unit | What | Cadence |
 |---|---|---|
