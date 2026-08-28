@@ -572,6 +572,48 @@ h3 {
   margin-top: 12px;
 }
 
+.channel-list {
+  display: grid;
+  gap: 12px;
+  max-width: 78ch;
+  margin-top: 12px;
+}
+
+.channel-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #667;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.channel-card h3 { margin: 0; }
+.channel-card p { margin-bottom: 0; }
+
+.channel-code code,
+.channel-card code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  word-break: break-all;
+}
+
+.channel-code {
+  padding: 8px 10px;
+  background: #f8fbff;
+  border: 1px dashed #667;
+}
+
+.level-ladder,
+.fire-steps {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 1.4rem;
+}
+
+.level-ladder li,
+.fire-steps li { margin: 0; }
+
 .faq-list article,
 .update-entry { display: grid; gap: 4px; }
 .faq-list p,

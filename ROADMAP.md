@@ -156,6 +156,23 @@ DNS on the existing domain or a new one; Cloudflare proxy in front optional
 
 ## 5. Phases with exit criteria
 
+> **State checkpoint 2026-08-28.** Live at <https://warning.watch> (apoc.watch,
+> earlywarning.watch redirect). Box: xyra-dev-hetzner, systemd chain
+> (refresh/imports/repair/watchdog/backup timers + server + cloudflared +
+> self-hosted ntfy), all watched by `status.js` → hourly ops-ntfy watchdog.
+> Done since the plan was written: 5-week ADSBx outage repaired (Referer
+> header), self-healing gap repair incl. interior holes, daily
+> integrity-checked `VACUUM INTO` backups + restore drill, double opt-in
+> email/SMS (L1 ✅), signup rate limiting (L4 ✅), write-authed self-hosted
+> ntfy (spoof vector closed), tunnel serving with zero open inbound ports,
+> site onboarding copy (Get Alerts / How To Read / Methodology).
+> **Phase 2 exit: met** (box-only for weeks; restore drilled; bootstrap.sh
+> still unwritten — the one gap). **Phase 3: ntfy + RSS + web push live;
+> email needs a provider account (operator gate); Telegram needs one phone
+> step; canary not built.** **Phase 1 (statistical hardening) is now the
+> highest-leverage open engineering.** Next in order: seasonal (dow × slot)
+> robust baselines → backtest harness → canary → calibration page.
+
 **Phase 0 — local operational.** ✅ 2026-07-03. Signal computes on live data,
 10-min loop + always-on server under launchd, RSS + owner push live, smoke
 suite green, baselines healing.

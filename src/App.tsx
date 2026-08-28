@@ -584,7 +584,7 @@ function DashboardPage() {
     <main className="app-shell">
       <div className="background-wallpaper" aria-hidden="true" />
       <p className="signup-teaser">
-        <a href="/signup">Sign up</a> for text message or email notifications. <a href="/event-signals">Review event signals</a>.
+        <a href="#get-alerts">Get alerts</a> — phone push, RSS, browser push, email, or text. <a href="/event-signals">Review event signals</a>.
       </p>
 
       {error ? <div className="status-banner status-banner-error"><strong>Refresh error:</strong> {error}</div> : null}
@@ -606,6 +606,8 @@ function DashboardPage() {
         <OperationsPanel alerts={alertEvents} takeoffs={takeoffEvents} error={operationsError} />
       </section>
 
+      <GetAlertsPanel />
+      <ReadingPanel />
       <AboutPanel selectedLabels={combined.selectedLabels} />
       <FaqPanel />
       <UpdatesPanel />
@@ -629,18 +631,115 @@ function HeroPanel() {
     <section className="panel hero-copy-panel">
       <h1>Apocalypse Early Warning System</h1>
       <p>
-        A local recreation of the public aircraft-anomaly dashboard. It watches selected aircraft cohorts and asks whether the
-        number currently airborne is unusual for the same time window in the historical archive.
+        A continuously running instrument at <strong>warning.watch</strong>. Every 30 minutes it measures how many business
+        jets, military aircraft, and untracked transponders are airborne worldwide, and asks one question: is this normal for
+        this hour, or is something statistically extraordinary happening in the sky?
       </p>
       <p>
-        The emergency level is a 1–5 signal: level 1 means ordinary traffic; level 5 means the selected cohort is far beyond its
-        calibrated historical envelope.
+        The premise is simple and old: people with the most information and the most resources move first. If they ever move
+        all at once, that movement is visible from public flight data before it is visible anywhere else.
       </p>
-      <p className="hero-credit">independent implementation from observed behavior</p>
+      <p>
+        It is calm by default. No baseline, no alert. Ordinary traffic, no alert. It speaks only when the measurement is
+        genuinely unusual — and every alert carries its numbers.
+      </p>
       <p className="hero-link-row">
-        <a href="https://ews.kylemcdonald.net/">Original EWS by Kyle McDonald</a> /{' '}
-        <a href="/rss.xml">RSS</a> / <a href="/event-signals">Event signals</a>
+        <a href="#get-alerts">Get alerts</a> / <a href="#how-to-read">How to read this</a> /{' '}
+        <a href="#methodology">Methodology</a> / <a href="/rss.xml">RSS</a> / <a href="/event-signals">Event signals</a>
       </p>
+    </section>
+  );
+}
+
+function GetAlertsPanel() {
+  return (
+    <section className="panel get-alerts-panel" id="get-alerts">
+      <h2>Get Alerts</h2>
+      <p className="panel-lede">
+        Independent channels that fail independently — subscribe to at least two. All of them are free.
+      </p>
+      <div className="channel-list">
+        <article className="channel-card">
+          <h3>1. Phone push via ntfy (recommended)</h3>
+          <p>
+            Install the free, open-source <a href="https://ntfy.sh/">ntfy</a> app (
+            <a href="https://apps.apple.com/us/app/ntfy/id1625396347">iOS</a> /{' '}
+            <a href="https://play.google.com/store/apps/details?id=io.heckel.ntfy">Android</a>), tap <em>+ Subscribe to
+            topic</em>, choose <em>Use another server</em>, and enter:
+          </p>
+          <p className="channel-code"><code>https://ntfy.warning.watch/apocalypse-ews-alerts</code></p>
+          <p>
+            No account, no phone number, no vendor between you and the signal. The channel is served from this system&apos;s
+            own infrastructure; publishing requires a private key, so nothing can spoof an alert onto it. Only elevated-and-above
+            events are pushed.
+          </p>
+        </article>
+        <article className="channel-card">
+          <h3>2. RSS</h3>
+          <p>
+            Point any feed reader at <a href="/rss.xml"><code>https://warning.watch/rss.xml</code></a>. The feed updates on
+            emergency-level changes and alert events, and works even if every push provider on earth is down.
+          </p>
+        </article>
+        <article className="channel-card">
+          <h3>3. Browser push</h3>
+          <p>
+            One tap on the <a href="/signup">signup page</a> — no email or phone required. Alerts arrive as system
+            notifications on this device.
+          </p>
+        </article>
+        <article className="channel-card">
+          <h3>4. Email &amp; text message</h3>
+          <p>
+            <a href="/signup">Register here</a>. Both channels are double opt-in: nothing is ever sent to an address or number
+            that has not clicked its own confirmation link. Contact details are encrypted at rest and used for alerts only.
+            Delivery providers are being activated — registrations are stored now and your confirmation arrives the moment
+            sending goes live.
+          </p>
+        </article>
+        <article className="channel-card">
+          <h3>System health — silence must be distinguishable from death</h3>
+          <p>
+            The worst failure of a warning system is dying quietly. This one watches itself hourly and publishes failures and
+            recoveries to a separate operations channel:{' '}
+            <code>https://ntfy.warning.watch/apocalypse-ews-ops</code>. The dashboard above always shows the timestamp of the
+            last ingested data slot — if it is more than a couple of hours old, treat the instrument as down, not the sky as
+            calm.
+          </p>
+        </article>
+      </div>
+    </section>
+  );
+}
+
+function ReadingPanel() {
+  return (
+    <section className="panel reading-panel" id="how-to-read">
+      <h2>How To Read This</h2>
+      <div className="about-copy">
+        <p>
+          The emergency level is a 1–5 measurement of deviation from a rolling historical baseline (same time-of-day window,
+          trailing seven days), expressed through sigma thresholds:
+        </p>
+        <ul className="level-ladder">
+          <li><strong>1 — Ordinary.</strong> Traffic within its normal envelope. This is the reading almost all of the time.</li>
+          <li><strong>2 — Noted.</strong> Mildly above baseline; well within historical variation.</li>
+          <li><strong>3 — Elevated.</strong> Meaningfully above baseline. Worth a glance at which cohort is driving it.</li>
+          <li><strong>4 — High.</strong> Statistically unusual, or a clustered takeoff burst fired. Check corroboration.</li>
+          <li><strong>5 — Extreme.</strong> Beyond the calibrated historical envelope of the selected cohort.</li>
+        </ul>
+        <p><strong>If you receive a high or extreme alert:</strong></p>
+        <ol className="fire-steps">
+          <li>Open the dashboard. Check the last-update timestamp first — a stale feed is a data problem, not an event.</li>
+          <li>Look for corroboration: is more than one cohort elevated? Is the deviation sustained across multiple half-hour slots, or one hot sample?</li>
+          <li>Cross-check the world: major wire services, official emergency channels for your country, other independent monitors.</li>
+          <li>Remember what this is: a measurement of unusual aircraft activity, not knowledge of anyone&apos;s motive. Elite aviation also surges for summits, funerals, sporting finals, and weather.</li>
+        </ol>
+        <p>
+          The system is deliberately conservative: a single anomalous reading proves little, and the copy on every alert says
+          so. Sustained, corroborated, multi-cohort extremes are the signal worth your attention.
+        </p>
+      </div>
     </section>
   );
 }
@@ -1014,20 +1113,30 @@ function OperationsPanel({ alerts, takeoffs, error }: { alerts: AlertEvent[]; ta
 function AboutPanel({ selectedLabels }: { selectedLabels: string[] }) {
   return (
     <section className="panel about-panel">
-      <h2>How This Works</h2>
+      <h2 id="methodology">Methodology</h2>
       <div className="about-copy">
         <p>
-          This app loads the public dashboard snapshots for {selectedLabels.join(' + ')} and recomputes the same client-side
-          view: current concurrent aircraft, expected baseline, anomaly sigma, emergency level, archive chart, live map, and model
-          counts.
+          Every 30 minutes the pipeline ingests global ADS-B Exchange heatmap slots — positions broadcast by aircraft
+          transponders and collected by a worldwide network of volunteer receivers — and counts concurrent airborne aircraft in
+          three independent cohorts: <strong>business jets</strong> (public airframe metadata keyed by ICAO hex),{' '}
+          <strong>military aircraft</strong>, and <strong>non-ICAO untracked transponders</strong> (traffic that avoids
+          standard registration). Currently showing: {selectedLabels.join(' + ')}.
         </p>
         <p>
-          Data comes from public ADS-B Exchange heatmap-derived snapshots. The archive is packed as a half-hour time series; this
-          implementation decodes it in the browser and intersects timestamps when multiple cohorts are selected.
+          Each cohort&apos;s current count is compared against a rolling baseline for the same time-of-day window across the
+          trailing week; the deviation in sigma sets the emergency level. Takeoff clustering is scored separately against a
+          28-day rate history. No baseline means no alert — the system fails quiet, not noisy.
         </p>
         <p>
-          The seat estimate is a maximum-capacity approximation from model labels. It is not a manifest and does not identify who
-          is onboard.
+          The pipeline runs on independent, self-operated infrastructure: one server, systemd timers, SQLite archives with
+          daily integrity-checked backups, an hourly self-watchdog, and delivery channels that fail independently. The seat
+          estimate is a maximum-capacity approximation from model labels — it is not a manifest and identifies no one.
+        </p>
+        <p>
+          The concept and reference implementation are{' '}
+          <a href="https://ews.kylemcdonald.net/">Kyle McDonald&apos;s EWS</a>; this is an independent implementation and
+          deployment, open source at{' '}
+          <a href="https://github.com/XyraSinclair/apocalypse-ews">github.com/XyraSinclair/apocalypse-ews</a>.
         </p>
       </div>
     </section>
@@ -1051,6 +1160,28 @@ function FaqPanel() {
           <h3>Does level 5 prove an apocalypse is likely?</h3>
           <p>No. It means the selected public flight signal is historically extreme. It is an anomaly monitor, not proof of motive.</p>
         </article>
+        <article>
+          <h3>If nothing has fired, does that mean everything is fine?</h3>
+          <p>
+            It means this instrument measured nothing unusual — provided the instrument itself is alive. Check the last-update
+            timestamp on the dashboard, or subscribe to the operations channel, which announces failures and recoveries. A
+            silent broken monitor is the failure mode this system is engineered hardest against.
+          </p>
+        </article>
+        <article>
+          <h3>What happens to my email or phone number?</h3>
+          <p>
+            Encrypted at rest, used only to deliver alerts and your own management link, never shared or sold. Both channels
+            are double opt-in, and every message carries an unsubscribe path. You can delete your subscription at any time.
+          </p>
+        </article>
+        <article>
+          <h3>Who runs this?</h3>
+          <p>
+            An independent operator, on self-owned infrastructure, with the full pipeline open source. There is no company, no
+            ad model, and nothing for sale — the instrument exists because it should exist.
+          </p>
+        </article>
       </div>
     </section>
   );
@@ -1062,8 +1193,16 @@ function UpdatesPanel() {
       <h2>Updates</h2>
       <div className="updates-copy">
         <article className="update-entry">
-          <h3>Clone notes</h3>
-          <p>Independent React/Vite implementation. Public JSON snapshots are loaded directly; no source code or assets from the reference repository are vendored.</p>
+          <h3>2026-08-28 — warning.watch is live</h3>
+          <p>
+            Public launch on owned infrastructure: Cloudflare-tunneled serving (no open inbound ports), self-hosted
+            write-authenticated ntfy push, double opt-in email/SMS registration, daily integrity-checked database backups, and
+            an hourly self-watchdog publishing to the operations channel. apoc.watch and earlywarning.watch redirect here.
+          </p>
+        </article>
+        <article className="update-entry">
+          <h3>Implementation notes</h3>
+          <p>Independent React/Vite implementation of the reference EWS concept; no source code or assets from the reference repository are vendored.</p>
         </article>
       </div>
     </section>
@@ -1171,7 +1310,15 @@ function SignupPage() {
         <section className="panel hero-copy-panel signup-copy-panel">
           <h1>Apocalypse Notifications</h1>
           <p>Get notified when tracked aircraft become airborne or statistical anomaly thresholds trip.</p>
-          <p>Contact info is used only for operational alerts, subscription updates, and unsubscribe/management links.</p>
+          <p>
+            Email and SMS are double opt-in: after signing up you must click the confirmation link sent to that address or
+            number before any alert is ever delivered to it. Contact info is encrypted at rest and used only for alerts and
+            your management link.
+          </p>
+          <p>
+            Prefer no personal info at all? Use browser push below, or subscribe to{' '}
+            <code>https://ntfy.warning.watch/apocalypse-ews-alerts</code> in the free ntfy app.
+          </p>
           <p className="hero-link-row"><a href="/">Back to Dashboard</a></p>
         </section>
         <section className="panel signup-panel">
