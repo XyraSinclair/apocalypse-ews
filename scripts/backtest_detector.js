@@ -173,8 +173,8 @@ function takeoffReplay(db, args) {
             AND t.observed_at = m.sampled_at
         ) AS takeoffCount,
         ${db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingest_slots'").get()
-          ? '(SELECT s.source FROM ingest_slots s WHERE s.sampled_at = m.sampled_at)'
-          : 'NULL'} AS slotSource
+          ? '(SELECT s.live_ingested FROM ingest_slots s WHERE s.sampled_at = m.sampled_at)'
+          : 'NULL'} AS liveIngested
       FROM concurrent_metrics m
       WHERE m.sampled_at >= datetime('now', ?)
       ORDER BY m.sampled_at ASC
@@ -199,6 +199,11 @@ function takeoffReplay(db, args) {
   let lowerIndex = 0;
   let upperIndex = 0;
   for (const slot of slots) {
+    // Live detection suppresses takeoff scoring on non-live slots
+    // (stale_live); the replay mirrors that.
+    if (Number(slot.liveIngested) !== 1) {
+      continue;
+    }
     const window = getTakeoffWindow(slot.sampledAt, args.takeoffWindowMinutes);
     const windowStartMs = Date.parse(window.windowStart);
     while (upperIndex < rows.length && rows[upperIndex].sampledAtMs < windowStartMs) {
@@ -214,7 +219,7 @@ function takeoffReplay(db, args) {
     readySlots += 1;
     // Live-process events sit exactly on slot timestamps, so the window
     // count ending at this slot is the slot's own live count.
-    const count = slot.slotSource && slot.slotSource !== args.takeoffLiveSource ? 0 : Number(slot.takeoffCount || 0);
+    const count = Number(slot.takeoffCount || 0);
     const z = (count - stats.expectedTakeoffCount) / stats.effectiveTakeoffStdDev;
     zValues.push(z);
     if (count >= args.takeoffRateMinCount && z >= args.takeoffRateZScore) {

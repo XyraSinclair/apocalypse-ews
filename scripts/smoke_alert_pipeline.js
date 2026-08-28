@@ -260,6 +260,12 @@ async function assertTakeoffRateDetection() {
     }
   }
   insertMetric.run(observedAt, 10);
+  // Mark every fixture slot as live-ingested: the takeoff-rate baseline only
+  // samples slots where the live snapshot process ran.
+  db.prepare(`
+    INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne, live_ingested)
+    SELECT sampled_at, 'adsbx_heatmap', 10000, concurrent_count, 1 FROM concurrent_metrics
+  `).run();
   for (let index = 0; index < 5; index += 1) {
     insertTakeoff.run(
       'global_business_jet',
@@ -358,6 +364,12 @@ async function assertAlertEventDetectionPreservesDispatchState() {
     insertMetric.run(sampledAt, 10);
   }
   insertMetric.run(observedAt, 10);
+  // Mark every fixture slot as live-ingested: the takeoff-rate baseline only
+  // samples slots where the live snapshot process ran.
+  db.prepare(`
+    INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne, live_ingested)
+    SELECT sampled_at, 'adsbx_heatmap', 10000, concurrent_count, 1 FROM concurrent_metrics
+  `).run();
   for (let index = 0; index < 5; index += 1) {
     insertTakeoff.run(
       'global_business_jet',

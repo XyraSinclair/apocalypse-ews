@@ -293,10 +293,15 @@ def ensure_ingest_slots_table(connection):
           source TEXT NOT NULL,
           total_aircraft INTEGER,
           cohort_airborne INTEGER,
+          live_ingested INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    try:
+        connection.execute("ALTER TABLE ingest_slots ADD COLUMN live_ingested INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already present
 
 
 def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=False):
@@ -481,17 +486,18 @@ def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=
         (sampled_at_iso, len(airborne_hexes)),
     )
 
-    # Slot provenance + L0 denominator: record that this slot came from the
-    # live snapshot process and how many aircraft the global feed carried.
+    # Slot provenance + L0 denominator: record that the live snapshot process
+    # ran for this slot and how many aircraft the global feed carried.
     ensure_ingest_slots_table(connection)
     connection.execute(
         """
-        INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne, live_ingested)
+        VALUES (?, ?, ?, ?, 1)
         ON CONFLICT(sampled_at) DO UPDATE SET
           source = excluded.source,
           total_aircraft = excluded.total_aircraft,
-          cohort_airborne = excluded.cohort_airborne
+          cohort_airborne = excluded.cohort_airborne,
+          live_ingested = 1
         """,
         (sampled_at_iso, SOURCE, len(latest_slice.telemetry), len(airborne_hexes)),
     )

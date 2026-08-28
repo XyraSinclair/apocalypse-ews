@@ -322,8 +322,8 @@ function hasIngestSlotsTable(db) {
 function getTakeoffRateStats(db, cohort, observedAt, options) {
   const window = getTakeoffWindow(observedAt, options.takeoffWindowMinutes);
   const lookbackStart = isoOffset(window.windowStart, -Math.max(1, options.takeoffRateLookbackDays) * DAY_MS);
-  const slotSourceSelect = hasIngestSlotsTable(db)
-    ? '(SELECT s.source FROM ingest_slots s WHERE s.sampled_at = m.sampled_at)'
+  const liveIngestedSelect = hasIngestSlotsTable(db)
+    ? '(SELECT s.live_ingested FROM ingest_slots s WHERE s.sampled_at = m.sampled_at)'
     : 'NULL';
   const rows = db
     .prepare(`
@@ -336,7 +336,7 @@ function getTakeoffRateStats(db, cohort, observedAt, options) {
             AND t.source = ?
             AND t.observed_at = m.sampled_at
         ) AS takeoffCount,
-        ${slotSourceSelect} AS slotSource
+        ${liveIngestedSelect} AS liveIngested
       FROM concurrent_metrics m
       WHERE CAST(strftime('%s', m.sampled_at) AS INTEGER) >= CAST(strftime('%s', ?) AS INTEGER)
         AND CAST(strftime('%s', m.sampled_at) AS INTEGER) < CAST(strftime('%s', ?) AS INTEGER)
@@ -352,15 +352,17 @@ function getTakeoffRateStats(db, cohort, observedAt, options) {
 }
 
 // Pure baseline computation over prefetched rows
-// [{ sampledAt, takeoffCount, slotSource }] — shared by live detection and
+// [{ sampledAt, takeoffCount, liveIngested }] — shared by live detection and
 // the backtest harness (which fetches the whole replay range once instead of
 // re-querying per slot).
 function buildTakeoffBaseline(rows, window, options) {
-  // Slots known to come from trace backfill carry a structural zero for the
-  // live process — excluding them keeps repaired outages from dragging the
-  // baseline down. Slots with no provenance row (pre-provenance history) are
-  // kept; robust group stats tolerate the residual contamination.
-  const usableRows = rows.filter((row) => !row.slotSource || row.slotSource === options.takeoffLiveSource);
+  // Only slots where the live snapshot process actually ran are valid
+  // samples of the live takeoff process. Anything else — trace-backfilled
+  // outages, pre-provenance laptop-era history — carries a structural zero
+  // that dragged group medians to 0 and made the first backtest read normal
+  // afternoons as 8-17 sigma. Strict gating means the model is simply not
+  // ready until enough live-marked slots exist (calm-by-default).
+  const usableRows = rows.filter((row) => Number(row.liveIngested) === 1);
 
   const bucketCounts = new Map();
   for (const row of usableRows) {
@@ -432,7 +434,7 @@ function buildTakeoffBaseline(rows, window, options) {
     baselineDayClass: windowDayClass,
     baselineSlotOfDay: windowSlotOfDay,
     baselineGroupSampleCount: baselineStats.sampleCount,
-    excludedRepairedSlots: rows.length - usableRows.length,
+    nonLiveSlotsExcluded: rows.length - usableRows.length,
   };
 }
 
@@ -458,7 +460,7 @@ function getDataQuality(db, observedAt, options) {
   const slotOf = (value) => Math.floor((parseIso(value, 'sampledAt').getTime() % DAY_MS) / windowMs);
   const current = db
     .prepare(`
-      SELECT source, total_aircraft AS totalAircraft
+      SELECT source, total_aircraft AS totalAircraft, live_ingested AS liveIngested
       FROM ingest_slots
       WHERE CAST(strftime('%s', sampled_at) AS INTEGER) = CAST(strftime('%s', ?) AS INTEGER)
     `)
@@ -466,7 +468,7 @@ function getDataQuality(db, observedAt, options) {
   if (!current) {
     return { status: 'unknown', liveSlot: false };
   }
-  if (current.source !== options.takeoffLiveSource) {
+  if (Number(current.liveIngested) !== 1) {
     return { status: 'stale_live', liveSlot: false, slotSource: current.source };
   }
 
@@ -475,12 +477,12 @@ function getDataQuality(db, observedAt, options) {
     .prepare(`
       SELECT sampled_at AS sampledAt, total_aircraft AS totalAircraft
       FROM ingest_slots
-      WHERE source = ?
+      WHERE live_ingested = 1
         AND total_aircraft IS NOT NULL
         AND CAST(strftime('%s', sampled_at) AS INTEGER) >= CAST(strftime('%s', ?) AS INTEGER)
         AND CAST(strftime('%s', sampled_at) AS INTEGER) < CAST(strftime('%s', ?) AS INTEGER)
     `)
-    .all(options.takeoffLiveSource, lookbackStart, observedAt);
+    .all(lookbackStart, observedAt);
   const currentSlot = slotOf(observedAt);
   const reference = referenceRows
     .filter((row) => slotOf(row.sampledAt) === currentSlot)

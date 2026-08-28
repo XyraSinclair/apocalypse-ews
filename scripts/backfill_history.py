@@ -221,10 +221,15 @@ def ensure_ingest_slots_table(connection):
           source TEXT NOT NULL,
           total_aircraft INTEGER,
           cohort_airborne INTEGER,
+          live_ingested INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    try:
+        connection.execute("ALTER TABLE ingest_slots ADD COLUMN live_ingested INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already present
 
 
 def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_download, rate_limit_seconds, keep_cache):
@@ -267,17 +272,11 @@ def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_downlo
         (range_start_iso, range_end_iso),
     )
     # This pass rewrites concurrent_metrics for the whole range from trace
-    # data, so slot provenance for the range becomes adsbx_history (rows are
-    # re-inserted below for the slots that actually get data).
+    # data. Slot rows are upserted below with source adsbx_history, but
+    # live_ingested is deliberately preserved: repair rewriting a count does
+    # not un-happen the live snapshot pass, and the takeoff-rate baseline
+    # keys off live_ingested.
     ensure_ingest_slots_table(connection)
-    connection.execute(
-        """
-        DELETE FROM ingest_slots
-        WHERE sampled_at >= ?
-          AND sampled_at < ?
-        """,
-        (range_start_iso, range_end_iso),
-    )
     # Commit the range DELETEs immediately: the download/parse phase below can
     # run for hours, and holding the write transaction open across it starves
     # every other consumer of the database (live pipeline, server). The
@@ -423,8 +422,8 @@ def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_downlo
         )
         connection.executemany(
             """
-            INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne)
-            VALUES (:sampled_at, 'adsbx_history', NULL, :concurrent_count)
+            INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne, live_ingested)
+            VALUES (:sampled_at, 'adsbx_history', NULL, :concurrent_count, 0)
             ON CONFLICT(sampled_at) DO UPDATE SET
               source = excluded.source,
               total_aircraft = excluded.total_aircraft,
