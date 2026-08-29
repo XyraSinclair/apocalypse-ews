@@ -197,6 +197,20 @@ DNS on the existing domain or a new one; Cloudflare proxy in front optional
 > Open: 365-day backfill running (`scripts/run_yearly_backfill.sh`,
 > launched 2026-08-28 — deepens calibration + enables the Davos-week
 > replay exit criterion).
+>
+> **Instrument bounds 2026-08-29.** Every alarm limit now has a written
+> basis (OPERATIONS.md "Instrument bounds") and continuous enforcement:
+> status.js accounts for every expected slot (live/backfilled/missing,
+> 98 % completeness bound, 75-min live-age bound, 42/48 live-coverage
+> bound), the watchdog runs every 10 min (infra failure pages in ~85 min
+> worst case, was ~3 h), and a nightly selftest timer replays the backtest
+> with `--assert` so detector drift pages within a day. First run of the
+> bounds caught three real defects (a 'T'-vs-space SQL window bug, the
+> untracked cohort's unwired live provenance, and — via the deepening
+> backfill — CUSUM burning 9 false criticals on unlearned first-year
+> holiday travel waves, now gated by a self-expiring calendar freeze).
+> Both cohorts pass all bounds; concurrent threshold self-calibrated to
+> 11.1σ over 270 days with exactly one level-5 day (Dec 27).
 
 **Phase 0 — local operational.** ✅ 2026-07-03. Signal computes on live data,
 10-min loop + always-on server under launchd, RSS + owner push live, smoke
