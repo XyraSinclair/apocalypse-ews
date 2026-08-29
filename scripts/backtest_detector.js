@@ -61,6 +61,7 @@ function parseArgs(argv) {
     else if (value === '--takeoff-days') args.takeoffDays = Number(argv[++index]);
     else if (value === '--inject-exodus') args.injectExodus = true;
     else if (value === '--inject-factor') args.injectFactor = Number(argv[++index]);
+    else if (value === '--assert') args.assert = true;
     else throw new Error(`Unknown argument: ${value}`);
   }
   if (!args.db || !args.cohort) {
@@ -110,11 +111,15 @@ function concurrentReplay(context) {
       expected: Math.round(record.expectedConcurrentCount),
     }))
     .sort((left, right) => right.sigmaShift - left.sigmaShift);
+  const dayPeakLevels = Array.from(dailyPeaks.values()).map((record) => record.emergencyLevel);
   return {
     scoredSlots: ready.length,
+    scoredDays: dailyPeaks.size,
     alarmSigmaThreshold: context.alarmSigmaThreshold,
     emergencyLevelFrequency: tally(ready.map((record) => record.emergencyLevel)),
     alertLevelFrequency: tally(ready.map((record) => record.alertLevel)),
+    level5Days: dayPeakLevels.filter((level) => level >= 5).length,
+    level4PlusDays: dayPeakLevels.filter((level) => level >= 4).length,
     hottestDays: peaks.slice(0, 10),
   };
 }
@@ -282,6 +287,53 @@ function injectExodus(rows, args) {
   };
 }
 
+// The instrument's alarm limits, made executable (bounds documented with
+// rationale in OPERATIONS.md "Instrument bounds"). Rates are normalized to
+// the replayed span so the same limits hold as history deepens. Any
+// violation exits non-zero, which the nightly selftest timer surfaces
+// through status.js -> ops watchdog: if data drift or a code change pushes
+// the detector out of spec, the box pages a human within a day.
+function assertBounds(report, args) {
+  const cusumDays = report.cusum.scoredSlots / 48;
+  const concurrentDays = report.concurrent.scoredDays || 1;
+  const cusumCriticals = report.cusum.crossings.filter((c) => c.severity === 'critical').length;
+  const bounds = [
+    {
+      name: 'injected 3x exodus fires critical within 60 min',
+      ok: !args.injectExodus || report.injectedExodus.criticalWithin60Min === true,
+    },
+    {
+      name: 'takeoff replay: zero critical fires on real history',
+      ok: !(report.takeoffRate.severityFrequency.critical > 0),
+    },
+    {
+      name: `takeoff replay: fired ${report.takeoffRate.firedCount} <= 0.2/day noise budget`,
+      ok: report.takeoffRate.firedCount <= Math.ceil(args.takeoffDays * 0.2),
+    },
+    {
+      name: `takeoff replay: ${report.takeoffRate.readySlots} scoreable slots >= 336 (instrument warm)`,
+      ok: report.takeoffRate.readySlots >= 336,
+    },
+    {
+      name: `cusum: ${report.cusum.crossingCount} crossings <= 1.5/30d`,
+      ok: report.cusum.crossingCount <= Math.ceil(cusumDays / 20),
+    },
+    {
+      name: `cusum: ${cusumCriticals} critical crossings <= 0.5/30d`,
+      ok: cusumCriticals <= Math.ceil(cusumDays / 60),
+    },
+    {
+      name: `concurrent: ${report.concurrent.level5Days} level-5 days <= 1/30d`,
+      ok: report.concurrent.level5Days <= Math.ceil(concurrentDays / 30),
+    },
+    {
+      name: `concurrent: ${report.concurrent.level4PlusDays} level>=4 days <= 2/30d`,
+      ok: report.concurrent.level4PlusDays <= Math.ceil(concurrentDays / 15),
+    },
+  ];
+  return { passed: bounds.every((bound) => bound.ok), bounds };
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const db = new Database(path.resolve(args.db), { readonly: true, fileMustExist: true });
@@ -301,7 +353,14 @@ function main() {
       takeoffRate: takeoffReplay(db, args),
       injectedExodus: args.injectExodus ? injectExodus(rows, args) : null,
     };
+    if (args.assert) {
+      report.assert = assertBounds(report, args);
+      report.ok = report.assert.passed;
+    }
     console.log(JSON.stringify(report, null, 2));
+    if (args.assert && !report.assert.passed) {
+      process.exit(2);
+    }
   } finally {
     db.close();
   }

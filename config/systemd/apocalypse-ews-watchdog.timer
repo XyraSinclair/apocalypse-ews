@@ -1,8 +1,8 @@
 [Unit]
-Description=Run the Apocalypse EWS operations watchdog hourly
+Description=Run the Apocalypse EWS operations watchdog every 10 minutes
 
 [Timer]
-OnCalendar=*-*-* *:20:00
+OnCalendar=*-*-* *:00/10:00
 Persistent=true
 Unit=apocalypse-ews-watchdog.service
 

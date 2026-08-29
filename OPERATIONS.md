@@ -115,7 +115,39 @@ ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-o
 - `npm run backtest -- --db data/ews-main.sqlite --cohort global_business_jet
   --inject-exodus` replays history through the production code paths:
   frequency tables for every layer plus the 3×-exodus injection acceptance
-  test (must reach level 5 within 60 minutes).
+  test (must reach level 5 within 60 minutes). Add `--assert` to enforce the
+  instrument bounds below (non-zero exit on violation) — this is what the
+  nightly selftest timer runs.
+
+## Instrument bounds
+
+Every alarm limit has a written basis and a place where it is enforced —
+continuously, not once at commissioning. Sensitivity bounds (does a real
+emergency fire?) and specificity bounds (does quiet data stay quiet?) are
+asserted together so a change that buys one by selling the other fails
+loudly.
+
+| Bound | Value | Basis | Enforced by |
+|---|---|---|---|
+| Data age (any row) | ≤ 75 min | 30-min slot cadence + :05/:35 refresh ⇒ healthy age ≤ ~40 min; 75 = one fully missed cycle + margin | `status.js` → watchdog (10-min cadence) |
+| Live-ingestion age | ≤ 75 min | same cadence; distinct from row age because repair heals rows without the live instrument running | `status.js` → watchdog |
+| Live slots, trailing 24 h | ≥ 42/48 | live path should hit every slot; 6 misses/day means it is skipping | `status.js` → watchdog |
+| Slot completeness, 30 d | ≥ 98 % | every expected slot is live, backfilled, or accounted missing | `status.js` → watchdog |
+| 3× exodus → level 5 | ≤ 60 min | the reason the system exists; replayed nightly by injection | `backtest --assert` (selftest timer, 03:40 UTC) |
+| Takeoff false criticals | 0 in replay | critical is a paging severity; history contains no exodus | `backtest --assert` |
+| Takeoff fires (all tiers) | ≤ 0.2/day | watch-tier noise budget | `backtest --assert` |
+| CUSUM crossings | ≤ 1.5/30 d (critical ≤ 0.5/30 d) | sustained-shift pages must stay rare on real history | `backtest --assert` |
+| Concurrent level-5 days | ≤ 1/30 d (level ≥ 4 ≤ 2/30 d) | threshold self-calibrates to 2nd-highest daily peak ⇒ ~1 alarm/yr as history deepens | `backtest --assert` |
+| Detector warm | ≥ 336 scoreable slots | below a week of live baseline the takeoff channel cannot score | `backtest --assert` |
+
+**Latency budget, event → page (worst case):** event occurs just after a
+slot opens (+30 min to slot close) → refresh ingests and scores at :05/:35
+(+5–35 min) → alert event + ntfy dispatch in the same pass (~0) ⇒ **≤ ~65
+min for a statistical page**. Infrastructure failure → page: live-age bound
+75 min + watchdog cadence 10 min ⇒ **≤ ~85 min**, previously up to ~3 h with
+the 2 h staleness bound and hourly watchdog. The 30-min slot cadence is the
+floor of the whole budget; halving it requires a live (non-archive) ADSBx
+feed, which is a paid product — an operator decision.
 
 ## Subscription channels
 

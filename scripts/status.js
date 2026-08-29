@@ -32,7 +32,45 @@ function dbReport(dbPath, label, freshnessTable) {
       `SELECT COUNT(DISTINCT sampled_at) AS c FROM ${freshnessTable} WHERE sampled_at >= datetime('now', '-30 days')`
     ).get()?.c, 0);
     const baselineReady = sampleCount7d >= 7 * 48 * 0.95; // tolerate a few missed slots
-    return { label, latestSample: latest, staleHours, sampleCount7d, sampleCount30d, baselineReady };
+
+    // Data accountability: every expected 30-min slot is live, backfilled,
+    // or missing — and the live instrument's age has its own bound,
+    // distinct from row freshness (repair can heal rows without the live
+    // ingester running).
+    const hasProvenance = Boolean(safe(() =>
+      db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingest_slots'").get()
+    ));
+    let provenance = null;
+    if (hasProvenance) {
+      const latestLive = safe(() =>
+        db.prepare('SELECT MAX(sampled_at) AS v FROM ingest_slots WHERE live_ingested = 1').get()?.v
+      );
+      const latestLiveMs = latestLive ? Date.parse(latestLive) : null;
+      const liveAgeMinutes = latestLiveMs ? Math.round((Date.now() - latestLiveMs) / 60000) : null;
+      const liveSlots24h = safe(() => db.prepare(
+        "SELECT COUNT(*) AS c FROM ingest_slots WHERE live_ingested = 1 AND sampled_at >= datetime('now', '-1 day')"
+      ).get()?.c, 0);
+      const firstRow = safe(() => db.prepare(`SELECT MIN(sampled_at) AS v FROM ${freshnessTable}`).get()?.v);
+      const windowStartMs = Math.max(
+        firstRow ? Date.parse(firstRow) : Date.now(),
+        Date.now() - 30 * 24 * 3600000,
+      );
+      const expectedSlots30d = latestMs && latestMs > windowStartMs
+        ? Math.floor((latestMs - windowStartMs) / (30 * 60000)) + 1
+        : 0;
+      const missingSlots30d = Math.max(0, expectedSlots30d - sampleCount30d);
+      provenance = {
+        latestLiveSample: latestLive,
+        liveAgeMinutes,
+        liveSlots24h,
+        expectedSlots30d,
+        missingSlots30d,
+        completenessPct30d: expectedSlots30d
+          ? +((sampleCount30d / expectedSlots30d) * 100).toFixed(2)
+          : null,
+      };
+    }
+    return { label, latestSample: latest, staleHours, sampleCount7d, sampleCount30d, baselineReady, provenance };
   } finally {
     db.close();
   }
@@ -86,6 +124,8 @@ function serviceStates() {
     systemdState('ntfy.service'),
     systemdState('apocalypse-ews-canary.timer'),
     systemdState('apocalypse-ews-canary.service'),
+    systemdState('apocalypse-ews-selftest.timer'),
+    systemdState('apocalypse-ews-selftest.service'),
   ];
 }
 
@@ -136,10 +176,32 @@ const report = {
   verdict: null,
 };
 
+// Instrument bounds (rationale table in OPERATIONS.md "Instrument bounds").
+// Slot cadence 30 min + refresh at :05/:35 means healthy data age tops out
+// near 40 min; 75 min = one full missed refresh cycle plus margin.
+const MAX_DATA_AGE_HOURS = 1.25;
+const MAX_LIVE_AGE_MINUTES = 75;
+const MIN_LIVE_SLOTS_24H = 42; // 48 expected; tolerate 6 missed live slots/day
+const MIN_COMPLETENESS_PCT_30D = 98;
+
 const problems = [];
 for (const cohort of report.cohorts) {
-  if (cohort.missing) problems.push(`${cohort.label}: database missing`);
-  else if (cohort.staleHours === null || cohort.staleHours > 2) problems.push(`${cohort.label}: history stale (${cohort.staleHours}h) — run npm run repair:gaps`);
+  if (cohort.missing) { problems.push(`${cohort.label}: database missing`); continue; }
+  if (cohort.staleHours === null || cohort.staleHours > MAX_DATA_AGE_HOURS) {
+    problems.push(`${cohort.label}: history stale (${cohort.staleHours}h > ${MAX_DATA_AGE_HOURS}h bound) — run npm run repair:gaps`);
+  }
+  const provenance = cohort.provenance;
+  if (provenance) {
+    if (provenance.liveAgeMinutes === null || provenance.liveAgeMinutes > MAX_LIVE_AGE_MINUTES) {
+      problems.push(`${cohort.label}: live ingestion stale (${provenance.liveAgeMinutes}m > ${MAX_LIVE_AGE_MINUTES}m bound) — check apocalypse-ews-refresh.timer`);
+    }
+    if (provenance.liveSlots24h < MIN_LIVE_SLOTS_24H) {
+      problems.push(`${cohort.label}: only ${provenance.liveSlots24h}/48 live slots in 24h (bound ${MIN_LIVE_SLOTS_24H}) — live ingestion is skipping slots`);
+    }
+    if (provenance.completenessPct30d !== null && provenance.completenessPct30d < MIN_COMPLETENESS_PCT_30D) {
+      problems.push(`${cohort.label}: 30d slot completeness ${provenance.completenessPct30d}% < ${MIN_COMPLETENESS_PCT_30D}% (${provenance.missingSlots30d} slots missing) — run npm run repair:gaps`);
+    }
+  }
 }
 for (const service of report.services) {
   if (!service.loaded) problems.push(`${service.agent}: not loaded — see OPERATIONS.md`);
