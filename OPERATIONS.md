@@ -104,7 +104,13 @@ ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-o
   on 66 days of box data: fires high on exactly the two hottest real
   sustained days, never critical on history (peak S 16.1); a 3× exodus
   accumulates S≈13 in the first hour. State in `meta` key
-  `cusum_state:<cohort>`.
+  `cusum_state:<cohort>`. **First-year calendar gate:** inside a US-holiday
+  window the calendar model has not yet learned (zero prior-year samples),
+  CUSUM freezes — the year-one replay showed Thanksgiving/Christmas travel
+  waves burning ~9 false criticals as genuine week-scale sustained shifts.
+  The instantaneous and takeoff channels stay armed through the window,
+  and the gate self-expires once a prior year's holiday samples teach the
+  calendar ratio.
 - L0 data-quality gate: the live ingester records the global feed total per
   slot in `ingest_slots`; if the current slot carries under
   `EWS_DATA_QUALITY_MIN_RATIO` (0.6) × the 14-day same-slot median, all

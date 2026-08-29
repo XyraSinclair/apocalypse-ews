@@ -523,6 +523,20 @@ function cusumStep(previousS, sigmaShift, k) {
   return Math.max(0, finiteNumber(previousS) + clampedShift - k);
 }
 
+// First-year calendar gate: inside a US-holiday window the calendar model
+// has not yet learned (zero prior samples, effective weight 0), CUSUM
+// freezes — holiday travel waves are genuine week-scale sustained shifts
+// (Thanksgiving 2025 replayed as sigma 3-5 for days, Christmas sigma 7-9)
+// that would burn ~9 false criticals in year one. The instantaneous
+// channel, whose threshold self-calibrates over the year's own peaks, and
+// the takeoff channel both stay fully armed through the window. The gate
+// self-expires: once a prior year's holiday samples exist, the calendar
+// ratio explains the wave, effective weight rises, and CUSUM runs through
+// holidays normally.
+function isUnlearnedHolidayWindow(holidayId, holidayEffectiveWeight) {
+  return Boolean(holidayId) && !(Number(holidayEffectiveWeight) > 0);
+}
+
 function updateCusumState(db, cohort, occurredAt, sigmaShift, options) {
   const key = `cusum_state:${cohort}`;
   let state = { s: 0, lastSampledAt: null, armedHigh: true, armedCritical: true };
@@ -538,6 +552,17 @@ function updateCusumState(db, cohort, occurredAt, sigmaShift, options) {
   const lastMs = state.lastSampledAt ? Date.parse(state.lastSampledAt) : null;
   if (Number.isFinite(lastMs) && nowMs <= lastMs) {
     return { state, advanced: false, crossings: [] };
+  }
+
+  if (options.freeze) {
+    // Unlearned holiday window: hold S and advance the clock so the frozen
+    // span neither accumulates nor decays, and re-runs stay idempotent.
+    const frozenState = { ...state, lastSampledAt: occurredAt };
+    db.prepare(`
+      INSERT INTO meta (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, JSON.stringify(frozenState));
+    return { state: frozenState, advanced: true, frozen: true, crossings: [] };
   }
 
   const nextS = cusumStep(state.s, sigmaShift, options.cusumK);
@@ -780,7 +805,13 @@ function buildEvents({
 
   let cusum = { state: null, advanced: false, crossings: [] };
   if (!feedDegraded && concurrentBaseline.ready) {
-    cusum = updateCusumState(db, cohort, occurredAt, zScore, { cusumK, cusumThreshold, cusumCritical });
+    const composite = snapshot.signals?.composite || {};
+    cusum = updateCusumState(db, cohort, occurredAt, zScore, {
+      cusumK,
+      cusumThreshold,
+      cusumCritical,
+      freeze: isUnlearnedHolidayWindow(composite.holidayId, composite.holidayEffectiveWeight),
+    });
     for (const severity of cusum.crossings) {
       const threshold = severity === 'critical' ? cusumCritical : cusumThreshold;
       events.push({
@@ -811,7 +842,9 @@ function buildEvents({
   return {
     events,
     dataQuality,
-    cusum: cusum.state ? { s: cusum.state.s, advanced: cusum.advanced, crossings: cusum.crossings } : null,
+    cusum: cusum.state
+      ? { s: cusum.state.s, advanced: cusum.advanced, frozen: cusum.frozen === true, crossings: cusum.crossings }
+      : null,
     takeoffCount: takeoffs.length,
     takeoffRateZScore: takeoffRateZ,
     takeoffRateModelReady: takeoffRateStats.modelReady,
@@ -890,6 +923,7 @@ module.exports = {
   takeoffSeverityForZScore,
   severityForLevel,
   cusumStep,
+  isUnlearnedHolidayWindow,
   robustStats,
   medianOf,
   parseArgs,

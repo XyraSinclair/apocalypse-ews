@@ -31,6 +31,7 @@ const {
   getTakeoffWindow,
   takeoffSeverityForZScore,
   cusumStep,
+  isUnlearnedHolidayWindow,
 } = require('./detect_alert_events');
 const {
   buildConcurrentPredictionContext,
@@ -131,7 +132,14 @@ function cusumReplay(context, args) {
   let armedHigh = true;
   let armedCritical = true;
   const crossings = [];
+  let frozenSlots = 0;
   for (const record of ready) {
+    // Same first-year calendar gate as the live path: unlearned holiday
+    // windows freeze the accumulator instead of integrating travel waves.
+    if (isUnlearnedHolidayWindow(record.holidayId, record.holidayEffectiveWeight)) {
+      frozenSlots += 1;
+      continue;
+    }
     s = cusumStep(s, record.sigmaShift, args.cusumK);
     peakS = Math.max(peakS, s);
     if (armedCritical && s >= args.cusumCritical) {
@@ -149,6 +157,7 @@ function cusumReplay(context, args) {
   }
   return {
     scoredSlots: ready.length,
+    frozenSlots,
     k: args.cusumK,
     threshold: args.cusumThreshold,
     critical: args.cusumCritical,
