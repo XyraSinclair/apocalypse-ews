@@ -468,6 +468,36 @@ def upsert_dashboard_concurrent_metric(connection, metric_row):
     )
 
 
+def record_live_ingest_slot(connection, metric_row):
+    # Liveness provenance, mirroring update_latest_heatmap.py: the slot this
+    # live pass ingested is marked live_ingested=1 so status.js can bound
+    # live-instrument age and coverage. Global feed totals are not parsed on
+    # this path (non-ICAO filter), hence NULL total_aircraft.
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ingest_slots (
+          sampled_at TEXT PRIMARY KEY,
+          source TEXT NOT NULL,
+          total_aircraft INTEGER,
+          cohort_airborne INTEGER,
+          live_ingested INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne, live_ingested)
+        VALUES (?, 'adsbx_heatmap', NULL, ?, 1)
+        ON CONFLICT(sampled_at) DO UPDATE SET
+          source = 'adsbx_heatmap',
+          cohort_airborne = excluded.cohort_airborne,
+          live_ingested = 1
+        """,
+        (metric_row["sampled_at"], metric_row["airborne_unique_hex_count"]),
+    )
+
+
 def ingest_file(connection, cache_path, metrics_only=False, write_concurrent_metrics=False):
     if metrics_only:
         sampled_at, metric_row = parse_non_icao_metric_heatmap(cache_path)
@@ -482,6 +512,7 @@ def ingest_file(connection, cache_path, metrics_only=False, write_concurrent_met
         insert_non_icao_metric_row(connection, metric_row)
         if write_concurrent_metrics:
             upsert_dashboard_concurrent_metric(connection, metric_row)
+            record_live_ingest_slot(connection, metric_row)
 
         return metric_row["unique_hex_count"], metric_row["observation_count"], {
             "sampled_at": sampled_at_iso,

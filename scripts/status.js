@@ -25,11 +25,16 @@ function dbReport(dbPath, label, freshnessTable) {
     const latest = safe(() => db.prepare(`SELECT MAX(sampled_at) AS v FROM ${freshnessTable}`).get()?.v);
     const latestMs = latest ? Date.parse(latest) : null;
     const staleHours = latestMs ? +((Date.now() - latestMs) / 3600000).toFixed(1) : null;
+    // Compare as epoch seconds, never as strings: stored timestamps are
+    // ISO-'T' format while datetime('now') emits space-separated, and
+    // lexicographic 'T' > ' ' silently widens the window by a day.
     const sampleCount7d = safe(() => db.prepare(
-      `SELECT COUNT(DISTINCT sampled_at) AS c FROM ${freshnessTable} WHERE sampled_at >= datetime('now', '-7 days')`
+      `SELECT COUNT(DISTINCT sampled_at) AS c FROM ${freshnessTable}
+       WHERE CAST(strftime('%s', sampled_at) AS INTEGER) >= CAST(strftime('%s', 'now') AS INTEGER) - 7 * 86400`
     ).get()?.c, 0);
     const sampleCount30d = safe(() => db.prepare(
-      `SELECT COUNT(DISTINCT sampled_at) AS c FROM ${freshnessTable} WHERE sampled_at >= datetime('now', '-30 days')`
+      `SELECT COUNT(DISTINCT sampled_at) AS c FROM ${freshnessTable}
+       WHERE CAST(strftime('%s', sampled_at) AS INTEGER) >= CAST(strftime('%s', 'now') AS INTEGER) - 30 * 86400`
     ).get()?.c, 0);
     const baselineReady = sampleCount7d >= 7 * 48 * 0.95; // tolerate a few missed slots
 
@@ -48,8 +53,13 @@ function dbReport(dbPath, label, freshnessTable) {
       const latestLiveMs = latestLive ? Date.parse(latestLive) : null;
       const liveAgeMinutes = latestLiveMs ? Math.round((Date.now() - latestLiveMs) / 60000) : null;
       const liveSlots24h = safe(() => db.prepare(
-        "SELECT COUNT(*) AS c FROM ingest_slots WHERE live_ingested = 1 AND sampled_at >= datetime('now', '-1 day')"
+        `SELECT COUNT(*) AS c FROM ingest_slots
+         WHERE live_ingested = 1
+           AND CAST(strftime('%s', sampled_at) AS INTEGER) >= CAST(strftime('%s', 'now') AS INTEGER) - 86400`
       ).get()?.c, 0);
+      const firstLive = safe(() =>
+        db.prepare('SELECT MIN(sampled_at) AS v FROM ingest_slots WHERE live_ingested = 1').get()?.v
+      );
       const firstRow = safe(() => db.prepare(`SELECT MIN(sampled_at) AS v FROM ${freshnessTable}`).get()?.v);
       const windowStartMs = Math.max(
         firstRow ? Date.parse(firstRow) : Date.now(),
@@ -60,13 +70,15 @@ function dbReport(dbPath, label, freshnessTable) {
         : 0;
       const missingSlots30d = Math.max(0, expectedSlots30d - sampleCount30d);
       provenance = {
+        firstRowSample: firstRow,
+        firstLiveSample: firstLive,
         latestLiveSample: latestLive,
         liveAgeMinutes,
         liveSlots24h,
         expectedSlots30d,
         missingSlots30d,
         completenessPct30d: expectedSlots30d
-          ? +((sampleCount30d / expectedSlots30d) * 100).toFixed(2)
+          ? Math.min(100, +((sampleCount30d / expectedSlots30d) * 100).toFixed(2))
           : null,
       };
     }
@@ -192,10 +204,21 @@ for (const cohort of report.cohorts) {
   }
   const provenance = cohort.provenance;
   if (provenance) {
-    if (provenance.liveAgeMinutes === null || provenance.liveAgeMinutes > MAX_LIVE_AGE_MINUTES) {
+    // Warm-up grace: liveness bounds apply once the live instrument has any
+    // history (age) / a full day of history (coverage), so a fresh box or a
+    // newly wired cohort does not page before it can possibly comply.
+    const liveHistoryHours = provenance.firstLiveSample
+      ? (Date.now() - Date.parse(provenance.firstLiveSample)) / 3600000
+      : 0;
+    const rowHistoryHours = provenance.firstRowSample
+      ? (Date.now() - Date.parse(provenance.firstRowSample)) / 3600000
+      : 0;
+    if (provenance.liveAgeMinutes !== null && provenance.liveAgeMinutes > MAX_LIVE_AGE_MINUTES) {
       problems.push(`${cohort.label}: live ingestion stale (${provenance.liveAgeMinutes}m > ${MAX_LIVE_AGE_MINUTES}m bound) — check apocalypse-ews-refresh.timer`);
+    } else if (provenance.liveAgeMinutes === null && rowHistoryHours >= 24) {
+      problems.push(`${cohort.label}: live provenance never recorded despite ${Math.round(rowHistoryHours)}h of rows — live ingestion is not writing ingest_slots`);
     }
-    if (provenance.liveSlots24h < MIN_LIVE_SLOTS_24H) {
+    if (liveHistoryHours >= 24 && provenance.liveSlots24h < MIN_LIVE_SLOTS_24H) {
       problems.push(`${cohort.label}: only ${provenance.liveSlots24h}/48 live slots in 24h (bound ${MIN_LIVE_SLOTS_24H}) — live ingestion is skipping slots`);
     }
     if (provenance.completenessPct30d !== null && provenance.completenessPct30d < MIN_COMPLETENESS_PCT_30D) {
