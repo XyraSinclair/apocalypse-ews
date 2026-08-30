@@ -589,15 +589,17 @@ function DashboardPage() {
 
       {error ? <div className="status-banner status-banner-error"><strong>Refresh error:</strong> {error}</div> : null}
 
-      <section className="focus-grid">
-        <HeroPanel />
-        <DialPanel combined={combined} onEmergencyLevelTap={() => setEmergencyTheme((value) => !value)} />
-      </section>
+      <DialPanel combined={combined} onEmergencyLevelTap={() => setEmergencyTheme((value) => !value)} />
 
-      <ProviderPanel combined={combined} lastFetchedAt={lastFetchedAt} />
+      <HeroPanel />
 
       <section className="top-grid">
-        <RealtimeMap aircraft={combined.liveAircraft} />
+        <RealtimeMap
+          aircraft={combined.liveAircraft}
+          providerStatus={combined.providerStatus}
+          providerWarning={combined.providerWarning}
+          lastFetchedAt={lastFetchedAt}
+        />
         <ArchivePanel combined={combined} selected={selected} onToggle={toggleKind} />
       </section>
 
@@ -744,51 +746,89 @@ function ReadingPanel() {
   );
 }
 
-function DialPanel({ combined, onEmergencyLevelTap }: { combined: CombinedDashboard; onEmergencyLevelTap: () => void }) {
-  const level = clampLevel(combined.signal.emergencyLevel);
-  const trackedCopy = combined.trackedCount == null ? 'unknown cohort size' : `${formatInteger(combined.trackedCount)} tracked`;
-  const seatCopy = combined.seats.estimatedSeats == null ? 'seat estimate unavailable' : `${formatInteger(combined.seats.estimatedSeats)} max seats airborne`;
-  const sigma = combined.signal.sigmaShift;
-  const deviation = combined.actualCount - combined.expectedCount;
+const LEVEL_NAMES: Record<number, string> = {
+  1: 'ALL CLEAR',
+  2: 'NOTED',
+  3: 'ELEVATED',
+  4: 'HIGH',
+  5: 'EXTREME',
+};
 
-  return (
-    <section className={`panel dial-panel emergency-level-${level}`}>
-      <div className="panel-header">
-        <h2>
-          <button type="button" className="emergency-level-trigger" aria-label={`Emergency level ${level} of 5`} onClick={onEmergencyLevelTap}>
-            Emergency level {level}/5
-          </button>
-        </h2>
-      </div>
-      <div className="summary-text-block">
-        <p className="summary-count-line">
-          <strong>{formatInteger(combined.actualCount)}</strong> / {trackedCopy} planes airborne
-        </p>
-        <p className="summary-count-line">
-          <strong>{seatCopy}</strong>
-        </p>
-        <p>
-          Deviation: <strong>{formatSigned(deviation)}</strong> ({formatSigned(sigma, 1)}σ)
-        </p>
-        <p>Expected: {formatNumber(combined.expectedCount, 1)} aircraft, σ floor {formatNumber(combined.signal.effectiveBaselineStdDev, 1)}</p>
-        <p>Last update: {formatDateTime(combined.asOf)}</p>
-      </div>
-    </section>
-  );
+const LEVEL_MEANINGS: Record<number, string> = {
+  1: 'Nothing unusual in worldwide traffic right now.',
+  2: 'Mildly above baseline — well within historical variation.',
+  3: 'Meaningfully above baseline. Watch which category is driving it.',
+  4: 'Statistically unusual activity. Check corroboration before concluding anything.',
+  5: 'Beyond the calibrated historical envelope. Verify against other sources now.',
+};
+
+// The reading a stranger under stress needs, in words before numbers.
+function deviationSentence(actual: number, expected: number, sigma: number) {
+  const difference = Math.round(actual - expected);
+  const magnitude = Math.abs(sigma);
+  const direction = difference >= 0 ? 'more' : 'fewer';
+  const band =
+    magnitude < 2
+      ? 'well within the normal range'
+      : magnitude < 3.5
+        ? `slightly ${difference >= 0 ? 'above' : 'below'} normal`
+        : magnitude < 5
+          ? `notably ${difference >= 0 ? 'above' : 'below'} normal`
+          : `far ${difference >= 0 ? 'above' : 'below'} normal`;
+  return `${formatInteger(Math.abs(difference))} ${direction} than the ~${formatInteger(Math.round(expected))} expected for this hour — ${band}.`;
 }
 
-function ProviderPanel({ combined, lastFetchedAt }: { combined: CombinedDashboard; lastFetchedAt: string | null }) {
+const STALE_AFTER_MINUTES = 75;
+
+function dataAgeMinutes(asOf: string | null | undefined) {
+  const time = Date.parse(asOf ?? '');
+  if (!Number.isFinite(time)) return null;
+  return Math.max(0, Math.round((Date.now() - time) / 60000));
+}
+
+function DialPanel({ combined, onEmergencyLevelTap }: { combined: CombinedDashboard; onEmergencyLevelTap: () => void }) {
+  const level = clampLevel(combined.signal.emergencyLevel);
+  const seatCopy = combined.seats.estimatedSeats == null ? null : `≈${formatInteger(combined.seats.estimatedSeats)} passenger seats aloft`;
+  const sigma = combined.signal.sigmaShift;
+  const ageMinutes = dataAgeMinutes(combined.asOf);
+  const stale = ageMinutes == null || ageMinutes > STALE_AFTER_MINUTES;
+
+  if (stale) {
+    return (
+      <section className="panel dial-panel status-stale" aria-live="polite">
+        <p className="status-kicker">Current status · {combined.selectedLabels.join(' + ')}</p>
+        <p className="status-word">INSTRUMENT STALE</p>
+        <p className="status-meaning">
+          The last measurement is {ageMinutes == null ? 'of unknown age' : `${formatInteger(ageMinutes)} minutes old`} (bound: {STALE_AFTER_MINUTES} min).
+          Treat the instrument as down — <strong>not</strong> the sky as calm. Last known level: {level}/5.
+        </p>
+        <p className="status-freshness">Last measurement {formatDateTime(combined.asOf)} · normally updates every 30 min</p>
+      </section>
+    );
+  }
+
   return (
-    <section className="panel provider-panel">
-      <div className="panel-header">
-        <div>
-          <h2>Realtime Tracker</h2>
-          <p className="panel-lede">{combined.providerStatus}</p>
-        </div>
-        <span className="map-badge">{combined.selectedLabels.join(' + ')}</span>
-      </div>
-      {combined.providerWarning ? <p className="error-copy">{combined.providerWarning}</p> : null}
-      <p className="panel-footnote">Browser refresh: {formatDateTime(lastFetchedAt)}</p>
+    <section className={`panel dial-panel emergency-level-${level}`} aria-live="polite">
+      <p className="status-kicker">Current status · {combined.selectedLabels.join(' + ')}</p>
+      <button
+        type="button"
+        className="emergency-level-trigger"
+        aria-label={`Emergency level ${level} of 5: ${LEVEL_NAMES[level]}`}
+        onClick={onEmergencyLevelTap}
+      >
+        <span className="status-word">{LEVEL_NAMES[level]}</span>
+        <span className="status-level-tag">level {level} of 5</span>
+      </button>
+      <p className="status-meaning">{LEVEL_MEANINGS[level]}</p>
+      <p className="status-reading">
+        <strong>{formatInteger(combined.actualCount)} airborne.</strong>{' '}
+        {deviationSentence(combined.actualCount, combined.expectedCount, sigma)}
+        {seatCopy ? ` ${seatCopy}.` : ''}
+      </p>
+      <p className="status-freshness">
+        Measured {ageMinutes === 0 ? 'just now' : `${formatInteger(ageMinutes)} min ago`} · updates every 30 min ·{' '}
+        <span className="status-figures">deviation {formatSigned(sigma, 1)}σ vs expected {formatNumber(combined.expectedCount, 0)}</span>
+      </p>
     </section>
   );
 }
@@ -818,7 +858,7 @@ function ArchivePanel({ combined, selected, onToggle }: { combined: CombinedDash
   return (
     <section className="panel chart-panel history-panel">
       <div className="panel-header">
-        <h2>Traffic Archive</h2>
+        <h2>Traffic archive</h2>
       </div>
       <div className="chart-toolbar">
         <div className="chart-range-copy">
@@ -862,15 +902,24 @@ function ArchivePanel({ combined, selected, onToggle }: { combined: CombinedDash
         title="Aircraft count history"
         data={visible}
         lines={[
-          { key: 'concurrentCount', label: 'Airborne', color: '#0000ee' },
-          { key: 'predictedConcurrentCount', label: 'Expected', color: '#666666' },
+          { key: 'concurrentCount', label: 'Airborne', color: '#1d4ed8' },
+          { key: 'predictedConcurrentCount', label: 'Expected', color: '#8a8578' },
         ]}
         height={260}
       />
       <LineChart
-        title="Historical Emergency Level"
+        title="Emergency level history"
         data={levels}
-        lines={[{ key: 'emergencyLevel', label: 'Emergency level', color: '#cc0000' }]}
+        lines={[{
+          key: 'emergencyLevel',
+          label: 'Emergency level',
+          // Red is reserved for actual alarm: a calm history draws calm.
+          color: levels.some((point) => point.emergencyLevel >= 4)
+            ? '#b91c1c'
+            : levels.some((point) => point.emergencyLevel >= 3)
+              ? '#b45309'
+              : '#3d7a52',
+        }]}
         minY={1}
         maxY={5}
         height={170}
@@ -940,7 +989,17 @@ function LineChart({
   );
 }
 
-function RealtimeMap({ aircraft }: { aircraft: Aircraft[] }) {
+function RealtimeMap({
+  aircraft,
+  providerStatus,
+  lastFetchedAt,
+  providerWarning,
+}: {
+  aircraft: Aircraft[];
+  providerStatus?: string;
+  lastFetchedAt?: string | null;
+  providerWarning?: string | null;
+}) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const validAircraft = aircraft.filter((plane) => isFiniteCoordinate(plane.lat, plane.lon));
@@ -951,8 +1010,8 @@ function RealtimeMap({ aircraft }: { aircraft: Aircraft[] }) {
   return (
     <section className="panel map-panel">
       <div className="panel-header">
-        <h2>Realtime Tracker</h2>
-        <span className="map-badge">{formatInteger(validAircraft.length)} mapped</span>
+        <h2>Live map</h2>
+        <span className="map-badge">{formatInteger(validAircraft.length)} aircraft mapped</span>
       </div>
       <div className="map-frame">
         <div className="map-controls" aria-label="Map controls">
@@ -994,6 +1053,13 @@ function RealtimeMap({ aircraft }: { aircraft: Aircraft[] }) {
           </g>
         </svg>
       </div>
+      {providerWarning ? <p className="error-copy">{providerWarning}</p> : null}
+      {providerStatus ? (
+        <p className="panel-footnote">
+          {providerStatus}
+          {lastFetchedAt ? ` · page refreshed ${formatDateTime(lastFetchedAt)}` : ''}
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -1040,7 +1106,7 @@ function ModelList({ models }: { models: ModelCount[] }) {
   return (
     <section className="panel list-panel">
       <div className="panel-header">
-        <h2>Aircraft By Model</h2>
+        <h2>Airborne by aircraft model</h2>
         <span className="map-badge">{formatInteger(models.length)} types</span>
       </div>
       {visible.length ? (
@@ -1068,7 +1134,7 @@ function OperationsPanel({ alerts, takeoffs, error }: { alerts: AlertEvent[]; ta
   return (
     <section className="panel operations-panel">
       <div className="panel-header">
-        <h2>Alert Operations</h2>
+        <h2>Recent detections</h2>
         <span className="map-badge">{formatInteger(alerts.length)} queued</span>
       </div>
       {error ? <p className="signup-status signup-status-error">{error}</p> : null}
