@@ -95,6 +95,7 @@ h3 {
   position: relative;
   z-index: 1;
   display: grid;
+  align-content: start;
   gap: 20px;
   max-width: 1080px;
   min-height: 100svh;

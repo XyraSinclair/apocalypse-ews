@@ -771,7 +771,7 @@ function deviationSentence(actual: number, expected: number, sigma: number) {
     magnitude < 2
       ? 'well within the normal range'
       : magnitude < 3.5
-        ? `slightly ${difference >= 0 ? 'above' : 'below'} normal`
+        ? `on the ${difference >= 0 ? 'high' : 'low'} side of normal`
         : magnitude < 5
           ? `notably ${difference >= 0 ? 'above' : 'below'} normal`
           : `far ${difference >= 0 ? 'above' : 'below'} normal`;
