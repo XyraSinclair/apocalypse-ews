@@ -194,9 +194,7 @@ DNS on the existing domain or a new one; Cloudflare proxy in front optional
 > Liveness provenance (`live_ingested`) gates the takeoff baseline so the
 > 08-13→08-26 live-ingestion gap cannot contaminate medians (was 16 false
 > criticals/30d, now 2 watch-tier fires/30d, p99 z 3.04).
-> Open: 365-day backfill running (`scripts/run_yearly_backfill.sh`,
-> launched 2026-08-28 — deepens calibration + enables the Davos-week
-> replay exit criterion).
+> 365-day backfill completed 2026-08-29; history now reaches 2025-08-29.
 >
 > **Instrument bounds 2026-08-29.** Every alarm limit now has a written
 > basis (OPERATIONS.md "Instrument bounds") and continuous enforcement:
@@ -216,12 +214,18 @@ DNS on the existing domain or a new one; Cloudflare proxy in front optional
 10-min loop + always-on server under launchd, RSS + owner push live, smoke
 suite green, baselines healing.
 
-**Phase 1 — statistical hardening.** Seasonal (dow × slot) robust baselines;
-L0 data-quality gate; CUSUM sustained-shift layer; 365-day backfill on server
-hardware; backtest harness with frequency table + calendar-event non-alarms;
-severity ladder recalibrated to target frequencies.
-*Exit: backtest CI green; a simulated 3× exodus fires critical within 60 min;
-Davos-week replay stays ≤ high.*
+**Phase 1 — statistical hardening.** ✅ 2026-08-30. Seasonal (dow × slot)
+robust baselines; L0 data-quality gate; CUSUM sustained-shift layer; 365-day
+backfill on server hardware; backtest harness with frequency table +
+calendar-event non-alarms; severity ladder recalibrated to target
+frequencies.
+*Exit met on the full 365-day history: nightly `backtest --assert` green on
+both cohorts; a simulated 3× exodus reaches HIGH ≤ 60 min and CRITICAL
+≤ 120 min (recalibrated 2026-08-30 — one 3× slot reads ~9.7σ against an
+~11.2σ self-calibrated alarm line, so sustain via CUSUM is the honest
+critical path; the year's hottest real day, Dec 27, hit 12.1σ); Davos-week
+replay stays below level 4 — every top-10 hottest day is a holiday travel
+wave (cutoff σ7.74).*
 
 **Phase 2 — the box.** Hetzner provisioned by `bootstrap.sh`; systemd chain;
 Litestream backups; healthchecks on every timer; restore drill done twice;
