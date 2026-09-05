@@ -1,24 +1,36 @@
-# Warning.watch: a strategy for nuclear-risk warning
+# Warning.watch: a digital early-warning watch
 
-**Strategic design for discussion · 5 September 2026 · Not a current threat assessment**
+**Strategic design for discussion · Revised 5 September 2026 after Fable and Kimi consultation · Not a current threat assessment**
 
 ## The recommendation
 
-Build a **public-source nuclear-risk intelligence service that preserves people's ability to act**. Do not build a machine that translates unusual aircraft traffic into a nuclear-war warning.
+Build a **continuous, machine-staffed digital early-warning system**: public aircraft observations, trackers, official notices, public posts, civilian infrastructure and environmental measurements, with AI agents investigating consequential changes. Aircraft are one legitimate standing instrument in a broad watch—not the whole system and not something to demote out of it.
 
-The useful question is not “is anything strange happening?” It is:
+The watch first asks **“what changed?”** Its investigators then ask:
 
 > **Which pathway to nuclear harm is becoming more plausible, what evidence distinguishes it from the strongest alternative explanation, and which protective decision becomes better—or disappears—if we wait?**
 
-The opportunity is an auditable bridge between scattered public evidence and timely decisions: maintaining continuity of analysis through a crisis, distinguishing fresh facts from recycled claims, noticing changes across institutions, exposing uncertainty, and helping people act without needing to believe a precise nuclear-war probability. This could become valuable public infrastructure. Neither ambition nor software uptime makes it a national warning authority.
+The core product is a current situation picture: source health, newly observed changes, open incident threads, competing explanations, assigned investigations, and explicit reasons for operator attention. Briefs and protective-information views are outputs of that watch. We should notice and investigate while the operator is absent, not wait for a person to commission an essay.
 
-**Three changes of direction:**
+**The corrected design:**
 
-1. Put escalation pathways and users' decisions upstream of sensors. Aviation becomes one supporting instrument, not the product's organizing principle.
+1. Observe broadly within lawful access, resource and privacy limits. Observation builds the baselines needed for validation; validation governs influence, not whether inexpensive observation may begin.
 2. Maintain separate assessments of **first nuclear use, further escalation after use, and harm to a particular location**. They are not interchangeable.
-3. Build two connected functions: an **evidence desk** for strategic warning and an **official-warning/protective-information service** for emergencies. Neither should wait for the other to become perfect.
+3. Put automation at the beginning: standing sentinels, change triage, bounded investigation agents, source discovery, and watch handovers. Keep public strategic assertions human-owned and official warning delivery on its separately validated fast path.
 
 The existing operational system can keep running under its present anomaly-reporting limits. This document proposes a new strategy; it does not authorize fresh purchases, change live alerts, or describe capabilities already built.
+
+**Concrete collection register:** [https://github.com/XyraSinclair/apocalypse-ews/blob/main/DIGITAL-SIGNAL-REGISTER.md](https://github.com/XyraSinclair/apocalypse-ews/blob/main/DIGITAL-SIGNAL-REGISTER.md) — 12 watch families, 64 observable changes, 26 source surfaces, access/latency findings, and seven inspected ordinary responses. The 36-item atlas below supplies analytic questions; the register supplies digital instruments.
+
+### What the consultations changed
+
+Fable's central correction was that the first draft repaired the analytic layer but broke the collection layer: it delayed observation and automation until a human institution had validated them. Kimi independently proposed standing sentinels, persistent incident threads, domain investigators, a skeptical investigator, and explicit watch handovers. Both consultations were substantive design opinions, not evidence of predictive accuracy.
+
+**Accepted:** machine watch first; aircraft remain standing; preserve event history; make the incident thread the unit of attention; investigate across source families; maintain a routine calendar and continuous source discovery.
+
+**Not accepted literally:** Fable's near-zero-cost collection assumption and blanket baseline delay; Kimi's fixed corroborating-family rule, skeptic veto, universal six-to-twelve-month baseline prerequisite, and implication that quiet sensors establish safety. Costs and access vary. Authentic emergency instructions do not wait for a baseline or another model. Skepticism accompanies escalation rather than blocking time-critical review. Silence is informative only where a specific expected observation would actually have been visible.
+
+The collection-management lesson is practical, not theatrical: name the important question, the observable that could answer it, the source able to see it, who investigates, and when the answer is no longer useful. The Army's public discussion of priority intelligence requirements explicitly connects broad questions to indicators, specific information requirements, collection tasks, and continuing reassessment. We adapt that organizational discipline to civilian public-source warning, not military targeting. [S14]
 
 ## 1. Define the thing we are trying to know
 
@@ -86,7 +98,7 @@ These are overlapping scenario families, not mutually exclusive probabilities or
 
 ### Five theater lenses
 
-Start with one deeply understood theater and keep a structured global context. The recommended pilot is **US/NATO–Russia**, because it connects to the current project's initial audience and evidence experience—not because this document has ranked current risk.
+Use **US/NATO–Russia** as the first deep interpretive dossier because it connects to the current project's initial audience and evidence experience—not because this document ranks current risk. Observe inherently global public sources globally where permitted; a regional expertise pilot must not artificially restrict worldwide environmental or safety feeds.
 
 - **US/NATO–Russia:** distinguish alliance decisions, national nuclear authorities, conventional escalation, signaling, and verified crisis restraints. UK and French decisions are not interchangeable with U.S. decisions.
 - **US–China:** explicitly examine conventional/nuclear ambiguity and both sides' perceptions of threats to strategic capabilities. Do not transplant a Russian event dictionary.
@@ -98,7 +110,7 @@ All five need dated doctrine and capability dossiers maintained by subject-matte
 
 ## 4. The indicator atlas: 36 things to investigate, not 36 alarm switches
 
-**Priority:** A = first evidence-desk work; B = conditional supporting research; C = context only or low priority; H = observation health, never a threat vote; E = emergency/event verification. These are design judgments, not measured predictive rankings.
+**Investigation priority:** A = first focused investigation; B = standing supporting observation and conditional investigation; C = context or slower research; H = observation health, never a threat vote; E = emergency/event verification. These are proposed attention priorities, not barriers to collection or measured predictive rankings.
 
 “Source” describes a family to verify for lawful access, timeliness, and archival depth. It is not a promise of a free API. Every row is a *candidate analytic question* unless it concerns established official protective guidance.
 
@@ -124,7 +136,7 @@ All five need dated doctrine and capability dossiers maintained by subject-matte
 | 18 | Verified restraint: withdrawal, stand-down, restored communication, or compliance with an agreement | Evidence against a specific escalation hypothesis | Reversibility, incomplete verification, or restraint in only one domain | Original commitments plus evidence of implementation; A |
 | 19 | Authorities issue significant airspace or maritime restrictions | Reveals an operational or protective change | Conventional conflict, launch/test safety, weather, or exercise | Civil aviation/maritime notices with stated grounds; B |
 | 20 | Multiple carriers independently alter service to a region | Consequential private risk assessment | Common regulator order, weather, insurance restriction, or public news | Carrier and regulator announcements; B |
-| 21 | Aggregate relevant aviation activity changes beyond matched routine patterns | May prompt a focused question about an already identified crisis | Holidays, exercises, maintenance, coverage changes; a flight does not reveal payload or mission | Existing aviation observation with explicit coverage; B |
+| 21 | Aggregate relevant aviation activity changes beyond matched routine patterns | Can open an investigation before a crisis is recognized, or corroborate another thread | Holidays, exercises, maintenance, coverage changes; a flight does not reveal payload or mission | Existing aviation observation with explicit coverage; B |
 | 22 | Officially acknowledged government departures differ from stated normal operations | Could support a continuity or protection hypothesis | Scheduled travel, secrecy about routine movements, defensive signaling | Institutional public records; no surveillance of families; B |
 | 23 | Public transport or essential services change under an emergency directive | Relevant to both revealed protection and users' options | Local accident, weather, labor action, routine security | Responsible authorities; B/E |
 | 24 | Nuclear rhetoric becomes more specific about conditions, authority, or contemplated consequences | Improves the definition of a threat claim | Recycled language, mistranslation, unauthorized speaker, strategic ambiguity | Original text/audio and translation review; A |
@@ -141,21 +153,19 @@ All five need dated doctrine and capability dossiers maintained by subject-matte
 | 35 | Authorities confirm a radiological hazard or issue area-specific guidance | Supports protective action without requiring certainty about weapon attribution | Power-plant accident, industrial release, measurement problem; risk is local and time-dependent | Radiation/public-health/emergency agencies; E |
 | 36 | After confirmed use, further actions and restraint measures change | Updates the pathway to additional use and broadening harm | Retaliatory rhetoric is not a launch; event attribution and sequence can be wrong | Official and independently verified event reporting; A/E |
 
-### Where to start collecting—and where not to
+### Broad collection; differentiated influence
 
-Start with **three evidence families that change decisions directly**:
+Start with the existing aircraft instrument alongside civil aviation notices, official advisory/document changes, public-post and multilingual news discovery, weather/space-weather context, and event-verification feeds. Add radiation, maritime, civilian infrastructure, procurement and additional regional sources as their actual access contracts are established. The concrete register identifies what is sampled, merely documented, and still unresolved.
 
-1. **Original official decisions:** departure orders, civil-protection instructions, posture statements, exercise notices, and corrections.
-2. **Crisis chronology and interpretation:** reliable multilingual reporting, expert review of relevant conventional events, diplomatic actions, and explicit counterevidence.
-3. **Independent physical corroboration when actually available:** use specialist interpretations of public imagery or other observations to answer a specific question. Do not assume access, revisit rate, resolution, or mission identification.
+Maintain separate permissions for **observation**, **opening an internal investigation**, **changing operator attention**, and **making a public assertion**. A noisy source can be worth recording because it cues a useful inquiry or explains a public scare. That does not make it a reliable nuclear predictor.
 
-Preserve aviation as a conditional supporting source. Do not fund a wider sensor collection until each proposed source has a named question, an observable discriminator, usable timeliness, and an action it could change.
+Record public attention, search interest and market reactions as context where practical; do not discard them merely because they are downstream of news. Their timing can reveal the common cause behind an apparent multi-source convergence. Do not turn pizza orders, single “Doomsday Plane” sightings, anonymous “DEFCON” labels or retail iodine demand into nuclear-warning triggers.
 
-Do **not** promote these to nuclear-warning features without extraordinary new evidence: pizza orders, celebrity/billionaire movements, a single “Doomsday Plane” sighting, anonymous “DEFCON” websites, encrypted-message counts, unverified unusual radio traffic, retail iodine demand, social-media panic, or API outages. Several are primarily sensors of attention, commerce, or our own ignorance.
+No collection of private family movements, sensitive tactical military locations, intercepted communications, or access obtained by circumvention. Breadth means more legitimate observational mechanisms, not invasive collection.
 
 Two useful reality checks: NATO describes Steadfast Noon as an annual routine exercise without live weapons, while NAVAIR describes the E-6B as part of an ongoing operational and training enterprise. Seeing either is not equivalent to observing an attack decision. Authenticate the event and then ask what, if anything, differs from its ordinary role. [S11–S12]
 
-## 5. Six designs that are better than an anomaly gauge
+## 5. Six analytic disciplines implemented by the watch
 
 ### A. A live book of competing explanations
 
@@ -169,7 +179,7 @@ Do not count supporting indicators. Record what each explanation predicts next, 
 
 - **Reporting independence:** are two articles repeating one government statement or social post?
 - **Measurement independence:** are two observations generated by different sensors/providers?
-- **Causal independence:** do seemingly separate actions come from one order, public scare, or exercise?
+- **Causal explanation:** are several actions consequences of one order, exercise, weather event, or public scare? They may establish the extent of a response without supplying independent evidence of its motive.
 
 Three aviation cohorts from one archive are not three independent intelligence streams. An embassy notice, carrier cancellation, and market move may all be downstream of the same public announcement. Independently confirming that an event occurred is also not the same as independently confirming nuclear intent.
 
@@ -209,7 +219,7 @@ Use a simple collection card: current uncertainty; competing answers; source tha
 
 ## 6. What the user should actually see
 
-Replace the single global escalation meter in the proposed design with a **theater assessment plus a separate local-action panel**.
+The operator opens a **live incident board**, not just a global gauge or published essay: what changed, what is being investigated, who owns each question, what evidence remains unresolved, and which sources are healthy or blind. Theater assessments and the separate local-action panel are derived views.
 
 Each assessment carries:
 
@@ -302,41 +312,99 @@ This is a reasoning exercise against the proposed rules, not an empirical valida
 
 The design therefore rejects both extremes: “trust every official claim” and “official calm is evidence of concealment.” Both can become unfalsifiable. Responsibility is to preserve evidence and uncertainty, not to favor whichever narrative is more dramatic.
 
-## 8. The execution plan: intelligence first, automation after
+## 8. The execution plan: observation and agents first
 
-These are dependency-ordered work packages, not promises about development already completed.
+These are concrete design work packages, not a claim that new collectors or agents were deployed in this planning session. Keep existing live behavior unchanged until its migration is reviewed and exercised.
 
-| Work package | Concrete deliverable | Exit condition | What we deliberately defer |
-|---|---|---|---|
-| **1. Decision contract** | One page naming initial users, geography, threat definitions, horizons, permissible advice, editorial ownership | Every alert class maps to a real decision and named responsibility; dangerous ambiguity removed | New detectors and global risk numbers |
-| **2. Theater dossier and source audit** | Pilot-theater pathway map; doctrine dates; prioritized indicator cards; source-access and publication-lag inventory | Each priority question has a usable source or is explicitly unobservable; normal exercises and restraints documented | Sensor expansion without a question |
-| **3. Historical intelligence exercise** | Time-fenced case library including threatening non-events; independent assessments made before revealing outcomes | Evidence lineage and alternatives survive review; decision value compared with the ordinary-news baseline | Performance claims from a hand-picked successful episode |
-| **4. Human-reviewed shadow desk** | Consequential-change briefs and intermediate forecasts recorded prospectively, without new public nuclear alarms | Sustainable review workload, source corrections, and useful decisions demonstrated across routine and crisis conditions | Unattended strategic publishing |
-| **5. Public decision service** | Separate strategic assessments and official/local protective-information surfaces | Emergency-management review, comprehension checks, defined corrections, scoped claims and staffing | Claims to replace government warning |
-| **6. Selective automation** | Automate repetitive retrieval, deduplication, chronology, and prompts for review; retain evidence links | Each automation has already demonstrated incremental benefit and a failure behavior | A model that invents facts, certifies its own sources, or decides nuclear danger alone |
+### The watch loop
 
-**Immediate allocation of effort:** stop making statistical sensitivity tuning the center of the project. First produce the decision contract, pilot dossier, and time-fenced case library. Keep existing source-integrity and delivery work as infrastructure; do not confuse it with validation of the mission.
+**Standing observation → change triage → incident thread → bounded investigations → revised situation picture → operator attention / approved outputs → retasking.**
 
-### The resource conflict we must face honestly
+1. **Source registry and evidence history.** Each source records its mechanism, lawful access, cost, geography/language, documented and measured delay, health, baseline maturity, ordinary confounds, and upstream dependencies. Each observation retains event time when known, source publication time, our observation time, original locator, relevant evidence, and later amendments. Unknown times remain unknown; future or inconsistent clocks are flagged.
+2. **Cheap standing sentinels.** Use routine numeric comparisons, document-change detection and filtered event streams. Small-model extraction can help with text; expensive reasoning is reserved for actual questions. Sentinels report source changes and health, not unsupported world conclusions. They continue accumulating normal behavior during quiet periods.
+3. **Change triage.** Group related observations by event, time and civilian geographic scope; compare with routine schedules and source health. Either retain as background, update an existing thread, or open a new one. Novel credible single-source evidence may warrant review; a universal two- or three-family gate would miss important events.
+4. **Investigation tickets.** Assign a named uncertainty, relevant evidence, rival explanations, authorized sources, deadline, bounded work allowance and stop condition. A ticket asks “is this an actual newly ordered departure?” rather than “research nuclear war.” Several independent questions can run concurrently; agents do not create unlimited descendants.
+5. **Incident memory and synthesis.** Findings update one versioned thread: facts, uncertainties, dependencies, corrections, plausible explanations, discriminating next observations and attention state. Merge duplicates without losing provenance; split mistakenly joined incidents; close with a reason, not silent score decay.
+6. **Continuous collection management.** New findings change the questions, not merely the score. Increase relevant watch attention within configured limits; restore ordinary cadence when justified. Discovery and maintenance have reserved capacity so one dramatic story cannot blind the rest of the world.
 
-A single inexpensive server can host software. It cannot provide regional expertise, independent editorial review, or continuous human responsibility by itself. The previous aspiration of negligible monthly maintenance is not a credible staffing model for a national-level strategic warning service.
+### The machine watch staff
 
-Start as a bounded, honestly staffed evidence desk. If 24/7 strategic publishing is required, its staffing and partner commitments are a separate necessary capability. When a reviewer is unavailable, expose that limitation and continue verified official-information functions; do not let an unattended language model impersonate an on-duty analyst.
+These are roles, not a requirement to keep eight large models continuously running. The scheduler invokes the relevant role on a change, deadline or scheduled review.
 
-Language models are useful for proposing hypotheses, extracting attributed claims, comparing translations, and identifying contradictions. They are not witnesses. An eight-shot independent ideation campaign for this design produced several speculative and unfalsifiable mechanisms; those were rejected rather than laundered into a sensor list. The countermeasure is source-grounded adversarial review, not a larger model-generated consensus.
+| Role | Trigger | Required result |
+|---|---|---|
+| Watch supervisor | New changes, overdue work, scheduled handover | Deduplicated incident queue; assigned priorities; explicit unattended/coverage state |
+| Source/domain investigator | A source-specific uncertainty | Verified observation, measurement limitations, ordinary comparators |
+| Original-source and language investigator | An attributed claim or material textual change | Original passage, correct speaker, substantive delta, translation uncertainty |
+| Chronology/provenance investigator | Apparently new or widely repeated material | First-public history, original versus copies, corrections and dependence |
+| Skeptical investigator | A consequential hypothesis or disputed escalation | Strongest supported rival, assigned disconfirmation checks, unresolved contradictions |
+| Synthesis investigator | Material findings change an incident | What changed in the assessment, why it matters, next useful question |
+| Discovery and coverage investigator | Scheduled family/region rotation or explicit collection gap | New source contract or documented gap; no unapproved spend or account creation |
+| Watch maintenance/handover | Stale sources, completed shifts, expired tickets | Health failures, open questions, next deadlines, reasons for closure or continued watch |
+
+Models are not witnesses. Fable, Kimi and another model agreeing about one article still yield one article's evidence. Independent investigators should receive original evidence and their assigned question before seeing another model's conclusion when that reduces anchoring.
+
+### A complete investigation ticket
+
+**Hypothetical question:** Did an embassy change from optional departure to ordered departure, and does that represent new information?
+
+- **Owner and deadline:** one institutions investigator; complete before the next incident review, or return unresolved with the missing prerequisite.
+- **Evidence:** original current notice, retained earlier version, source publication history, and the reports that triggered attention.
+- **Rivals:** substantive new order; paraphrase of an old order; wording-only edit; nonnuclear local hazard; erroneous or forged report.
+- **Required checks:** establish actual text and authority; compare versions and first-public time; identify stated reason; check whether allegedly corroborating carriers are obeying the same restriction.
+- **Return:** supported finding or unresolved status, citations, contradiction, source limits, and the next discriminating question. No private correspondence, access changes or open-ended further tasking.
+
+The ticket's question is narrow; its parent incident can still synthesize aircraft, advisories, posts and physical observations. A source may answer a factual question without answering the larger nuclear-intent question.
+
+### Three hypothetical watch sequences
+
+| Sequence | What the watch does | Useful result |
+|---|---|---|
+| Aircraft anomaly + new civil airspace notice + local reports | Open one thread. Aviation investigator checks actual samples and weather; notice investigator establishes the instruction; provenance investigator separates original reports from copies; skeptic checks a scheduled exercise or service fault. | Either a documented routine explanation, or an unresolved development worth operator review. No automatic nuclear label. |
+| Credible institutional change with quiet aircraft data | Authenticate the changed order and its chronology immediately. Check aviation coverage, but do not wait for a flight surge or treat its absence as a veto. Task relevant official and local sources. | The system can notice a consequential precursor through institutions even when physical telemetry contributes little. |
+| Viral explosion claim + questionable sensor reading | Investigate the media's age and origin; check the actual sensor and its quality; consult competent event and emergency sources. Any authentic applicable protective warning follows the separate fast path. | Fast correction if false; timely attention if unresolved; protective information is not delayed pending scientific attribution. |
+
+For de-escalation, task evidence of implemented restoration, corrected claims and resumed services. Quiet posting or a lost sensor is not enough. Close or downgrade only the hypotheses those observations actually address.
+
+### Operator attention and agent limits
+
+- **Background:** routine observations and measured source health; no notification per item.
+- **Investigating:** a visible incident with agents working and a next-review time.
+- **Review needed:** a materially consequential, credible change, unresolved contradiction, deadline or visibility loss affecting an active incident. State why attention is justified and what remains uncertain.
+- **Urgent review:** time-sensitive evidence could materially affect protective or continuity decisions. Show competing explanations alongside the notification; a skeptic cannot indefinitely veto attention.
+- **Official warning:** the independently validated authority/jurisdiction path preserves actual/test, issue/effective/expiry, update and cancellation semantics. It does not wait for speculative analysis or a human shift change.
+
+Every ticket has a work bound, deadline, owner and completion reason. Queue limits, per-source limits, and reserved coverage capacity prevent recursive agent sprawl. Repeated evidence updates an existing thread. Tool/model failures produce unresolved work, not fabricated success. Agents cannot buy data, create credentials, contact people, change public risk policy or publish a new strategic assertion on their own.
+
+### The build order
+
+| Work package | Concrete deliverable | Exit condition |
+|---|---|---|
+| **1. Observation foundation and first source tranche** | Source registry, retained evidence chronology, existing aviation as an input, several independent public source families | Ordinary responses, substantive changes, stale data and corrections are distinguishable; baseline accumulation begins |
+| **2. Requirements and normality map, concurrently** | Initial decision contract; theater questions; routine schedules; source coverage matrix | Each priority question has a collection route or explicit visibility gap; this does not block broad passive observation |
+| **3. Triage, incident threads and bounded agents** | Named investigations, source checks, rivals, dependence, synthesis and handover | A hypothetical or historical incident can move from observation to explained attention without unsupported facts or uncontrolled spawning |
+| **4. Replay and shadow watch** | Time-fenced historical exercise plus prospective machine-opened threads reviewed by the operator | Useful discoveries, missed changes, corrections, latency and attention burden are measured; no cherry-picked nuclear-prediction claim |
+| **5. Approved output surfaces** | Current situation picture, operator attention, reviewed strategic output, separately validated official-warning route | Actual surface and delivery paths exercised under the repository's review floor; current and unknown states are clearly distinguished |
+| **6. Continuing discovery and earned influence** | Family/region/language sweeps, measured source histories, refined tasking | Added sources contribute new observations or useful disconfirmation rather than duplicate workload |
+
+### Resource model
+
+Continuous machines and bounded human editorial availability are compatible. A single operator cannot personally read every feed, but does not need to: machine observation, triage, investigation and handover are the point. Human expertise and accountability remain necessary for consequential public judgments, source-policy changes and review of failure cases.
+
+Do not assume every feed is free, stable or cheap. Avoid a full model call per post, a complete social-web archive, or permanent large-model workers. Use filtered observations and change-driven investigations; retain enough original evidence for review under explicit source and retention terms. Record processing cost, open work, source failures and operator burden so breadth does not silently erode reliability.
 
 ## 9. Six questions that genuinely determine the product
 
-The defaults below let planning proceed without a questionnaire becoming a gate. They are proposals, not assumptions about Xyra's preferences.
+The product direction is settled for this design: a continuous digital watch with agentic investigation. The following defaults govern its outputs and responsibilities; they are not a request to choose a newsletter instead.
 
-1. **Whose decision are we improving first?** Default: a serious public reader and a small organization's continuity lead. A household survival tool and an intelligence analyst's workstation need different interfaces and duties.
+1. **Whose decision are we improving first?** Default: the system operator and serious public readers, including households and continuity leads. They share an evidence picture but need different action and detail surfaces.
 2. **Where must the advice be actionable?** Default: U.S. civilian protective-information context, one deep US/NATO–Russia dossier, global context without pretending equal coverage.
 3. **Which decision earns the earliest warning?** Default: preserving travel, staffing, and communications options before a crisis—not claiming to beat military launch detection.
 4. **What burden of false alarm is acceptable for each action?** Default: relatively sensitive internal review; much stricter public strategic assertions; official protective alerts retain their own authority. “No false alarms” is not a usable single requirement.
-5. **Who is accountable for a consequential public judgment?** Default: machine-assisted, human-owned publishing with explicit availability and corrections. National-level ambition requires actual expertise and staffing, not just hosting scale.
+5. **Who is accountable for a consequential public judgment?** Default: continuous machine watch, human-owned public strategic assertions, explicit editorial availability and corrections. Machines can investigate while the editor is absent.
 6. **What would make this project worth doing even if first-use prediction remains weak?** Default: better crisis understanding, less misinformation, preservation of low-regret choices, and reliable access to protective guidance. If only precise launch prediction counts, the current public-source approach cannot honestly promise the outcome.
 
-**The most important choice for Xyra:** should the flagship be **a public strategic intelligence desk**, or **a personal/family protective-decision service**? I recommend the former with a clearly separated, authoritative protective-information companion. Trying to hide both behind one global danger gauge produces the wrong product for both.
+**No false flagship choice:** strategic interpretation, digital sensing and protective information are parts of one early-warning system with different authority boundaries. The flagship is the watch itself.
 
 ### Elicit specialist knowledge before assigning weights
 
@@ -355,13 +423,13 @@ If numerical judgments are elicited, obtain individual ranges and rationales bef
 
 ## 10. Bottom line
 
-The ambitious version is not an omniscient detector. It is a disciplined institution in miniature: it remembers what was known when, knows which observations are copies, keeps rival explanations alive, asks the next valuable question, and turns uncertain evidence into proportionate decisions.
+The ambitious version is a persistent digital watch: aircraft, public posts, official acts, operational notices, infrastructure and physical measurements; cheap observation; agents that investigate in parallel; one evolving evidence picture; specific reasons to pay attention.
 
-**We should be exceptionally good at recognizing consequential change without pretending that every consequential change predicts nuclear war.** That is a substantially more valuable and defensible mission than making an aircraft counter more sensitive.
+**Observe broadly. Investigate changes. Make influence earn its place.** Keep the aircraft instrument, add the missing digital senses, and make the analytic disciplines run continuously instead of leaving them in a memo.
 
 ## Sources and scope
 
-Read on 5 September 2026. Sources support the stated analytic methods, escalation mechanisms, monitoring limits, and protective guidance. The 36-item atlas, priorities, architecture, and work packages are design proposals; no cited source validates their predictive performance. This document makes no assessment of present nuclear-war likelihood.
+Read on 5 September 2026. Sources support the stated analytic methods, escalation mechanisms, monitoring limits, collection-management discipline and protective guidance. The indicator atlas, digital register, priorities, agent architecture and work packages are design proposals; no cited source validates their predictive performance. This document makes no assessment of present nuclear-war likelihood.
 
 - **S1 — U.S. Government, A Tradecraft Primer: Structured Analytic Techniques for Improving Intelligence Analysis (March 2009).** Key-assumptions checks, quality of information, indicators, competing hypotheses, contrarian and imaginative techniques. https://www.cia.gov/resources/csi/static/Tradecraft-Primer-apr09.pdf
 - **S2 — James M. Acton, Escalation through Entanglement (International Security, Summer 2018).** Peer-reviewed mechanism linking command-and-control vulnerability and inadvertent escalation; cited here for the mechanism, not a current risk estimate. https://www.belfercenter.org/publication/escalation-through-entanglement-how-vulnerability-command-and-control-systems-raises
@@ -376,5 +444,6 @@ Read on 5 September 2026. Sources support the stated analytic methods, escalatio
 - **S11 — NATO, Nuclear deterrence policy and forces (updated May 2026).** Official account of separate national decision centers, dual-capable aircraft, and the routine exercise baseline; statements of policy, not independent evidence about intentions. https://www.nato.int/en/what-we-do/deterrence-and-defence/natos-nuclear-deterrence-policy-and-forces
 - **S12 — NAVAIR, E-6B Mercury.** Official mission and training context; not evidence of the mission of a particular flight. https://www.navair.navy.mil/product/E-6B-Mercury
 - **S13 — Lindell and Perry, The Protective Action Decision Model (Risk Analysis, 2012).** Reception, attention, comprehension, perceptions, and practical constraints on protective behavior; not a nuclear-war forecasting model. https://pubmed.ncbi.nlm.nih.gov/21689129/
+- **S14 — U.S. Army Center for Army Lessons Learned, Priority Intelligence Requirement Management in Divisions and Corps (May 2025).** Public professional discussion connecting requirements, indicators, specific information requirements, collection management and ongoing reassessment. Used for organizational discipline, not tactical collection. https://www.army.mil/article/285410/priority_intelligence_requirement_management_in_divisions_and_corps
 
-Research coverage: three independent research slices—historical warning, strategic posture, and protective decisions—plus eight independent ideation shots, screened against evidence and falsifiability. The proposed case library and source-access audit are not completed by writing this plan. No nuclear attack-warning capability, private intelligence access, commercial imagery access, or 24/7 editorial staffing is claimed.
+Research coverage: the first pass examined historical warning, strategic posture and protective decisions. The corrected pass added the explicitly requested Fable consultation, a substantive Kimi K3 consultation, three independent source-discovery audits, primary-source checks and seven bounded public response samples. Kimi's first lower-cap call returned no visible answer and contributes no findings. Suggestions were screened and several access/latency claims corrected against actual sources. The historical case library, global source enrollment and agent implementation remain work packages, not completed capabilities. No new production behavior, private intelligence access, commercial imagery subscription, or 24/7 human staffing is claimed.
