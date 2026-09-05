@@ -228,6 +228,13 @@ critical path; the year's hottest real day, Dec 27, hit 12.1σ); Davos-week
 replay stays below level 4 — every top-10 hottest day is a holiday travel
 wave (cutoff σ7.74).*
 
+The 2026-09-05 assurance correction aligns takeoff history and targets on the
+final-slice clock and removes a one-slot seasonal phase error without loosening
+limits. Business and military pass the existing replay bounds. This completion
+claim does not extend to non-ICAO sensitivity: its all-cohort probe still fails
+the injected warning bounds and its takeoff history is warming. Unknown feed
+coverage and inferred historical liveness remain explicit in OPERATIONS.md.
+
 **Phase 2 — the box.** Hetzner provisioned by `bootstrap.sh`; systemd chain;
 Litestream backups; healthchecks on every timer; restore drill done twice;
 laptop demoted to dev machine.

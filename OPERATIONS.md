@@ -235,23 +235,52 @@ the draft. Uncertain delivery keeps the draft and warns that retry may duplicate
 Page context excludes query strings, fragments, and referrers. This channel is
 not monitored in real time and is not an emergency dispatch service.
 
-### Known assurance failure at the cadence change
+### Detector assurance status
 
-The existing nightly replay ending 2026-09-04 18:45 Pacific failed its takeoff
-noise bound: seven fires exceeded the configured 0.2/day allowance. The other
-eight reported bounds passed, including injected HIGH at 30 minutes and CRITICAL
-at 90 minutes. This predates the cadence change; thresholds were not loosened
-and the failed service state was not cleared. Faster polling and successful
-feedback verification do not resolve this detector-calibration finding.
+The business-jet nightly replay ending 2026-09-04 18:45 Pacific failed its
+0.2/day takeoff-noise bound with seven fires. The defect was a one-slot phase
+error, not an insufficiently permissive threshold: history was grouped by
+observation/window end, while the target selected its window-start group.
+The 2026-09-05 correction uses the end clock for both. Five of the seven original
+fires disappear when compared with the correct same-time history; genuine
+same-time outliers remain. Count, z-score, severity, variance floors, seasonal
+group minimums, warm-up requirements, and acceptance bounds are unchanged.
 
-The non-ICAO takeoff baseline has a second inherited limitation: concurrent
-metrics use the within-slot peak timestamp, while live provenance and takeoffs
-use the final slice. Its exact-timestamp joins can therefore exclude otherwise
-valid slots. The cadence change preserves established peak-count semantics;
-switching to final-slice counts would silently change the calibrated measurement.
-A slot-aligned detector/backtest correction and replay are separate assurance
-work. Historical non-ICAO scans no longer create new false live marks; existing
-historical provenance was not rewritten by this release.
+Live detection and replay now share a final-slice `ingest_slots` loader.
+Concurrent metrics retain their independent calibrated peak timestamps/counts.
+History occupies `(windowStart - lookback, windowStart]`, disjoint from the
+current transition window `(windowStart, windowEnd]`; replay includes the full
+earliest lookback. Real zero-event slots survive missing or differently timed
+concurrent rows, and trace-backfill events remain excluded.
+
+Read-only candidate execution against the full production histories passed all
+nine existing bounds for each of business and military: five takeoff fires per
+30 calendar days, zero takeoff criticals, and 768 scoreable takeoff slots each.
+The injected HIGH/CRITICAL times were 30/120 minutes for business and 30/30 for
+military. These noise denominators remain calendar days, not exposure-adjusted
+days. The non-ICAO replay recovered 336 final-slice slots instead of zero exact
+metric joins, but still had no warmed takeoff scoring windows and failed its
+3× concurrent-injection HIGH/CRITICAL checks. It is not covered by the existing
+two-cohort nightly unit; its warning sensitivity is not established.
+
+L0 quality is also shared with replay. Missing global totals or fewer than eight
+same-time references report `unknown`, never a coerced zero or affirmative
+`ok`. The existing policy still scores unknown coverage; only known degraded or
+non-live takeoff slots are suppressed. All replayed slots in this measurement
+had unknown coverage. Non-ICAO has no recorded global denominator. Historical
+`seeded_live_day` rows remain explicitly inferred provenance, not per-slot
+execution proof; this release does not rewrite them or change that policy.
+The audited 335 non-ICAO live marks all matched completed live runs, with all
+334 predecessor intervals exactly 1,800 seconds. Post-gap transition timing
+and individual-airframe observation opportunity remain separate limitations.
+
+Isolated direct execution covered shifted peak timestamps, 1,316 genuine zero
+slots, history-source exclusion, end-clock seasonal selection across midnight,
+range endpoints, exclusion of the current target from its own baseline,
+unknown/missing provenance, and the unchanged 0.6 feed-degradation boundary.
+Live and replay quality decisions matched. The existing alert-pipeline smoke
+passed. Two independent reviewers found no blocker in the configured
+30-minute path; nondefault wider-window replay parity remains unestablished.
 
 ### Cadence release verification
 
@@ -272,8 +301,8 @@ the existing `(cohort, observed_at)` index for that lookup, without changing
 counting or calibration. Against 2,337,426 production takeoffs, the bounded query
 returned 1,362 slots in 0.008 seconds and exactly matched an independent grouped
 count. The actual Node baseline function took 12.4/6.1/1.4 milliseconds across
-business/military/non-ICAO databases. The last still had zero eligible samples
-because of the inherited timestamp-alignment limitation above. The deadline
+business/military/non-ICAO databases. At that checkpoint, the last still had
+zero eligible samples because of the subsequently corrected clock join. The deadline
 remains 90 seconds per child; it was not raised to conceal the query failure.
 
 Production activation at 02:47 Pacific on 2026-09-05 completed a new-sample pass

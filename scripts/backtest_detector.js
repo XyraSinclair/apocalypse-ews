@@ -28,6 +28,8 @@ const Database = require('better-sqlite3');
 
 const {
   buildTakeoffBaseline,
+  loadTakeoffSlots,
+  buildDataQuality,
   getTakeoffWindow,
   takeoffSeverityForZScore,
   cusumStep,
@@ -51,6 +53,7 @@ function parseArgs(argv) {
     takeoffRateMinCount: Number(process.env.EWS_TAKEOFF_RATE_MIN_COUNT || 3),
     takeoffRateZScore: Number(process.env.EWS_TAKEOFF_RATE_Z_SCORE || 3.5),
     takeoffLiveSource: process.env.EWS_TAKEOFF_LIVE_SOURCE || 'adsbx_heatmap',
+    dataQualityMinRatio: Number(process.env.EWS_DATA_QUALITY_MIN_RATIO || 0.6),
     cusumK: Number(process.env.EWS_CUSUM_K || 1.5),
     cusumThreshold: Number(process.env.EWS_CUSUM_THRESHOLD || 12),
     cusumCritical: Number(process.env.EWS_CUSUM_CRITICAL || 20),
@@ -175,30 +178,14 @@ function cusumReplay(context, args) {
 function takeoffReplay(db, args) {
   const lookbackDays = Math.max(1, args.takeoffRateLookbackDays);
   const replayDays = Math.max(1, args.takeoffDays);
-  // Match live detection's bounded per-slot lookup, not a cohort-wide index scan.
-  const rows = db
-    .prepare(`
-      SELECT
-        m.sampled_at AS sampledAt,
-        (
-          SELECT COUNT(DISTINCT t.hex)
-          FROM takeoff_events t INDEXED BY idx_takeoff_events_cohort_time
-          WHERE t.cohort = ?
-            AND t.source = ?
-            AND t.observed_at = m.sampled_at
-        ) AS takeoffCount,
-        ${db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingest_slots'").get()
-          ? '(SELECT s.live_ingested FROM ingest_slots s WHERE s.sampled_at = m.sampled_at)'
-          : 'NULL'} AS liveIngested
-      FROM concurrent_metrics m
-      WHERE m.sampled_at >= datetime('now', ?)
-      ORDER BY m.sampled_at ASC
-    `)
-    .all(args.cohort, args.takeoffLiveSource, `-${lookbackDays + replayDays} days`);
-  for (const row of rows) {
-    row.sampledAtMs = Date.parse(row.sampledAt);
-  }
-  const replayStartMs = Date.now() - replayDays * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const rows = loadTakeoffSlots(
+    db, args.cohort, args.takeoffLiveSource,
+    new Date(now - (Math.max(lookbackDays, 14) + replayDays) * 24 * 60 * 60 * 1000 -
+      Math.max(1, args.takeoffWindowMinutes) * 60 * 1000).toISOString(),
+    new Date(now).toISOString(),
+  );
+  const replayStartMs = now - replayDays * 24 * 60 * 60 * 1000;
   const lookbackMs = lookbackDays * 24 * 60 * 60 * 1000;
   const options = {
     takeoffWindowMinutes: args.takeoffWindowMinutes,
@@ -207,6 +194,7 @@ function takeoffReplay(db, args) {
     takeoffRateLookbackDays: lookbackDays,
     takeoffLiveSource: args.takeoffLiveSource,
   };
+  const dataQualityFrequency = {};
   const slots = rows.filter((row) => row.sampledAtMs >= replayStartMs);
   const fired = [];
   const zValues = [];
@@ -214,17 +202,17 @@ function takeoffReplay(db, args) {
   let lowerIndex = 0;
   let upperIndex = 0;
   for (const slot of slots) {
-    // Live detection suppresses takeoff scoring on non-live slots
-    // (stale_live); the replay mirrors that.
-    if (Number(slot.liveIngested) !== 1) {
+    const quality = buildDataQuality(slot, rows, slot.sampledAt, args);
+    dataQualityFrequency[quality.status] = (dataQualityFrequency[quality.status] || 0) + 1;
+    if (quality.status === 'stale_live' || quality.status === 'degraded') {
       continue;
     }
     const window = getTakeoffWindow(slot.sampledAt, args.takeoffWindowMinutes);
     const windowStartMs = Date.parse(window.windowStart);
-    while (upperIndex < rows.length && rows[upperIndex].sampledAtMs < windowStartMs) {
+    while (upperIndex < rows.length && rows[upperIndex].sampledAtMs <= windowStartMs) {
       upperIndex += 1;
     }
-    while (lowerIndex < rows.length && rows[lowerIndex].sampledAtMs < windowStartMs - lookbackMs) {
+    while (lowerIndex < rows.length && rows[lowerIndex].sampledAtMs <= windowStartMs - lookbackMs) {
       lowerIndex += 1;
     }
     const stats = buildTakeoffBaseline(rows.slice(lowerIndex, upperIndex), window, options);
@@ -255,6 +243,7 @@ function takeoffReplay(db, args) {
     replayedDays: args.takeoffDays,
     slots: slots.length,
     readySlots,
+    dataQualityFrequency,
     zQuantiles: { p50: quantileOf(0.5), p90: quantileOf(0.9), p99: quantileOf(0.99), max: quantileOf(1) },
     firedCount: fired.length,
     severityFrequency: tally(fired.map((event) => event.severity)),

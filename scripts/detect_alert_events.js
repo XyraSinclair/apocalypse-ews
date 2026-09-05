@@ -317,6 +317,39 @@ function hasIngestSlotsTable(db) {
   );
 }
 
+// Final-slice provenance is the takeoff clock. Concurrent metrics may instead
+// carry an independently timed peak; joining through them loses valid zeroes.
+// Like transition windows, the requested observation range is (start, end].
+function loadTakeoffSlots(db, cohort, liveSource, start, end) {
+  if (!hasIngestSlotsTable(db)) {
+    return [];
+  }
+  // Require the time index: the covering uniqueness index otherwise permits a
+  // cohort-wide scan for every slot on production-sized histories.
+  const rows = db.prepare(`
+    SELECT
+      s.sampled_at AS sampledAt,
+      s.source,
+      s.total_aircraft AS totalAircraft,
+      s.live_ingested AS liveIngested,
+      (
+        SELECT COUNT(DISTINCT t.hex)
+        FROM takeoff_events t INDEXED BY idx_takeoff_events_cohort_time
+        WHERE t.cohort = ?
+          AND t.source = ?
+          AND t.observed_at = s.sampled_at
+      ) AS takeoffCount
+    FROM ingest_slots s
+    WHERE unixepoch(s.sampled_at) > unixepoch(?)
+      AND unixepoch(s.sampled_at) <= unixepoch(?)
+    ORDER BY unixepoch(s.sampled_at)
+  `).all(cohort, liveSource, start, end);
+  for (const row of rows) {
+    row.sampledAtMs = parseIso(row.sampledAt, 'sampledAt').getTime();
+  }
+  return rows;
+}
+
 // Seasonal robust baseline for the live takeoff-rate process. Windows are
 // grouped by (weekday-vs-weekend, slot-of-day) so a normal morning wave is
 // compared against other mornings, not against the flat 24h average that made
@@ -326,29 +359,7 @@ function hasIngestSlotsTable(db) {
 function getTakeoffRateStats(db, cohort, observedAt, options) {
   const window = getTakeoffWindow(observedAt, options.takeoffWindowMinutes);
   const lookbackStart = isoOffset(window.windowStart, -Math.max(1, options.takeoffRateLookbackDays) * DAY_MS);
-  const liveIngestedSelect = hasIngestSlotsTable(db)
-    ? '(SELECT s.live_ingested FROM ingest_slots s WHERE s.sampled_at = m.sampled_at)'
-    : 'NULL';
-  // The covering uniqueness index starts with (cohort, hex), so an unconstrained
-  // planner can scan the entire cohort for every slot. Require the time lookup.
-  const rows = db
-    .prepare(`
-      SELECT
-        m.sampled_at AS sampledAt,
-        (
-          SELECT COUNT(DISTINCT t.hex)
-          FROM takeoff_events t INDEXED BY idx_takeoff_events_cohort_time
-          WHERE t.cohort = ?
-            AND t.source = ?
-            AND t.observed_at = m.sampled_at
-        ) AS takeoffCount,
-        ${liveIngestedSelect} AS liveIngested
-      FROM concurrent_metrics m
-      WHERE CAST(strftime('%s', m.sampled_at) AS INTEGER) >= CAST(strftime('%s', ?) AS INTEGER)
-        AND CAST(strftime('%s', m.sampled_at) AS INTEGER) < CAST(strftime('%s', ?) AS INTEGER)
-      ORDER BY m.sampled_at ASC
-    `)
-    .all(cohort, options.takeoffLiveSource, lookbackStart, window.windowStart);
+  const rows = loadTakeoffSlots(db, cohort, options.takeoffLiveSource, lookbackStart, window.windowStart);
 
   return {
     ...buildTakeoffBaseline(rows, window, options),
@@ -394,10 +405,12 @@ function buildTakeoffBaseline(rows, window, options) {
     allCounts.push(count);
   }
 
-  const windowStartDate = parseIso(window.windowStart, 'windowStart');
-  const windowBucket = Math.floor(windowStartDate.getTime() / window.windowMs);
+  // Historical buckets are labeled by their observation/window end, not start.
+  // Use the same clock here, including the day class across midnight.
+  const windowEndDate = parseIso(window.windowEnd, 'windowEnd');
+  const windowBucket = Math.floor(windowEndDate.getTime() / window.windowMs);
   const windowSlotOfDay = Math.floor((windowBucket * window.windowMs) % DAY_MS / window.windowMs);
-  const windowDayClass = takeoffDayClass(windowStartDate.getUTCDay());
+  const windowDayClass = takeoffDayClass(windowEndDate.getUTCDay());
   const windowGroupKey = `${windowDayClass}:${windowSlotOfDay}`;
 
   let baselineTier = 'day_class_slot';
@@ -457,13 +470,12 @@ function buildTakeoffBaseline(rows, window, options) {
 //                dataQualityMinRatio x the recent same-slot median
 //   stale_live - current slot came from trace backfill (live ingester did
 //                not run); the takeoff-rate process has no data
-//   unknown    - no provenance row (pre-provenance history); proceed
+//   unknown    - provenance, global total, or reference history is absent
 function getDataQuality(db, observedAt, options) {
   if (!hasIngestSlotsTable(db)) {
     return { status: 'unknown', liveSlot: false };
   }
-  const windowMs = Math.max(1, Number(options.takeoffWindowMinutes) || 30) * 60 * 1000;
-  const slotOf = (value) => Math.floor((parseIso(value, 'sampledAt').getTime() % DAY_MS) / windowMs);
+  const lookbackStart = isoOffset(observedAt, -14 * DAY_MS);
   const current = db
     .prepare(`
       SELECT source, total_aircraft AS totalAircraft, live_ingested AS liveIngested
@@ -471,17 +483,9 @@ function getDataQuality(db, observedAt, options) {
       WHERE CAST(strftime('%s', sampled_at) AS INTEGER) = CAST(strftime('%s', ?) AS INTEGER)
     `)
     .get(observedAt);
-  if (!current) {
-    return { status: 'unknown', liveSlot: false };
-  }
-  if (Number(current.liveIngested) !== 1) {
-    return { status: 'stale_live', liveSlot: false, slotSource: current.source };
-  }
-
-  const lookbackStart = isoOffset(observedAt, -14 * DAY_MS);
   const referenceRows = db
     .prepare(`
-      SELECT sampled_at AS sampledAt, total_aircraft AS totalAircraft
+      SELECT sampled_at AS sampledAt, total_aircraft AS totalAircraft, live_ingested AS liveIngested
       FROM ingest_slots
       WHERE live_ingested = 1
         AND total_aircraft IS NOT NULL
@@ -489,23 +493,44 @@ function getDataQuality(db, observedAt, options) {
         AND CAST(strftime('%s', sampled_at) AS INTEGER) < CAST(strftime('%s', ?) AS INTEGER)
     `)
     .all(lookbackStart, observedAt);
-  const currentSlot = slotOf(observedAt);
-  const reference = referenceRows
-    .filter((row) => slotOf(row.sampledAt) === currentSlot)
-    .map((row) => Number(row.totalAircraft));
+  return buildDataQuality(current, referenceRows, observedAt, options);
+}
+
+// Shared by live detection and replay; unknown coverage is not a healthy feed.
+function buildDataQuality(current, referenceRows, observedAt, options) {
+  if (!current) {
+    return { status: 'unknown', liveSlot: false };
+  }
+  if (Number(current.liveIngested) !== 1) {
+    return { status: 'stale_live', liveSlot: false, slotSource: current.source };
+  }
+  const observedAtMs = parseIso(observedAt, 'observedAt').getTime();
+  const lookbackStartMs = observedAtMs - 14 * DAY_MS;
+  const windowMs = Math.max(1, Number(options.takeoffWindowMinutes) || 30) * 60 * 1000;
+  const currentSlot = Math.floor((observedAtMs % DAY_MS) / windowMs);
+  const reference = [];
+  for (const row of referenceRows) {
+    if (Number(row.liveIngested) !== 1 || row.totalAircraft == null || !Number.isFinite(Number(row.totalAircraft))) {
+      continue;
+    }
+    const sampledAtMs = row.sampledAtMs ?? parseIso(row.sampledAt, 'sampledAt').getTime();
+    if (sampledAtMs >= lookbackStartMs && sampledAtMs < observedAtMs &&
+        Math.floor((sampledAtMs % DAY_MS) / windowMs) === currentSlot) {
+      reference.push(Number(row.totalAircraft));
+    }
+  }
   const referenceMedian = medianOf(reference);
   const base = {
     liveSlot: true,
-    currentTotal: Number(current.totalAircraft),
+    currentTotal: current.totalAircraft == null ? null : Number(current.totalAircraft),
     referenceMedian,
     referenceCount: reference.length,
     minRatio: options.dataQualityMinRatio,
   };
-  if (
-    reference.length >= 8 &&
-    Number.isFinite(base.currentTotal) &&
-    base.currentTotal < options.dataQualityMinRatio * referenceMedian
-  ) {
+  if (base.currentTotal == null || !Number.isFinite(base.currentTotal) || reference.length < 8) {
+    return { ...base, status: 'unknown' };
+  }
+  if (base.currentTotal < options.dataQualityMinRatio * referenceMedian) {
     return { ...base, status: 'degraded' };
   }
   return { ...base, status: 'ok' };
@@ -919,6 +944,8 @@ if (require.main === module) {
 module.exports = {
   getTakeoffRateStats,
   buildTakeoffBaseline,
+  loadTakeoffSlots,
+  buildDataQuality,
   getTakeoffEvents,
   getTakeoffWindow,
   getDataQuality,
