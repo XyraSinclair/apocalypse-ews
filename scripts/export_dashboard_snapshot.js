@@ -57,13 +57,13 @@ function main() {
   const {
     buildDashboardSnapshot,
     CONCURRENT_WEEKLY_BASELINE_TIME_ZONE,
-    CONCURRENT_WEEKLY_US_HOLIDAY_MODEL,
+    getDefaultConcurrentPredictionOptions,
   } = require("../server/dashboard");
   const output =
     args.output ||
     path.join(DATA_DIR, "published", args.endpoint === "main" ? "dashboard.json" : `${args.endpoint}-dashboard.json`);
   const concurrentPredictionOptions = {
-    concurrentPredictionModel: CONCURRENT_WEEKLY_US_HOLIDAY_MODEL,
+    ...getDefaultConcurrentPredictionOptions(args.cohort),
     weeklyBaselineTimeZone: process.env.EWS_MODEL_TIME_ZONE || CONCURRENT_WEEKLY_BASELINE_TIME_ZONE,
   };
 
@@ -79,6 +79,7 @@ function main() {
       cohort: args.cohort,
       predictionModel: concurrentPredictionOptions.concurrentPredictionModel,
       predictionTimeZone: concurrentPredictionOptions.weeklyBaselineTimeZone,
+      signalCalibrationModel: concurrentPredictionOptions.signalCalibrationModel,
     },
   };
   fs.mkdirSync(path.dirname(output), { recursive: true });

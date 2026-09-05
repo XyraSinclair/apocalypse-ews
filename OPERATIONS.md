@@ -235,6 +235,63 @@ the draft. Uncertain delivery keeps the draft and warns that retry may duplicate
 Page context excludes query strings, fragments, and referrers. This channel is
 not monitored in real time and is not an emergency dispatch service.
 
+### Non-ICAO coverage and calibration correction
+
+The 2026-09-05 correction records the unfiltered global telemetry count from
+the same newest populated slice used by the non-ICAO live snapshot. It counts
+signed coordinates and repeated records exactly as the canonical parser does.
+A populated ICAO-only slice is valid zero non-ICAO activity; an empty archive
+does not establish coverage or a live execution. Historical repair preserves
+known totals, live provenance, and execution marks. Historical NULL totals
+can be recovered from the business database only at identical observation
+timestamps with genuine `adsbx_heatmap` live provenance in both databases.
+
+Non-ICAO now uses mean-relative residual calibration, re-dimensionalized at
+each seasonal prediction, with a `sqrt(max(expected, 1))` count-noise floor.
+This removes the busy-stratum absolute floor that suppressed quiet strata.
+Business and military retain their absolute-count profiles; their historical
+scores and thresholds matched the deployed control exactly. Single-cohort
+dashboards consume server scores. Combined-cohort aggregate semantics and
+all alarm bounds remain unchanged.
+
+Exact candidate replay through the 04:29:50 Pacific observation passed all
+18 business/military bounds. Non-ICAO reached HIGH and CRITICAL in 30 minutes
+and passed its noise bounds; its replay had only 2 scoreable takeoff slots
+against the unchanged 336-slot assurance minimum. Current takeoff scoring
+can be ready before that many historical scoreable outcomes have accumulated.
+The two configured nightly cohorts are unchanged.
+
+A separate frozen-model experiment trained through August 29 at 04:00 Pacific
+and evaluated the following seven days: 333 overlapping four-slot windows,
+zero initial CUSUM, and the production holiday freeze. No injected or holdout
+counts entered the training baseline or calibration. Each cell below counts
+HIGH within 60 minutes / CRITICAL within 120 minutes, before → after:
+
+| Expected mean | Windows | 3× observed count | 3× expected count |
+|---|---:|---|---|
+| 3–10 | 28 | 0/0 → 13/15 | 0/0 → 9/0 |
+| 10–30 | 33 | 0/0 → 17/18 | 0/0 → 23/20 |
+| 30–100 | 39 | 18/8 → 30/31 | 21/18 → 36/36 |
+| ≥100 | 233 | 215/221 → 217/219 | 229/232 → 232/231 |
+
+These are descriptive, overlapping windows, not independent trials or a
+universal sensitivity guarantee. Quiet strata still have material blind spots,
+including 0/28 critical detections for three times the expected count at mean
+3–10. The existing nightly injection refits altered history and its moving
+endpoint can change the verdict: unchanged business scoring took 90 minutes
+to HIGH at the 03:59:50 observation, then 60 minutes at 04:29:50. Neither a
+single passing window nor this calibration correction closes that assurance gap.
+
+Direct execution covered five binary selection cases against the canonical
+parser, both history repair paths, zero-cohort clearing, empty and backward
+observations, zero-MAD live/archive parity, and healthy/degraded/unknown/stale
+coverage decisions. Existing ingestion and alert-pipeline smokes passed.
+Independent ingestion and calibration reviewers found no blocker.
+Legacy non-ICAO unsigned latitude filtering still omits southern-hemisphere
+cohort rows; changing that definition requires historical reconstruction and
+recalibration, not a live-only count expansion. The global denominator does
+include those coordinates. Historical peak counts and timestamps are unchanged.
+
 ### Detector assurance status
 
 The business-jet nightly replay ending 2026-09-04 18:45 Pacific failed its

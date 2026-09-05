@@ -468,7 +468,7 @@ def upsert_dashboard_concurrent_metric(connection, metric_row):
 def record_ingest_slot(connection, metric_row, live_ingested):
     # Historical scans cannot prove the snapshot-transition process ran.
     # Preserve a genuine live mark when a later history repair revisits it.
-    # Global feed totals are unavailable on this filtered path.
+    # Only a selected, unfiltered live slice supplies a global feed total.
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS ingest_slots (
@@ -484,14 +484,15 @@ def record_ingest_slot(connection, metric_row, live_ingested):
     connection.execute(
         """
         INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne, live_ingested)
-        VALUES (?, ?, NULL, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(sampled_at) DO UPDATE SET
           source = CASE WHEN ingest_slots.live_ingested = 1 THEN ingest_slots.source ELSE excluded.source END,
+          total_aircraft = COALESCE(excluded.total_aircraft, ingest_slots.total_aircraft),
           cohort_airborne = excluded.cohort_airborne,
           live_ingested = MAX(ingest_slots.live_ingested, excluded.live_ingested)
         """,
         (metric_row["sampled_at"], "adsbx_heatmap" if live_ingested else "adsbx_history",
-         metric_row["airborne_unique_hex_count"], int(live_ingested)),
+         metric_row.get("total_aircraft"), metric_row["airborne_unique_hex_count"], int(live_ingested)),
     )
 
 
@@ -509,7 +510,8 @@ def ingest_file(connection, cache_path, metrics_only=False, write_concurrent_met
         insert_non_icao_metric_row(connection, metric_row)
         if write_concurrent_metrics:
             upsert_dashboard_concurrent_metric(connection, metric_row)
-            record_ingest_slot(connection, metric_row, live_ingested)
+            if not live_ingested:
+                record_ingest_slot(connection, metric_row, live_ingested=False)
 
         return metric_row["unique_hex_count"], metric_row["observation_count"], {
             "sampled_at": sampled_at_iso,
@@ -656,20 +658,25 @@ def parse_latest_non_icao_snapshot(cache_path):
     while index < len(points) and int(points_u[index]) != SLICE_BEGIN_MARKER:
         index += 1
     slice_indices = np.flatnonzero(points_u[index::4] == SLICE_BEGIN_MARKER) * 4 + index
-    if len(slice_indices):
-        index = int(slice_indices[-1])
+    slice_indices = sorted(
+        slice_indices,
+        key=lambda start: int(points_u[start + 1]) * 4294967296 + int(points_u[start + 2]),
+        reverse=True,
+    )
 
-    latest_sampled_at = None
-    latest_rows = []
-
-    while index < len(points):
+    for index in slice_indices:
         now = int(points_u[index + 2]) / 1000 + int(points_u[index + 1]) * 4294967.296
         sampled_at = dt.datetime.fromtimestamp(now, tz=dt.timezone.utc)
         index += 4
         rows_by_hex = {}
+        total_aircraft = 0
 
         while index < len(points) and int(points_u[index]) != SLICE_BEGIN_MARKER:
             point0_u = int(points_u[index])
+            # Match parse_heatmap's unfiltered telemetry count, including
+            # repeated hexes and signed southern-hemisphere coordinates.
+            if int(points[index + 1]) <= 1073741824:
+                total_aircraft += 1
             if not point0_u & 0x1000000:
                 index += 4
                 continue
@@ -715,13 +722,10 @@ def parse_latest_non_icao_snapshot(cache_path):
                 rows_by_hex[hex_value] = row
             index += 4
 
-        latest_sampled_at = sampled_at
-        latest_rows = sorted(rows_by_hex.values(), key=lambda row: row["hex"])
+        if total_aircraft:
+            return sampled_at.isoformat(), sorted(rows_by_hex.values(), key=lambda row: row["hex"]), total_aircraft
 
-    if latest_sampled_at is None:
-        return None, []
-
-    return latest_sampled_at.isoformat(), latest_rows
+    return None, [], None
 
 
 def load_previous_live_snapshot(connection):
@@ -769,8 +773,8 @@ def build_takeoff_rows(snapshot_rows, previous_live_snapshot):
     return takeoff_rows
 
 
-def replace_live_snapshot(connection, cache_path):
-    sampled_at_iso, snapshot_rows = parse_latest_non_icao_snapshot(cache_path)
+def replace_live_snapshot(connection, cache_path, live_ingested=False):
+    sampled_at_iso, snapshot_rows, total_aircraft = parse_latest_non_icao_snapshot(cache_path)
     if sampled_at_iso is None:
         return None
     previous_status_row = connection.execute(
@@ -855,6 +859,12 @@ def replace_live_snapshot(connection, cache_path):
         )
 
     airborne_count = sum(1 for row in snapshot_rows if row["is_airborne"])
+    if live_ingested:
+        record_ingest_slot(connection, {
+            "sampled_at": sampled_at_iso,
+            "total_aircraft": total_aircraft,
+            "airborne_unique_hex_count": airborne_count,
+        }, live_ingested=True)
 
     set_meta(connection, "cohort_source", "non_icao_untracked")
     set_meta(connection, "adsbx_heatmap_sampled_at", sampled_at_iso)
@@ -1033,12 +1043,12 @@ def main():
             )
             if not latest_parsed_file:
                 raise ValueError("Selected archive has no usable metrics.")
-            sampled_at = dt.datetime.fromisoformat(latest_parsed_file["sampled_at"])
-            if not selected["slot"] <= sampled_at < selected["slot"] + dt.timedelta(minutes=30):
-                raise ValueError("Archive observation timestamp falls outside its source slot.")
-            live_snapshot = replace_live_snapshot(connection, selected["cache_path"])
+            live_snapshot = replace_live_snapshot(connection, selected["cache_path"], live_ingested=True)
             if live_snapshot is None:
                 raise ValueError("Selected archive has no usable non-ICAO snapshot.")
+            sampled_at = dt.datetime.fromisoformat(live_snapshot["sampled_at"])
+            if not selected["slot"] <= sampled_at < selected["slot"] + dt.timedelta(minutes=30):
+                raise ValueError("Archive observation timestamp falls outside its source slot.")
             set_meta(connection, "adsbx_heatmap_slot_key", selected["slot_key"])
             connection.execute(
                 "UPDATE ingestion_runs SET finished_at = ?, status = ?, details = ? WHERE id = ?",
@@ -1080,7 +1090,7 @@ def main():
             json.dumps(
                 {
                     "ok": True,
-                    "latestSampledAt": latest_parsed_file["sampled_at"] if latest_parsed_file else None,
+                    "latestSampledAt": live_snapshot["sampled_at"],
                     "latestSlotKey": selected["slot_key"],
                     "latestUrl": selected["url"],
                     "cachePath": str(selected["cache_path"]),

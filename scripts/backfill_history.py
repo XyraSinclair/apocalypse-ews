@@ -425,8 +425,8 @@ def ingest_metrics(connection, tracked_by_hex, start_date, end_date, skip_downlo
             INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne, live_ingested)
             VALUES (:sampled_at, 'adsbx_history', NULL, :concurrent_count, 0)
             ON CONFLICT(sampled_at) DO UPDATE SET
-              source = excluded.source,
-              total_aircraft = excluded.total_aircraft,
+              source = CASE WHEN ingest_slots.live_ingested = 1 THEN ingest_slots.source ELSE excluded.source END,
+              total_aircraft = COALESCE(excluded.total_aircraft, ingest_slots.total_aircraft),
               cohort_airborne = excluded.cohort_airborne
             """,
             concurrent_rows,

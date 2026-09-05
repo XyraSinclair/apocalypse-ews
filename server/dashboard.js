@@ -67,10 +67,11 @@ const DEFAULT_ALARM_SIGMA_THRESHOLD = 7;
 const ARCHIVE_DECIMAL_PLACES = 2;
 const timeZonePartFormatters = new Map();
 
-function getDefaultConcurrentPredictionOptions() {
+function getDefaultConcurrentPredictionOptions(cohort = null) {
   return {
     concurrentPredictionModel: CONCURRENT_WEEKLY_US_HOLIDAY_MODEL,
     weeklyBaselineTimeZone: CONCURRENT_WEEKLY_BASELINE_TIME_ZONE,
+    signalCalibrationModel: cohort === "non_icao_untracked" ? "relative-count" : "absolute-count",
   };
 }
 
@@ -165,9 +166,14 @@ function computeBaselineSignal(
   signalCalibration = null,
 ) {
   const divergence = currentValue - baselineMean;
+  const relativeCalibration = signalCalibration?.model === "relative-count";
+  const calibrationScale = relativeCalibration ? Math.max(baselineMean, 1) : 1;
+  const stdDevFloor = Number(signalCalibration?.stdDevFloor || 0) * calibrationScale;
+  const positiveExcessScale = Number(signalCalibration?.positiveExcessScale || 0) * calibrationScale;
   const effectiveBaselineStdDev = Math.max(
     Number(baselineStdDev || 0),
-    Number(signalCalibration?.stdDevFloor || 0),
+    stdDevFloor,
+    relativeCalibration ? Math.sqrt(calibrationScale) : 0,
   );
 
   if (!effectiveBaselineStdDev) {
@@ -176,6 +182,8 @@ function computeBaselineSignal(
       rawSigmaShift: 0,
       varianceAdjustedSigmaShift: 0,
       effectiveBaselineStdDev: 0,
+      stdDevFloor,
+      positiveExcessScale,
       absoluteExcessWeight: 1,
       gaugeValue: 0,
       alertLevel: "normal",
@@ -185,7 +193,6 @@ function computeBaselineSignal(
 
   const rawSigmaShift = baselineStdDev ? divergence / baselineStdDev : 0;
   const varianceAdjustedSigmaShift = divergence / effectiveBaselineStdDev;
-  const positiveExcessScale = Number(signalCalibration?.positiveExcessScale || 0);
   const absoluteExcessWeight =
     divergence > 0 && positiveExcessScale > 0
       ? divergence / (divergence + positiveExcessScale)
@@ -200,6 +207,8 @@ function computeBaselineSignal(
     rawSigmaShift,
     varianceAdjustedSigmaShift,
     effectiveBaselineStdDev,
+    stdDevFloor,
+    positiveExcessScale,
     absoluteExcessWeight,
     gaugeValue: computeGaugeValue(sigmaShift, alarmSigmaThreshold),
     alertLevel: computeAlertLevel(sigmaShift, alarmSigmaThreshold),
@@ -873,10 +882,11 @@ function calibrateConcurrentAlarmThreshold(records) {
   return Math.max(MIN_ALARM_SIGMA_THRESHOLD, Math.ceil((secondHighestPeak + 0.05) * 10) / 10);
 }
 
-function buildConcurrentSignalCalibration(records) {
+function buildConcurrentSignalCalibration(records, model = "absolute-count") {
   const residuals = [];
   const positiveResiduals = [];
   const baselineStdDevs = [];
+  const relativeCalibration = model === "relative-count";
 
   for (const record of records) {
     if (!record.modelReady) {
@@ -886,7 +896,10 @@ function buildConcurrentSignalCalibration(records) {
     const baselineMean = Number(record.expectedConcurrentCount || 0);
     const baselineStdDev = Number(record.expectedConcurrentStdDev || 0);
     const currentValue = Number(record.concurrentCount || 0);
-    const residual = currentValue - baselineMean;
+    // Relative calibration prevents busy seasonal strata from setting an
+    // absolute count floor that makes quiet non-ICAO strata unresponsive.
+    const calibrationScale = relativeCalibration ? Math.max(baselineMean, 1) : 1;
+    const residual = (currentValue - baselineMean) / calibrationScale;
 
     if (Number.isFinite(residual)) {
       residuals.push(residual);
@@ -896,17 +909,19 @@ function buildConcurrentSignalCalibration(records) {
     }
 
     if (Number.isFinite(baselineStdDev) && baselineStdDev > 0) {
-      baselineStdDevs.push(baselineStdDev);
+      baselineStdDevs.push(baselineStdDev / calibrationScale);
     }
   }
 
+  const absoluteResiduals = residuals.map((residual) => Math.abs(residual));
   const stdDevFloor =
-    median(residuals.map((residual) => Math.abs(residual)).filter((residual) => residual > 0)) ??
+    median(relativeCalibration ? absoluteResiduals : absoluteResiduals.filter((residual) => residual > 0)) ??
     median(baselineStdDevs) ??
     0;
   const positiveExcessScale = median(positiveResiduals) ?? stdDevFloor;
 
   return {
+    model,
     stdDevFloor,
     positiveExcessScale,
   };
@@ -1674,6 +1689,7 @@ function buildWeeklyBaselinePredictionContext(normalizedRows, options = {}) {
   });
   const signalCalibration = buildConcurrentSignalCalibration(
     denseProvisionalRecords.length ? denseProvisionalRecords : provisionalRecords,
+    options.signalCalibrationModel,
   );
   state.signalCalibration = signalCalibration;
   const scoredProvisionalRecords = provisionalRecords.map((record) => {
@@ -1902,7 +1918,7 @@ function computeConcurrentPredictionModel(
     const compositeSignal = computeBaselineSignal(
       resolvedConcurrentCount,
       Number(referenceRecord.expectedConcurrentCount || 0),
-      Number(referenceRecord.expectedConcurrentStdDev || CONCURRENT_MIN_STD_DEV),
+      Number(referenceRecord.expectedConcurrentStdDev ?? 0),
       context.alarmSigmaThreshold,
       context.signalCalibration,
     );
@@ -2140,8 +2156,9 @@ function buildDashboardPayload({
         rawSigmaShift: currentModel.compositeSignal.rawSigmaShift,
         varianceAdjustedSigmaShift: currentModel.compositeSignal.varianceAdjustedSigmaShift,
         absoluteExcessWeight: currentModel.compositeSignal.absoluteExcessWeight,
-        signalStdDevFloor: concurrentContext.signalCalibration?.stdDevFloor,
-        signalPositiveExcessScale: concurrentContext.signalCalibration?.positiveExcessScale,
+        signalCalibrationModel: concurrentContext.signalCalibration?.model,
+        signalStdDevFloor: currentModel.compositeSignal.stdDevFloor,
+        signalPositiveExcessScale: currentModel.compositeSignal.positiveExcessScale,
         timeOfDayExpected: currentModel.timeOfDayExpected,
         timeOfWeekExpected: currentModel.timeOfWeekExpected,
         calendarAdjustment: currentModel.calendarAdjustment,

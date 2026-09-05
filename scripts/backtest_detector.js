@@ -38,7 +38,7 @@ const {
 const {
   buildConcurrentPredictionContext,
   CONCURRENT_WEEKLY_BASELINE_TIME_ZONE,
-  CONCURRENT_WEEKLY_US_HOLIDAY_MODEL,
+  getDefaultConcurrentPredictionOptions,
 } = require('../server/dashboard');
 
 function parseArgs(argv) {
@@ -88,9 +88,9 @@ function loadConcurrentRows(db) {
     .all();
 }
 
-function scoreConcurrent(rows) {
+function scoreConcurrent(rows, args) {
   return buildConcurrentPredictionContext(rows, {
-    concurrentPredictionModel: CONCURRENT_WEEKLY_US_HOLIDAY_MODEL,
+    ...getDefaultConcurrentPredictionOptions(args.cohort),
     weeklyBaselineTimeZone: process.env.EWS_MODEL_TIME_ZONE || CONCURRENT_WEEKLY_BASELINE_TIME_ZONE,
   });
 }
@@ -269,7 +269,7 @@ function injectExodus(rows, args) {
       ? { ...row, concurrentCount: Math.round(Number(row.concurrentCount) * args.injectFactor) }
       : { ...row }
   ));
-  const context = scoreConcurrent(injected);
+  const context = scoreConcurrent(injected, args);
   const injectedRecords = context.records.slice(-injectedSlotCount);
   // Replay CUSUM over the whole scored sequence so pre-injection state is
   // realistic, then note when each severity is first reached inside the
@@ -368,7 +368,7 @@ function main() {
   db.pragma('busy_timeout = 30000');
   try {
     const rows = loadConcurrentRows(db);
-    const context = scoreConcurrent(rows);
+    const context = scoreConcurrent(rows, args);
     const report = {
       ok: true,
       cohort: args.cohort,

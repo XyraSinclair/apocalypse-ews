@@ -230,10 +230,12 @@ wave (cutoff σ7.74).*
 
 The 2026-09-05 assurance correction aligns takeoff history and targets on the
 final-slice clock and removes a one-slot seasonal phase error without loosening
-limits. Business and military pass the existing replay bounds. This completion
-claim does not extend to non-ICAO sensitivity: its all-cohort probe still fails
-the injected warning bounds and its takeoff history is warming. Unknown feed
-coverage and inferred historical liveness remain explicit in OPERATIONS.md.
+limits. Business and military pass the current existing replay window. Non-ICAO
+now preserves global coverage evidence and uses a relative-count calibration
+profile without changing the other cohorts or alarm bounds. Its latest injection
+passes, but frozen-model evaluation still shows low-count blind spots and its
+takeoff replay remains warming. OPERATIONS.md records the denominators, moving-
+window limitation, inferred historical liveness, and unchanged cohort filtering.
 
 **Phase 2 — the box.** Hetzner provisioned by `bootstrap.sh`; systemd chain;
 Litestream backups; healthchecks on every timer; restore drill done twice;
