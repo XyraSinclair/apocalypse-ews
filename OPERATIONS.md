@@ -292,6 +292,17 @@ cohort rows; changing that definition requires historical reconstruction and
 recalibration, not a live-only count expansion. The global denominator does
 include those coordinates. Historical peak counts and timestamps are unchanged.
 
+Production activation completed at 05:03 Pacific on 2026-09-05. The genuine
+05:02 live run had already recorded the new 04:59:50 observation with 7,160
+global records and six non-ICAO snapshot rows, before historical restoration.
+An integrity-checked backup preceded the recovery of 338 exact-source NULL
+totals; no live slots remained without a global total. Seven same-time
+references still leave L0 coverage correctly `unknown` until the eighth exists.
+All public snapshots exposed the intended profiles with `Cache-Control: no-store`.
+The actual nightly unit passed in five seconds at 05:06 Pacific, two-minute
+polling remained active, and operational status reported healthy. That
+operational verdict does not close the statistical limitations above.
+
 ### Detector assurance status
 
 The business-jet nightly replay ending 2026-09-04 18:45 Pacific failed its
