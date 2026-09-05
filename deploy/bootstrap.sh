@@ -135,7 +135,7 @@ systemctl enable --now ntfy
 [ -f /etc/cloudflared/token ] && systemctl enable --now cloudflared \
   || echo "HOLD: cloudflared not started (no token yet)"
 systemctl enable --now apocalypse-ews.service
-for timer in refresh refresh-imports repair backup watchdog canary; do
+for timer in refresh refresh-imports repair backup watchdog canary watch; do
   systemctl enable --now "apocalypse-ews-$timer.timer"
 done
 

@@ -171,6 +171,34 @@ function alertsReport() {
   }
 }
 
+function watchReport() {
+  const filename = process.env.EWS_WATCH_DB_PATH || path.join(DATA_DIR, 'ews-watch.sqlite');
+  if (!fs.existsSync(filename)) return { available: false, healthy: false, error: 'Watch database has not been initialized.' };
+  const db = new Database(filename, { readonly: true, fileMustExist: true });
+  try {
+    const { getWatchSnapshot } = require('../server/watch-store');
+    const snapshot = getWatchSnapshot(db, { limit: 1 });
+    const lastRunAgeMinutes = snapshot.run.lastFinishedAt
+      ? Math.round((Date.now() - Date.parse(snapshot.run.lastFinishedAt)) / 60000) : null;
+    const sourceProblems = snapshot.sources.filter((source) => source.enabled && source.health !== 'healthy')
+      .map((source) => ({ id: source.id, health: source.health, error: source.lastError }));
+    const services = process.platform === 'darwin' ? [] : [
+      systemdState('apocalypse-ews-watch.timer'), systemdState('apocalypse-ews-watch.service'),
+    ];
+    return {
+      available: true, ...snapshot.counts, run: snapshot.run, agent: snapshot.agent,
+      lastRunAgeMinutes, sourceProblems, services,
+      healthy: lastRunAgeMinutes != null && lastRunAgeMinutes <= 6 && !snapshot.run.lastError
+        && snapshot.agent.configured && sourceProblems.length === 0
+        && services.every((service) => service.loaded && service.lastState !== 'failed'),
+    };
+  } catch (error) {
+    return { available: false, healthy: false, error: `Watch status could not be read: ${error.message}` };
+  } finally {
+    db.close();
+  }
+}
+
 const report = {
   polling: safe(() => {
     const state = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'refresh-state.json'), 'utf8'));
@@ -193,6 +221,7 @@ const report = {
     return 'ok';
   }, 'unreachable'),
   alerts: alertsReport(),
+  watch: watchReport(),
   backups: process.platform === 'darwin' ? null : backupsReport(),
   verdict: null,
 };
@@ -250,7 +279,7 @@ for (const service of report.services) {
 if (report.serverHttp !== 'ok') problems.push('dashboard server unreachable on :3030');
 if (report.backups) {
   if (!report.backups.dayCount) problems.push('no sqlite backups yet — run npm run backup');
-  else if (report.backups.latestFiles < 3) problems.push(`latest backup day ${report.backups.latestDay} has ${report.backups.latestFiles}/3 databases`);
+  else if (report.backups.latestFiles < 4) problems.push(`latest backup day ${report.backups.latestDay} has ${report.backups.latestFiles}/4 databases`);
   else if (report.backups.ageHours > 50) problems.push(`sqlite backups stale (${report.backups.ageHours}h) — check apocalypse-ews-backup.timer`);
 }
 report.verdict = problems.length ? { healthy: false, problems } : { healthy: true };

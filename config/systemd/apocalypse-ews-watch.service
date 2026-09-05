@@ -1,0 +1,20 @@
+[Unit]
+Description=Collect public digital signals and investigate watch incidents
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=xyra
+WorkingDirectory=/opt/dev/apocalypse-ews
+Environment=NODE_ENV=production
+Environment=EWS_WATCH_MODEL=google/gemini-2.5-flash-lite
+Environment=EWS_WATCH_DAILY_INVESTIGATIONS=12
+EnvironmentFile=-/etc/apocalypse-ews-watch.env
+ExecStart=/usr/bin/node scripts/run_watch.js
+TimeoutStartSec=240
+TimeoutStopSec=10
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077

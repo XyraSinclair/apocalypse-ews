@@ -37,6 +37,12 @@ const {
 
 loadEnvFile();
 
+const { openWatchDb, syncSources } = require("./watch-store");
+const { SOURCE_DEFINITIONS } = require("./watch-sources");
+const { mountWatchRoutes } = require("./watch-api");
+const watchDb = openWatchDb();
+syncSources(watchDb, SOURCE_DEFINITIONS);
+
 const app = express();
 const PORT = Number(process.env.PORT || 3030);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -401,6 +407,8 @@ app.get("/api/alerts", (request, response) => {
 app.get("/api/event-signals", (_request, response) => {
   response.set("cache-control", "no-store").json(readPublishedJson("event-signals.json"));
 });
+
+mountWatchRoutes(app, { getDb: () => watchDb, requireInternalAuth });
 
 // In-process fixed-window rate limiter for the public write endpoints. The
 // server sits behind the Cloudflare tunnel, so the socket address is always
