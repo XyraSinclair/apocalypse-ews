@@ -175,13 +175,14 @@ function cusumReplay(context, args) {
 function takeoffReplay(db, args) {
   const lookbackDays = Math.max(1, args.takeoffRateLookbackDays);
   const replayDays = Math.max(1, args.takeoffDays);
+  // Match live detection's bounded per-slot lookup, not a cohort-wide index scan.
   const rows = db
     .prepare(`
       SELECT
         m.sampled_at AS sampledAt,
         (
           SELECT COUNT(DISTINCT t.hex)
-          FROM takeoff_events t
+          FROM takeoff_events t INDEXED BY idx_takeoff_events_cohort_time
           WHERE t.cohort = ?
             AND t.source = ?
             AND t.observed_at = m.sampled_at

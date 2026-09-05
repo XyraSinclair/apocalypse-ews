@@ -329,13 +329,15 @@ function getTakeoffRateStats(db, cohort, observedAt, options) {
   const liveIngestedSelect = hasIngestSlotsTable(db)
     ? '(SELECT s.live_ingested FROM ingest_slots s WHERE s.sampled_at = m.sampled_at)'
     : 'NULL';
+  // The covering uniqueness index starts with (cohort, hex), so an unconstrained
+  // planner can scan the entire cohort for every slot. Require the time lookup.
   const rows = db
     .prepare(`
       SELECT
         m.sampled_at AS sampledAt,
         (
           SELECT COUNT(DISTINCT t.hex)
-          FROM takeoff_events t
+          FROM takeoff_events t INDEXED BY idx_takeoff_events_cohort_time
           WHERE t.cohort = ?
             AND t.source = ?
             AND t.observed_at = m.sampled_at

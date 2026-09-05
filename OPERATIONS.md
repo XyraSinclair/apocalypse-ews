@@ -265,6 +265,17 @@ the OS lock was held. Default and latest-only decoding returned identical latest
 telemetry for a real 180-slice archive (5.82 seconds versus 0.042 seconds locally).
 These are local measurements, not production latency guarantees.
 
+The first production pass exposed a scale-dependent detector timeout: SQLite
+selected the covering `(cohort, hex, observed_at, source)` uniqueness index and
+scanned the cohort for every baseline slot. Live detection and replay now require
+the existing `(cohort, observed_at)` index for that lookup, without changing
+counting or calibration. Against 2,337,426 production takeoffs, the bounded query
+returned 1,362 slots in 0.008 seconds and exactly matched an independent grouped
+count. The actual Node baseline function took 12.4/6.1/1.4 milliseconds across
+business/military/non-ICAO databases. The last still had zero eligible samples
+because of the inherited timestamp-alignment limitation above. The deadline
+remains 90 seconds per child; it was not raised to conceal the query failure.
+
 The locked frontend build and existing ingestion/alert-pipeline checks passed.
 Browser interception exercised stored-success, rejection, malformed success,
 duplicate submission, draft retention, image payloads, private-context exclusion,
