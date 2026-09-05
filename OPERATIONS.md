@@ -274,6 +274,13 @@ The audited 335 non-ICAO live marks all matched completed live runs, with all
 334 predecessor intervals exactly 1,800 seconds. Post-gap transition timing
 and individual-airframe observation opportunity remain separate limitations.
 
+Activation at 03:42 Pacific on 2026-09-05 ran the actual nightly systemd unit:
+both configured cohorts passed, the service finished successfully in five
+seconds, and operational status became healthy with two-minute polling active.
+The deployed detector exposed 672/672/335 eligible business/military/non-ICAO
+baseline samples against the unchanged 336 minimum. Non-ICAO therefore remained
+correctly warming rather than permanently losing its history to the clock join.
+
 Isolated direct execution covered shifted peak timestamps, 1,316 genuine zero
 slots, history-source exclusion, end-clock seasonal selection across midnight,
 range endpoints, exclusion of the current target from its own baseline,
