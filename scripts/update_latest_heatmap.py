@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import urllib.error
 import urllib.request
+from functools import lru_cache
 
 from adsbx_http import GLOBE_HEADERS
 from parse_heatmap import parse_heatmap
@@ -32,10 +33,11 @@ RECENT_WINDOW_SLOTS = 48
 def parse_args():
     parser = argparse.ArgumentParser(description="Fetch and ingest the newest available ADS-B Exchange heatmap.")
     parser.add_argument("--db", default=str(DB_PATH), help="SQLite database path.")
+    parser.add_argument("--additional-db", action="append", default=[], help="Ingest the same selected slice into another cohort database.")
     parser.add_argument(
         "--lookback-slots",
         type=int,
-        default=96,
+        default=4,
         help="How many 30-minute slots to search backward when the newest heatmap is unavailable.",
     )
     parser.add_argument(
@@ -121,7 +123,7 @@ def heatmap_url_for(timestamp):
     )
 
 
-def download_heatmap(timestamp, destination, timeout_seconds=120):
+def download_heatmap(timestamp, destination, timeout_seconds=15):
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         return True, True
@@ -129,7 +131,10 @@ def download_heatmap(timestamp, destination, timeout_seconds=120):
     request = urllib.request.Request(heatmap_url_for(timestamp), headers=GLOBE_HEADERS)
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            destination.write_bytes(response.read())
+            payload = response.read()
+        temporary = destination.with_suffix(destination.suffix + ".part")
+        temporary.write_bytes(payload)
+        temporary.replace(destination)
         return True, False
     except urllib.error.HTTPError as error:
         if error.code == 404:
@@ -139,16 +144,14 @@ def download_heatmap(timestamp, destination, timeout_seconds=120):
 
 def choose_latest_heatmap(now, lookback_slots):
     latest_slot = floor_to_half_hour(now)
-    last_error = None
+    # Only 404 means unpublished. Network/auth failures must not masquerade
+    # as a successful poll of an older cached slot. No persistent negative
+    # cache: a just-published archive is reconsidered on the next poll.
 
     for offset in range(lookback_slots + 1):
         candidate = latest_slot - dt.timedelta(minutes=30 * offset)
         cache_path = cache_path_for(candidate)
-        try:
-            available, used_cache = download_heatmap(candidate, cache_path)
-        except Exception as error:  # pragma: no cover - defensive network handling
-            last_error = error
-            continue
+        available, used_cache = download_heatmap(candidate, cache_path)
 
         if not available:
             continue
@@ -161,14 +164,12 @@ def choose_latest_heatmap(now, lookback_slots):
             "used_cache": used_cache,
         }
 
-    if last_error:
-        raise last_error
-
     raise FileNotFoundError("No recent ADS-B Exchange heatmap file was available in the requested lookback window.")
 
 
+@lru_cache(maxsize=1)
 def parse_latest_slice(cache_path):
-    slices = parse_heatmap(str(cache_path), return_callsigns=False)
+    slices = parse_heatmap(str(cache_path), return_callsigns=False, latest_only=True)
     if not slices:
         return None
 
@@ -511,8 +512,7 @@ def ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=
     }
 
 
-def main():
-    args = parse_args()
+def main(args, selected=None):
     ensure_directories()
     connection = open_db(args.db)
 
@@ -522,8 +522,11 @@ def main():
             raise ValueError("No tracked aircraft found. Run `npm run import:faa` first.")
 
         tracked_by_hex = {entry["hex"]: entry for entry in tracked_entries}
-        selected = choose_latest_heatmap(dt.datetime.now(dt.timezone.utc), args.lookback_slots)
+        selected = selected or choose_latest_heatmap(dt.datetime.now(dt.timezone.utc), args.lookback_slots)
         current_slot_key = get_meta(connection, META_SLOT_KEY)
+        previous_sampled_at = get_meta(connection, META_SAMPLED_AT)
+        if current_slot_key and selected["slot_key"] < current_slot_key:
+            raise ValueError("Archive selection moved behind the current live slot.")
         current_window_samples = recent_sample_count(connection, selected["slot"])
 
         latest_slot_already_current = current_slot_key == selected["slot_key"]
@@ -532,6 +535,21 @@ def main():
             not args.fill_recent_slots or recent_window_already_full
         ):
             sampled_at = get_meta(connection, META_SAMPLED_AT)
+            status_value = get_meta(connection, HEATMAP_STATUS_META_KEY)
+            status = json.loads(status_value) if status_value else {}
+            polled_at = dt.datetime.now(dt.timezone.utc).isoformat()
+            status.update({
+                "cadenceMinutes": 30,
+                "pollCadenceMinutes": 2,
+                "lastAttemptAt": polled_at,
+                "lastPollSuccessAt": polled_at,
+                "latestSampledAt": sampled_at,
+                "latestSlotKey": current_slot_key,
+                "lastError": None,
+                "refreshing": False,
+            })
+            set_meta(connection, HEATMAP_STATUS_META_KEY, json.dumps(status))
+            connection.commit()
             summary = current_snapshot_summary(connection, sampled_at) if sampled_at else {
                 "matched_count": 0,
                 "airborne_count": 0,
@@ -554,7 +572,7 @@ def main():
                     }
                 )
             )
-            return
+            return selected
 
         latest_result = None
         selected_used_cache = selected["used_cache"]
@@ -571,6 +589,14 @@ def main():
             latest_slice = parse_latest_slice(slot_info["cache_path"])
             if latest_slice is None:
                 continue
+            if not slot <= latest_slice.timestamp < slot + dt.timedelta(minutes=30):
+                raise ValueError("Archive observation timestamp falls outside its source slot.")
+            if slot == selected["slot"] and previous_sampled_at:
+                previous_timestamp = dt.datetime.fromisoformat(previous_sampled_at)
+                if latest_slice.timestamp < previous_timestamp or (
+                    current_slot_key != selected["slot_key"] and latest_slice.timestamp <= previous_timestamp
+                ):
+                    raise ValueError("New archive slot did not advance the live observation.")
 
             result = ingest_slot(connection, tracked_by_hex, latest_slice, replace_live_snapshot=slot == selected["slot"])
             if slot == selected["slot"]:
@@ -580,6 +606,15 @@ def main():
         if latest_result is None:
             raise ValueError(f"Could not parse a usable latest heatmap from {selected['cache_path']}")
 
+        previous_status_value = get_meta(connection, HEATMAP_STATUS_META_KEY)
+        previous_status = json.loads(previous_status_value) if previous_status_value else {}
+        observation_advanced = not previous_sampled_at or (
+            dt.datetime.fromisoformat(latest_result["sampled_at"]) > dt.datetime.fromisoformat(previous_sampled_at)
+        )
+        new_observation_at = (
+            dt.datetime.now(dt.timezone.utc).isoformat() if observation_advanced
+            else previous_status.get("lastNewObservationAt") or previous_status.get("lastSuccessAt")
+        )
         set_meta(connection, META_SLOT_KEY, selected["slot_key"])
         set_meta(connection, META_SAMPLED_AT, latest_result["sampled_at"])
         set_meta(connection, META_URL, selected["url"])
@@ -592,10 +627,13 @@ def main():
                     "provider": SOURCE,
                     "providerLabel": "ADS-B Exchange heatmap",
                     "cadenceMinutes": 30,
+                    "pollCadenceMinutes": 2,
+                    "lastPollSuccessAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "lastNewObservationAt": new_observation_at,
                     "refreshing": False,
                     "nextRefreshAt": None,
                     "lastAttemptAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "lastSuccessAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "lastSuccessAt": new_observation_at,
                     "lastError": None,
                     "latestSampledAt": latest_result["sampled_at"],
                     "latestSlotKey": selected["slot_key"],
@@ -628,13 +666,18 @@ def main():
                 }
             )
         )
+        return selected
     finally:
         connection.close()
 
 
 if __name__ == "__main__":
     try:
-        main()
+        args = parse_args()
+        selected = main(args)
+        for db_path in args.additional_db:
+            args.db = db_path
+            main(args, selected)
     except Exception as error:  # pragma: no cover - CLI error path
         print(str(error), file=sys.stderr)
         raise

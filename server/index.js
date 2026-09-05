@@ -235,10 +235,12 @@ function createDashboardSnapshotManager() {
   }
 
   function getSnapshot() {
+    if (process.env.EWS_EXTERNAL_REFRESH === "1") return readPublishedJson("dashboard.json");
     return snapshot;
   }
 
   async function refresh({ reason = "manual" } = {}) {
+    if (process.env.EWS_EXTERNAL_REFRESH === "1") return getSnapshot();
     if (refreshPromise) {
       return refreshPromise;
     }
@@ -267,6 +269,7 @@ function createDashboardSnapshotManager() {
   }
 
   async function ensureReady() {
+    if (process.env.EWS_EXTERNAL_REFRESH === "1") return getSnapshot();
     if (snapshot) {
       return snapshot;
     }
@@ -538,7 +541,7 @@ app.get("/api/dashboard", (_request, response) => {
     return;
   }
 
-  response.json(snapshot);
+  response.set("Cache-Control", "no-store").json(snapshot);
 });
 
 for (const [routePath, fileName] of PUBLISHED_DASHBOARD_FILES) {
@@ -565,7 +568,7 @@ app.get(["/rss.xml", "/feed.xml"], (_request, response) => {
   ]);
   response
     .type("application/rss+xml")
-    .set("Cache-Control", "public, max-age=300")
+    .set("Cache-Control", "public, max-age=60")
     .send(buildEmergencyRssFeedXml({ items }));
 });
 
@@ -591,14 +594,15 @@ async function start() {
   }
 
   const hadPersistedSnapshot = dashboardSnapshotManager.hasSnapshot();
-  await dashboardSnapshotManager.ensureReady();
+  const embeddedRefresh = process.env.EWS_EXTERNAL_REFRESH !== "1";
+  if (embeddedRefresh) await dashboardSnapshotManager.ensureReady();
 
   app.listen(PORT, HOST, () => {
     console.log(`EWS server listening on http://${HOST}:${PORT}`);
   });
 
   heatmapRefresher.start();
-  if (hadPersistedSnapshot) {
+  if (embeddedRefresh && hadPersistedSnapshot) {
     void dashboardSnapshotManager.refresh({ reason: "startup_rebuild" });
   }
 }

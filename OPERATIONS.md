@@ -24,10 +24,10 @@ force it now:
 ssh xyra-dev-hetzner 'systemctl start apocalypse-ews-repair.service'
 ```
 
-The hourly watchdog pushes a plain-language note to the private ops ntfy
+The two-minute watchdog pushes a plain-language note to the private ops ntfy
 topic (`EWS_NTFY_OPS_TOPIC` in `/etc/apocalypse-ews.env`) whenever the
-verdict goes unhealthy, and a recovery note when it heals — silence means
-healthy, not unmonitored.
+verdict goes unhealthy, and a recovery note when it heals. Its own timer and
+delivery path must also remain healthy; silence alone proves neither.
 
 Continuation work is tracked as beads: `br ready` lists what is unblocked
 (see ROADMAP.md for the full arc).
@@ -45,10 +45,10 @@ token).
 | Unit | What | Cadence |
 |---|---|---|
 | `apocalypse-ews.service` | `server/index.js` Express server on 127.0.0.1:3030 | always on |
-| `apocalypse-ews-refresh.timer` | full pipeline pass (ingest ADS-B slot → snapshots → detection → RSS/dispatch/ntfy → feeds) | :05 and :35 |
+| `apocalypse-ews-refresh.timer` | incremental pass (check archive → ingest new slot → snapshots/detection once per sample → retry delivery → feeds) | every 2 min, single active pass |
 | `apocalypse-ews-refresh-imports.timer` | same plus aircraft-metadata reimport | daily 00:29 |
 | `apocalypse-ews-repair.timer` | `repair_history_gaps.js` — self-heals trailing gaps AND interior holes across all three cohorts, bounded to 30 days | every 6 h |
-| `apocalypse-ews-watchdog.timer` | `ops_alert.js` — status verdict → ops ntfy topic (deduped, 6 h re-alert, recovery note) | hourly |
+| `apocalypse-ews-watchdog.timer` | `ops_alert.js` — status verdict → ops ntfy topic (deduped, 6 h re-alert, recovery note) | every 2 min |
 | `apocalypse-ews-backup.timer` | `backup_databases.js` — `VACUUM INTO data/backups/<day>/` for all three DBs, integrity-checked, 14 days kept; staleness feeds the status verdict (and therefore the watchdog). Restore = stop service, copy the day's file over `data/*.sqlite`, start. Off-box: manual sha256-verified copies land at `xyra-sanctuary:/srv/sanctuary/backups/apocalypse-ews/<day>/` (first: 2026-08-30; automation pending a box→sanctuary credential) | daily 02:10 |
 | `cloudflared.service` | Cloudflare tunnel `apocalypse-ews` (id `d27a04ac-5b8a-4d84-a4c9-ccf61978694d`) — serves <https://warning.watch> from loopback:3030 and <https://ntfy.warning.watch> from loopback:2586 with no open inbound ports. Installed via `cloudflared service install <token>`; ingress config lives in the CF dashboard/API (`config_src: cloudflare`), not on disk | always on |
 | `ntfy.service` | self-hosted ntfy 2.27.0 (`/etc/ntfy/server.yml`): loopback:2586, `auth-default-access: read-only`, user `publisher` has rw on both topics, `upstream-base-url: ntfy.sh` for iOS instant delivery. Auth DB `/var/lib/ntfy/user.db`. Box-side publishers use `EWS_NTFY_SERVER=http://127.0.0.1:2586` (loopback survives a tunnel outage; subscribers reconnect and receive cached messages) | always on |
@@ -72,10 +72,59 @@ Logs: `journalctl -u apocalypse-ews-refresh` (and the other unit names).
 Deploying a change: commit and push to `main`, then
 
 ```sh
-ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-only && sudo -u xyra npm ci && systemctl restart apocalypse-ews.service'
+ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-only && sudo -u xyra npm ci && sudo -u xyra npm run build && systemctl restart apocalypse-ews.service'
 # unit-file changes additionally need:
 #   cp config/systemd/* /etc/systemd/system/ && systemctl daemon-reload
 ```
+
+## Assurance contract
+
+This is a consequential public instrument, not a certified emergency-warning
+system. Aircraft activity alone cannot establish that an attack is imminent or
+that conditions are safe. No alert is not evidence of safety. Official emergency
+instructions take precedence. Claims of "NASA-grade", certification, guaranteed
+delivery, or a two-minute observation latency require evidence we do not yet have.
+
+The standards below are engineering references, not a claim of conformance.
+Apply their relevant controls to the existing code and release process; do not
+add abstractions or paperwork that do not control an identified failure.
+
+| Reference | Applicable obligation | Concrete evidence required here |
+|---|---|---|
+| [NASA NPR 7150.2D](https://nodis3.gsfc.nasa.gov/displayDir.cfm?t=NPR&c=7150&s=2D), §§3–5 | Requirements traceability, lifecycle planning, configuration control, peer review, defect management | Each changed requirement maps to source, an exercised scenario, a reviewed commit, and deployed revision; unresolved limits stay explicit |
+| [NASA-STD-8739.8B](https://standards.nasa.gov/standard/NASA/NASA-STD-87398), §4 and Appendix A | Hazard analysis, software assurance, independent verification | Review missed alarms, false alarms, stale-as-calm output, partial cohorts, failed delivery, and recovery separately; an independent reviewer examines the release |
+| IEEE 1012-2017, referenced by NASA-STD-8739.8B §2.2 | Verification and validation across normal, abnormal, and boundary conditions | Existing production-path replay plus direct ingestion, failure/recovery, and browser exercises; passing compilation is insufficient |
+| [NIST SP 800-218 SSDF 1.1](https://csrc.nist.gov/pubs/sp/800/218/final) | Protect source, produce reviewed releases, manage dependencies and vulnerabilities | Locked installs, no unreviewed dependency upgrades, secret-free source and logs, small reversible commits |
+| [OWASP ASVS 5.0](https://owasp.org/www-project-application-security-verification-standard/) | Input validation, resource limits, access control, safe error handling | Feedback uses the existing validated intake; bounded text/media/request time; failures remain visible; possession tokens never enter feedback context |
+| [WCAG 2.2](https://www.w3.org/TR/WCAG22/) | Keyboard access, visible focus, understandable status, non-color-only meaning | Feedback opens/closes with keyboard and restores focus; narrow-screen rendering works; stale/unknown state is explicit text |
+| [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110) | HTTP method, failure, retry, and cache semantics | No automatic retries of an uncertain feedback POST; no success on a failed response; dynamic measurements are not served as fresh through a cache |
+
+### Hazard controls and release floor
+
+| Hazard | Required control | Remaining limitation |
+|---|---|---|
+| Late warning | Measure source observation age separately from poll age; bound polling, processing, and browser refresh independently | A 30-minute archive cannot supply two-minute observations, regardless of timer frequency |
+| Dead instrument appears calm | Unknown/stale source timestamps invalidate current-status reassurance; one fresh cohort must not mask an older selected cohort | A recent sample is not proof of source completeness or absence of an emergency |
+| Feed change manufactures an anomaly | Preserve supplier, cohort, sampling-window, and counting-process provenance; warm/calibrate a new feed separately | A smaller live feed cannot be compared directly with the current global archive baseline |
+| Repeated polling manufactures an alarm | Deduplicate by source sample, not poll time; advance sequential state only on a new observation | External delivery is not a distributed exactly-once transaction |
+| Slow/hung refresh consumes the schedule | Single active writer, bounded subprocess/network work, explicit timeout failure, no queued tick backlog | A missed deadline is degraded service, not a successful refresh |
+| Partial pipeline hides failure | Publish complete files atomically; retain last known data; report failed stages; independent delivery channels remain independent | A retained old snapshot must still age into stale state |
+| Lost or duplicated feedback | Existing durable Scry intake, acknowledgment only after stored success, preserve draft on errors, no blind POST retry | A lost acknowledgment is an uncertain outcome; intake is not an emergency dispatch channel |
+| Unsafe release or recovery | Build the locked revision; exercise affected behavior before activation; record previous revision; preserve databases; fast-forward the deployed checkout | Backups alone do not prove restoration or eliminate single-host/provider failures |
+
+For each release, record the scenario and observed outcome below the relevant
+change entry. At minimum, a cadence change exercises no-new-data, new-data,
+duplicate sample, overlapping invocation, and failure/recovery paths. A feedback
+change exercises validation, backend failure, draft retention, keyboard use,
+and narrow screens without posting synthetic correspondence to the live queue.
+Existing replay checks defend alarm sensitivity and specificity; cadence work
+does not authorize retuning their thresholds.
+
+The release reviewer must distinguish controls actually exercised from controls
+established only by inspection. Formal safety classification, independent
+organizational assurance, measured availability/error budgets, restore drills,
+source diversity, and validated attack-warning performance remain open
+assurance work; this checklist does not certify them.
 
 ## Signal semantics
 
@@ -136,7 +185,7 @@ loudly.
 
 | Bound | Value | Basis | Enforced by |
 |---|---|---|---|
-| Data age (any row) | ≤ 75 min | 30-min slot cadence + :05/:35 refresh ⇒ healthy age ≤ ~40 min; 75 = one fully missed cycle + margin | `status.js` → watchdog (10-min cadence) |
+| Data age (any row) | ≤ 75 min | 30-min source cadence; retained as the source-outage bound, not a polling target | `status.js` → watchdog (2-min cadence) |
 | Live-ingestion age | ≤ 75 min | same cadence; distinct from row age because repair heals rows without the live instrument running | `status.js` → watchdog |
 | Live slots, trailing 24 h | ≥ 42/48 | live path should hit every slot; 6 misses/day means it is skipping | `status.js` → watchdog |
 | Slot completeness, 30 d | ≥ 98 % | every expected slot is live, backfilled, or accounted missing | `status.js` → watchdog |
@@ -148,16 +197,81 @@ loudly.
 | Concurrent level-5 days | ≤ 1/30 d (level ≥ 4 ≤ 2/30 d) | threshold self-calibrates to 2nd-highest daily peak ⇒ ~1 alarm/yr as history deepens | `backtest --assert` |
 | Detector warm | ≥ 336 scoreable slots | below a week of live baseline the takeoff channel cannot score | `backtest --assert` |
 
-**Latency budget, event → page (worst case):** event occurs just after a
-slot opens (+30 min to slot close) → refresh ingests and scores at :05/:35
-(+5–35 min) → alert event + ntfy dispatch in the same pass (~0) ⇒ **≤ ~65
-min for a statistical HIGH page; a sustained 3× exodus escalates to
-CRITICAL within ~2 h via CUSUM** (instantaneous level 5 remains possible
-for larger excursions). Infrastructure failure → page: live-age bound
-75 min + watchdog cadence 10 min ⇒ **≤ ~85 min**, previously up to ~3 h with
-the 2 h staleness bound and hourly watchdog. The 30-min slot cadence is the
-floor of the whole budget; halving it requires a live (non-archive) ADSBx
-feed, which is a paid product — an operator decision.
+**Latency is a chain, not a timer setting.** Source observation → archive
+publication (30-minute archive windows plus upstream release lag) → next poll
+(target ≤2 min) → ingestion/scoring/delivery (measured per run) → subscriber or
+browser refresh (browser target ≤1 min). An unavailable upstream archive has no
+bounded release time; this is not a guaranteed two-minute warning system.
+Sequential alarm bounds remain measured in source samples, not poll attempts.
+The 75-minute source-age bound plus a healthy two-minute watchdog gives a
+nominal ≤77-minute stale-source detection bound, excluding notification delivery.
+Poll failures have a separate shorter bound in `status.js`.
+
+### Live-source prerequisite
+
+Genuine two-minute observations require an authorized **global** live snapshot,
+including the non-ICAO namespace and a same-snapshot coverage denominator.
+Changing suppliers or sampling semantics requires a separate provenance lane,
+baseline warm-up, and calibration; never splice live counts into archive history.
+No new feed subscription or access request was authorized by the cadence change.
+
+| Candidate | Documented capability | Gate or incompatibility |
+|---|---|---|
+| [ADSBx live](https://www.adsbexchange.com/community/developer-hub/) / [API schema](https://gateway.adsbexchange.com/api/aircraft/v2/docs/openapi.json) | Global `/all` endpoint, readsb/ADSBx fields | Paid key and [publication/use permission](https://www.adsbexchange.com/acceptable-use-policy/); two-minute polling is 21,600 calls per 30 days |
+| [adsb.fi open data](https://github.com/adsbfi/opendata/blob/main/README.md) | Global snapshot refreshed twice per minute | Feeder-IP authorization and personal/non-commercial terms; different coverage |
+| [ADSB.lol full feed](https://www.adsb.lol/docs/feeders-only/re-api/) | Whole-network unfiltered data | Feeder-IP authorization; [public API](https://api.adsb.lol/docs) has no documented global `/all` and dynamic limits |
+| [OpenSky REST](https://openskynetwork.github.io/opensky-api/rest.html) | Global state vectors | Anonymous 400 credits/day at 4/global query permits only 100/day, not 720; ICAO24 model is not the non-ICAO counting process; [operational-use agreement](https://opensky-network.org/about/terms-of-use) required |
+| [ADSBHub](https://www.adsbhub.org/howtogetdata.php) | Contributing-station global SBS feed | Station/IP authorization; non-ICAO compatibility unestablished |
+
+### Public feedback
+
+The persistent Feedback form on the React pages uses Scry's existing anonymous
+intake directly: `https://api.scry.io/v1/feedback` and `/v1/feedback/audio`,
+tagged `channel=warning-watch`. It shares the existing operator queue rather
+than creating another unmonitored store. Direct browser submission preserves
+per-client abuse limits; a reverse proxy would collapse visitors onto one quota.
+Text, voice, and images are bounded, and only a stored-success response clears
+the draft. Uncertain delivery keeps the draft and warns that retry may duplicate.
+Page context excludes query strings, fragments, and referrers. This channel is
+not monitored in real time and is not an emergency dispatch service.
+
+### Known assurance failure at the cadence change
+
+The existing nightly replay ending 2026-09-04 18:45 Pacific failed its takeoff
+noise bound: seven fires exceeded the configured 0.2/day allowance. The other
+eight reported bounds passed, including injected HIGH at 30 minutes and CRITICAL
+at 90 minutes. This predates the cadence change; thresholds were not loosened
+and the failed service state was not cleared. Faster polling and successful
+feedback verification do not resolve this detector-calibration finding.
+
+The non-ICAO takeoff baseline has a second inherited limitation: concurrent
+metrics use the within-slot peak timestamp, while live provenance and takeoffs
+use the final slice. Its exact-timestamp joins can therefore exclude otherwise
+valid slots. The cadence change preserves established peak-count semantics;
+switching to final-slice counts would silently change the calibrated measurement.
+A slot-aligned detector/backtest correction and replay are separate assurance
+work. Historical non-ICAO scans no longer create new false live marks; existing
+historical provenance was not rewritten by this release.
+
+### Cadence release verification
+
+Direct execution on an isolated copy of real data: one new archive ingested and
+scored for all three cohorts in 4.04 seconds; an unchanged poll completed in
+1.41 seconds without changing dashboard mtimes, takeoff counts, CUSUM state, or
+observation clocks. Poll success advanced separately. A forced network refusal
+exited nonzero without treating cached data as a successful poll; recovery cleared
+the failure only after a successful pass. A competing invocation skipped while
+the OS lock was held. Default and latest-only decoding returned identical latest
+telemetry for a real 180-slice archive (5.82 seconds versus 0.042 seconds locally).
+These are local measurements, not production latency guarantees.
+
+The locked frontend build and existing ingestion/alert-pipeline checks passed.
+Browser interception exercised stored-success, rejection, malformed success,
+duplicate submission, draft retention, image payloads, private-context exclusion,
+keyboard focus, and a 390-pixel viewport without posting to the live feedback
+queue. Browser scenarios also exercised stale/future timestamps, unready
+baselines, mixed source slots, missing cohorts, and independent cohort recovery.
+The reference standards above remain a control map, not a certification claim.
 
 ## Subscription channels
 

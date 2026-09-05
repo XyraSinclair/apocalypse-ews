@@ -18,10 +18,37 @@ const args = new Set(process.argv.slice(2));
 const refreshImports = args.has('--refresh-imports');
 const skipAlerts = args.has('--skip-alerts');
 
+const RUN_TIMEOUT_MS = refreshImports ? 20 * 60_000 : 5 * 60_000;
+const startedAt = Date.now();
+const STATE_PATH = path.join(DATA_DIR, 'refresh-state.json');
+let state = {};
+let sampleKey = null;
+
+function saveState() {
+  const temporary = `${STATE_PATH}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`);
+  fs.renameSync(temporary, STATE_PATH);
+}
+
+function currentSamples() {
+  return [MAIN_DB, MILITARY_DB, UNTRACKED_DB].map((dbPath) => {
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      return db.prepare("SELECT value FROM meta WHERE key = 'adsbx_heatmap_sampled_at'").get()?.value ?? null;
+    } finally {
+      db.close();
+    }
+  });
+}
 function run(command, commandArgs, options = {}) {
+  const remaining = RUN_TIMEOUT_MS - (Date.now() - startedAt);
+  if (remaining <= 0) throw new Error('Refresh pipeline deadline exceeded');
   const result = spawnSync(command, commandArgs, {
     cwd: ROOT_DIR,
-    stdio: 'inherit',
+    stdio: options.capture ? ['ignore', 'pipe', 'inherit'] : 'inherit',
+    encoding: 'utf8',
+    timeout: Math.min(remaining, options.timeout ?? (refreshImports ? RUN_TIMEOUT_MS : 90_000)),
+    killSignal: 'SIGKILL',
     env: { ...process.env, ...options.env },
   });
 
@@ -31,6 +58,10 @@ function run(command, commandArgs, options = {}) {
 
   if (result.status !== 0) {
     throw new Error(`${command} ${commandArgs.join(' ')} exited with status ${result.status}`);
+  }
+  if (options.capture) {
+    process.stdout.write(result.stdout);
+    return JSON.parse(result.stdout.trim().split('\n').at(-1));
   }
 }
 
@@ -95,13 +126,16 @@ function refreshLiveData() {
   purgeDemoTrackedAircraft(MAIN_DB);
   purgeDemoTrackedAircraft(MILITARY_DB);
   purgeDemoTrackedAircraft(UNTRACKED_DB);
-  run(PYTHON_BIN, ['scripts/update_latest_heatmap.py', '--db', MAIN_DB]);
-  run(PYTHON_BIN, ['scripts/update_latest_heatmap.py', '--db', MILITARY_DB]);
+  const selected = run(PYTHON_BIN, [
+    'scripts/update_latest_heatmap.py', '--db', MAIN_DB, '--additional-db', MILITARY_DB,
+  ], { capture: true });
   run(PYTHON_BIN, [
     'scripts/track_non_icao_hex.py',
     '--db',
     UNTRACKED_DB,
     '--latest-live',
+    '--selected-cache-path', selected.cachePath,
+    '--selected-slot-key', selected.latestSlotKey,
     '--cache-dir',
     path.join(DATA_DIR, 'cache', 'adsbx_live'),
     '--replace-live-snapshot',
@@ -203,9 +237,11 @@ const stageFailures = [];
 function runStage(label, callback) {
   try {
     callback();
+    return true;
   } catch (error) {
     stageFailures.push({ label, message: String(error && error.message ? error.message : error) });
     console.error(`Stage failed (continuing): ${label}: ${error}`);
+    return false;
   }
 }
 
@@ -214,8 +250,14 @@ function updateAlerts() {
     return;
   }
 
-  runStage('rss', () => run('node', ['scripts/update_rss_feed.js'], { env: { EWS_DB_PATH: MAIN_DB } }));
-  runStage('telegram', () => run('node', ['scripts/send_telegram_alert.js'], { env: { EWS_DB_PATH: MAIN_DB } }));
+  state.completedChannels ||= {};
+  for (const [label, script] of [['rss', 'update_rss_feed.js'], ['telegram', 'send_telegram_alert.js']]) {
+    if (!refreshImports && state.completedChannels[label] === sampleKey) continue;
+    if (runStage(label, () => run('node', [`scripts/${script}`], { env: { EWS_DB_PATH: MAIN_DB } }))) {
+      state.completedChannels[label] = sampleKey;
+      saveState();
+    }
+  }
   runStage('dispatch', () => run('node', ['scripts/dispatch_alert_events.js', '--db', MAIN_DB]));
   runStage('bridge', () => run('node', ['scripts/bridge_alert_events.js', '--db', MAIN_DB]));
   runStage('local-push', () => run('node', ['scripts/notify_local_push.js', '--db', MAIN_DB]));
@@ -242,52 +284,81 @@ function exportEventSignalsFeed() {
 
 
 
-const LOCK_DIR = path.join(ROOT_DIR, 'tmp', 'refresh.lock');
-const LOCK_STALE_MS = 45 * 60 * 1000;
+const LOCK_PATH = path.join(ROOT_DIR, 'tmp', 'refresh.flock');
 
 function acquireRefreshLock() {
-  try {
-    const stat = fs.statSync(LOCK_DIR);
-    if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
-      fs.rmdirSync(LOCK_DIR);
-    }
-  } catch {
-    // No existing lock.
-  }
-
-  try {
-    fs.mkdirSync(LOCK_DIR);
-  } catch {
-    return false;
-  }
-
-  const release = () => {
-    try {
-      fs.rmdirSync(LOCK_DIR);
-    } catch {
-      // Already released.
-    }
-  };
-  process.on('exit', release);
-  process.on('SIGINT', () => process.exit(130));
-  process.on('SIGTERM', () => process.exit(143));
-  return true;
+  if (args.has('--lock-held')) return true;
+  // The OS releases flock on every exit, including SIGKILL. PID/age locks
+  // can overlap a slow live owner or wedge after a crash. Carry the lock
+  // descriptor through exec, so normal and metadata refreshes share it.
+  const result = spawnSync(PYTHON_BIN, ['-c', [
+    'import fcntl, os, signal, sys',
+    'def lock_timeout(*_):',
+    '    raise TimeoutError("Metadata refresh waited 310 seconds for the refresh lock")',
+    'waiting = "--refresh-imports" in sys.argv[3:]',
+    'signal.signal(signal.SIGALRM, lock_timeout)',
+    'if waiting: signal.alarm(310)',
+    'fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)',
+    'try:',
+    '    fcntl.flock(fd, fcntl.LOCK_EX | (0 if waiting else fcntl.LOCK_NB))',
+    'except BlockingIOError:',
+    '    print(\'{"ok":true,"skipped":true,"reason":"refresh lock held"}\')',
+    '    sys.exit(0)',
+    'signal.alarm(0)',
+    'os.set_inheritable(fd, True)',
+    'os.execv(sys.argv[2], sys.argv[2:])',
+  ].join('\n'), LOCK_PATH, process.execPath, __filename, ...process.argv.slice(2), '--lock-held'], {
+    cwd: ROOT_DIR,
+    stdio: 'inherit',
+  });
+  if (result.error) throw result.error;
+  process.exit(result.status ?? 1);
 }
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(path.dirname(LOCK_DIR), { recursive: true });
-if (!acquireRefreshLock()) {
-  console.log(JSON.stringify({ ok: true, skipped: true, reason: 'refresh lock held' }));
-  process.exit(0);
+fs.mkdirSync(path.dirname(LOCK_PATH), { recursive: true });
+acquireRefreshLock();
+state = fs.existsSync(STATE_PATH) ? JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')) : {};
+sampleKey = state.processedSamples ?? null;
+state.lastAttemptAt = new Date(startedAt).toISOString();
+state.pollCadenceMinutes = 2;
+state.sourceCadenceMinutes = 30;
+saveState();
+try {
+  ensureMainCohort();
+  ensureMilitaryCohort();
+  refreshLiveData();
+  const samples = currentSamples();
+  if (samples.some((sample) => !sample)) throw new Error('A cohort has no live sample');
+  sampleKey = JSON.stringify(samples);
+  state.lastPollSuccessAt = new Date().toISOString();
+  state.observationChanged = sampleKey !== JSON.stringify(state.latestSampledAt);
+  state.latestSampledAt = samples;
+  if (state.observationChanged) state.lastNewObservationAt = new Date().toISOString();
+  saveState();
+  if (sampleKey !== state.processedSamples || refreshImports ||
+      ['dashboard.json', 'military-dashboard.json', 'untracked-dashboard.json']
+        .some((name) => !fs.existsSync(path.join(PUBLISHED_DIR, name)))) {
+    exportSnapshots();
+    detectAlertEvents();
+    state.processedSamples = sampleKey;
+  }
+  saveState();
+} catch (error) {
+  state.lastError = String(error.message || error);
+  stageFailures.push({ label: 'ingest-snapshots-detection', message: state.lastError });
+  console.error(error);
 }
-ensureMainCohort();
-ensureMilitaryCohort();
-refreshLiveData();
-exportSnapshots();
-detectAlertEvents();
+// Even failed acquisition must not strand previously queued deliveries.
 updateAlerts();
 runStage('operations-feed', exportOperationsFeed);
 runStage('event-signals-feed', exportEventSignalsFeed);
+state.finishedAt = new Date().toISOString();
+state.durationMs = Date.now() - startedAt;
+state.failedStages = stageFailures;
+state.lastError = stageFailures.length ? stageFailures.map((stage) => `${stage.label}: ${stage.message}`).join('; ') : null;
+saveState();
+console.log(JSON.stringify({ ok: stageFailures.length === 0, ...state }));
 
 if (stageFailures.length > 0) {
   console.error(JSON.stringify({ ok: false, failedStages: stageFailures }));

@@ -15,6 +15,7 @@ import numpy as np
 
 from adsbx_http import GLOBE_HEADERS
 from db_migrations import migrate_schema
+from update_latest_heatmap import download_heatmap as download_live_heatmap
 
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
@@ -55,6 +56,8 @@ def parse_args():
     parser.add_argument("--rate-limit-seconds", type=float, default=0.5, help="Delay between download requests.")
     parser.add_argument("--max-files", type=int, help="Stop after this many heatmap files, for testing.")
     parser.add_argument("--cache-dir", default=str(CACHE_DIR), help="Heatmap cache directory.")
+    parser.add_argument("--selected-cache-path", help="Use the archive already selected by the all-cohort poll.")
+    parser.add_argument("--selected-slot-key", help="Slot key accompanying --selected-cache-path (YYYY-MM-DD:NN).")
     parser.add_argument(
         "--latest-live",
         action="store_true",
@@ -63,7 +66,7 @@ def parse_args():
     parser.add_argument(
         "--lookback-slots",
         type=int,
-        default=96,
+        default=4,
         help="How many 30-minute slots to search backward with --latest-live.",
     )
     parser.add_argument(
@@ -134,19 +137,16 @@ def slot_index_for(timestamp):
 
 def choose_latest_heatmap(cache_dir, lookback_slots, skip_download, rate_limit_seconds):
     latest_slot = floor_to_half_hour(dt.datetime.now(dt.timezone.utc))
-    last_error = None
 
     for offset in range(lookback_slots + 1):
         candidate = latest_slot - dt.timedelta(minutes=30 * offset)
         destination = cache_path_for(cache_dir, candidate.date(), slot_index_for(candidate))
-        try:
-            if skip_download:
-                available = destination.exists()
-            else:
-                available = download_heatmap(candidate.date(), slot_index_for(candidate), destination, rate_limit_seconds)
-        except Exception as error:  # pragma: no cover - defensive network handling
-            last_error = error
-            continue
+        if skip_download:
+            available, used_cache = destination.exists(), True
+        else:
+            available, used_cache = download_live_heatmap(candidate, destination)
+            if available and not used_cache:
+                time.sleep(rate_limit_seconds)
 
         if not available:
             continue
@@ -156,11 +156,8 @@ def choose_latest_heatmap(cache_dir, lookback_slots, skip_download, rate_limit_s
             "slot_key": f"{candidate.date().isoformat()}:{slot_index_for(candidate):02d}",
             "url": heatmap_url_for(candidate.date(), slot_index_for(candidate)),
             "cache_path": destination,
-            "used_cache": destination.exists(),
+            "used_cache": used_cache,
         }
-
-    if last_error:
-        raise last_error
 
     raise FileNotFoundError("No recent ADS-B Exchange heatmap file was available in the requested lookback window.")
 
@@ -468,11 +465,10 @@ def upsert_dashboard_concurrent_metric(connection, metric_row):
     )
 
 
-def record_live_ingest_slot(connection, metric_row):
-    # Liveness provenance, mirroring update_latest_heatmap.py: the slot this
-    # live pass ingested is marked live_ingested=1 so status.js can bound
-    # live-instrument age and coverage. Global feed totals are not parsed on
-    # this path (non-ICAO filter), hence NULL total_aircraft.
+def record_ingest_slot(connection, metric_row, live_ingested):
+    # Historical scans cannot prove the snapshot-transition process ran.
+    # Preserve a genuine live mark when a later history repair revisits it.
+    # Global feed totals are unavailable on this filtered path.
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS ingest_slots (
@@ -488,17 +484,18 @@ def record_live_ingest_slot(connection, metric_row):
     connection.execute(
         """
         INSERT INTO ingest_slots (sampled_at, source, total_aircraft, cohort_airborne, live_ingested)
-        VALUES (?, 'adsbx_heatmap', NULL, ?, 1)
+        VALUES (?, ?, NULL, ?, ?)
         ON CONFLICT(sampled_at) DO UPDATE SET
-          source = 'adsbx_heatmap',
+          source = CASE WHEN ingest_slots.live_ingested = 1 THEN ingest_slots.source ELSE excluded.source END,
           cohort_airborne = excluded.cohort_airborne,
-          live_ingested = 1
+          live_ingested = MAX(ingest_slots.live_ingested, excluded.live_ingested)
         """,
-        (metric_row["sampled_at"], metric_row["airborne_unique_hex_count"]),
+        (metric_row["sampled_at"], "adsbx_heatmap" if live_ingested else "adsbx_history",
+         metric_row["airborne_unique_hex_count"], int(live_ingested)),
     )
 
 
-def ingest_file(connection, cache_path, metrics_only=False, write_concurrent_metrics=False):
+def ingest_file(connection, cache_path, metrics_only=False, write_concurrent_metrics=False, live_ingested=False):
     if metrics_only:
         sampled_at, metric_row = parse_non_icao_metric_heatmap(cache_path)
         if sampled_at is None:
@@ -512,7 +509,7 @@ def ingest_file(connection, cache_path, metrics_only=False, write_concurrent_met
         insert_non_icao_metric_row(connection, metric_row)
         if write_concurrent_metrics:
             upsert_dashboard_concurrent_metric(connection, metric_row)
-            record_live_ingest_slot(connection, metric_row)
+            record_ingest_slot(connection, metric_row, live_ingested)
 
         return metric_row["unique_hex_count"], metric_row["observation_count"], {
             "sampled_at": sampled_at_iso,
@@ -658,6 +655,9 @@ def parse_latest_non_icao_snapshot(cache_path):
     index = 0
     while index < len(points) and int(points_u[index]) != SLICE_BEGIN_MARKER:
         index += 1
+    slice_indices = np.flatnonzero(points_u[index::4] == SLICE_BEGIN_MARKER) * 4 + index
+    if len(slice_indices):
+        index = int(slice_indices[-1])
 
     latest_sampled_at = None
     latest_rows = []
@@ -773,6 +773,18 @@ def replace_live_snapshot(connection, cache_path):
     sampled_at_iso, snapshot_rows = parse_latest_non_icao_snapshot(cache_path)
     if sampled_at_iso is None:
         return None
+    previous_status_row = connection.execute(
+        "SELECT value FROM meta WHERE key = 'adsbx_heatmap_status'",
+    ).fetchone()
+    previous_status = json.loads(previous_status_row["value"]) if previous_status_row else {}
+    previous_sampled_at = previous_status.get("latestSampledAt")
+    if previous_sampled_at and dt.datetime.fromisoformat(sampled_at_iso) < dt.datetime.fromisoformat(previous_sampled_at):
+        raise ValueError("Archive snapshot would move the live observation backward.")
+    new_observation_at = (
+        dt.datetime.now(dt.timezone.utc).isoformat()
+        if not previous_sampled_at or dt.datetime.fromisoformat(sampled_at_iso) > dt.datetime.fromisoformat(previous_sampled_at)
+        else previous_status.get("lastNewObservationAt") or previous_status.get("lastSuccessAt")
+    )
     previous_live_snapshot = load_previous_live_snapshot(connection)
     takeoff_rows = build_takeoff_rows(snapshot_rows, previous_live_snapshot)
 
@@ -851,10 +863,13 @@ def replace_live_snapshot(connection, cache_path):
         "provider": "adsbx_heatmap",
         "providerLabel": "ADS-B Exchange heatmap",
         "cadenceMinutes": 30,
+        "pollCadenceMinutes": 2,
+        "lastPollSuccessAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "lastNewObservationAt": new_observation_at,
         "refreshing": False,
         "nextRefreshAt": None,
         "lastAttemptAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "lastSuccessAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "lastSuccessAt": new_observation_at,
         "lastError": None,
         "latestSampledAt": sampled_at_iso,
         "cachePath": str(cache_path),
@@ -952,6 +967,47 @@ def main():
     cache_dir = pathlib.Path(args.cache_dir)
 
     if args.latest_live:
+        if args.selected_cache_path or args.selected_slot_key:
+            if not (args.selected_cache_path and args.selected_slot_key):
+                raise ValueError("Both selected archive arguments are required.")
+            date_text, index_text = args.selected_slot_key.rsplit(":", 1)
+            slot = dt.datetime.combine(dt.date.fromisoformat(date_text), dt.time(), tzinfo=dt.timezone.utc)
+            index = int(index_text)
+            if not 0 <= index < 48:
+                raise ValueError("Selected slot index must be 0–47.")
+            slot += dt.timedelta(minutes=30 * index)
+            selected = {
+                "slot": slot,
+                "slot_key": args.selected_slot_key,
+                "url": heatmap_url_for(slot.date(), index),
+                "cache_path": pathlib.Path(args.selected_cache_path),
+                "used_cache": True,
+            }
+        else:
+            selected = choose_latest_heatmap(
+                cache_dir, args.lookback_slots, args.skip_download, args.rate_limit_seconds,
+            )
+        current_slot = connection.execute(
+            "SELECT value FROM meta WHERE key = 'adsbx_heatmap_slot_key'",
+        ).fetchone()
+        if current_slot and selected["slot_key"] < current_slot["value"]:
+            raise ValueError("Archive selection moved behind the current live slot.")
+        if current_slot and current_slot["value"] == selected["slot_key"]:
+            status_row = connection.execute(
+                "SELECT value FROM meta WHERE key = 'adsbx_heatmap_status'",
+            ).fetchone()
+            status = json.loads(status_row["value"]) if status_row else {}
+            now = dt.datetime.now(dt.timezone.utc).isoformat()
+            status.update({
+                "cadenceMinutes": 30, "pollCadenceMinutes": 2,
+                "lastAttemptAt": now, "lastPollSuccessAt": now,
+                "lastError": None, "refreshing": False,
+            })
+            set_meta(connection, "adsbx_heatmap_status", json.dumps(status))
+            connection.commit()
+            connection.close()
+            print(json.dumps({"ok": True, "skipped": True, "latestSlotKey": selected["slot_key"]}))
+            return
         connection.execute(
             """
             INSERT INTO ingestion_runs (run_type, started_at, status, details)
@@ -965,21 +1021,25 @@ def main():
             ),
         )
         run_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        connection.commit()
 
         try:
-            selected = choose_latest_heatmap(
-                cache_dir,
-                args.lookback_slots,
-                args.skip_download,
-                args.rate_limit_seconds,
-            )
             activity_rows, observation_count, latest_parsed_file = ingest_file(
                 connection,
                 selected["cache_path"],
                 metrics_only=True,
                 write_concurrent_metrics=True,
+                live_ingested=True,
             )
+            if not latest_parsed_file:
+                raise ValueError("Selected archive has no usable metrics.")
+            sampled_at = dt.datetime.fromisoformat(latest_parsed_file["sampled_at"])
+            if not selected["slot"] <= sampled_at < selected["slot"] + dt.timedelta(minutes=30):
+                raise ValueError("Archive observation timestamp falls outside its source slot.")
             live_snapshot = replace_live_snapshot(connection, selected["cache_path"])
+            if live_snapshot is None:
+                raise ValueError("Selected archive has no usable non-ICAO snapshot.")
+            set_meta(connection, "adsbx_heatmap_slot_key", selected["slot_key"])
             connection.execute(
                 "UPDATE ingestion_runs SET finished_at = ?, status = ?, details = ? WHERE id = ?",
                 (
@@ -1006,6 +1066,7 @@ def main():
             )
             connection.commit()
         except Exception:
+            connection.rollback()
             connection.execute(
                 "UPDATE ingestion_runs SET finished_at = ?, status = ? WHERE id = ?",
                 (dt.datetime.now(dt.timezone.utc).isoformat(), "failed", run_id),

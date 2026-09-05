@@ -53,7 +53,7 @@ class Telemetry:
     gs: float
 
 
-def parse_heatmap(filename, bbox=None, return_callsigns=True, hex_filter=None):
+def parse_heatmap(filename, bbox=None, return_callsigns=True, hex_filter=None, latest_only=False):
     with open(filename, "rb") as file_handle:
         raw = file_handle.read()
 
@@ -89,7 +89,16 @@ def parse_heatmap(filename, bbox=None, return_callsigns=True, hex_filter=None):
     filter_hex, hex_filter = normalize_hex_filter(hex_filter)
     data = []
 
-    while index < len(points):
+    slice_indices = np.flatnonzero(points_u[index::4] == slice_begin_marker) * 4 + index
+    if latest_only:
+        # Preserve the existing newest nonempty-slice contract without decoding
+        # and allocating telemetry for every earlier observation in the file.
+        slice_indices = sorted(
+            slice_indices,
+            key=lambda start: int(points_u[start + 1]) * 4294967296 + int(points_u[start + 2]),
+            reverse=True,
+        )
+    for index in slice_indices:
         callsigns = []
         telemetry = []
 
@@ -164,5 +173,7 @@ def parse_heatmap(filename, bbox=None, return_callsigns=True, hex_filter=None):
 
         if telemetry or callsigns:
             data.append(Slice(timestamp=timestamp, callsigns=callsigns, telemetry=telemetry))
+            if latest_only:
+                break
 
     return data

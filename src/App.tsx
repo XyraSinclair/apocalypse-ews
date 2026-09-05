@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 
 const DASHBOARD_URLS = {
   business: import.meta.env.VITE_DASHBOARD_URL || '/dashboard.json',
@@ -13,6 +13,7 @@ const CATEGORY_LABELS: Record<CohortKind, string> = {
 };
 
 const HALF_HOUR_MS = 30 * 60 * 1000;
+const PAGE_REFRESH_MS = 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LEVEL_COUNT = 5;
 const DEFAULT_ALARM_SIGMA = 4.8;
@@ -50,6 +51,7 @@ type DashboardResponse = {
 };
 
 type CurrentSignal = {
+  modelReady?: boolean;
   asOf?: string;
   concurrentCount?: number;
   baselineMean?: number;
@@ -67,6 +69,7 @@ type CurrentSignal = {
 };
 
 type CompositeSignal = {
+  modelReady?: boolean;
   asOf?: string;
   actualConcurrentCount?: number;
   expectedConcurrentCount?: number;
@@ -178,6 +181,7 @@ type CombinedDashboard = {
   alarmSigmaThreshold: number;
   signal: CurrentSignal & SignalMath;
   asOf?: string;
+  assessmentProblem?: string;
   providerStatus: string;
   providerWarning?: string | null;
   modelCounts: ModelCount[];
@@ -198,9 +202,10 @@ type SeatEstimate = {
   estimatedSeats: number | null;
 };
 
-async function fetchDashboard(kind: CohortKind, baseUrl: string): Promise<[CohortKind, DashboardResponse]> {
-  const url = `${baseUrl}?v=${Math.floor(Date.now() / 300000)}`;
-  const response = await fetch(url, { cache: 'no-store' });
+async function fetchDashboard(kind: CohortKind, baseUrl: string, signal: AbortSignal): Promise<[CohortKind, DashboardResponse]> {
+  const url = new URL(baseUrl, window.location.href);
+  url.searchParams.set('v', String(Math.floor(Date.now() / PAGE_REFRESH_MS)));
+  const response = await fetch(url, { cache: 'no-store', signal });
   const contentType = response.headers.get('content-type') ?? '';
   const text = await response.text();
   if (!response.ok) {
@@ -465,10 +470,302 @@ async function saveManagedSubscriber(payload: Record<string, unknown>): Promise<
 
 function App() {
   const path = window.location.pathname;
-  if (path.startsWith('/signup')) return <SignupPage />;
-  if (path.startsWith('/manage')) return <ManagePage />;
-  if (path.startsWith('/event-signals')) return <EventSignalsPage />;
-  return <DashboardPage />;
+  const page = path.startsWith('/signup') ? <SignupPage />
+    : path.startsWith('/manage') ? <ManagePage />
+    : path.startsWith('/event-signals') ? <EventSignalsPage /> : <DashboardPage />;
+  return <>{page}<FeedbackWidget /></>;
+}
+
+const FEEDBACK_API = 'https://api.scry.io/v1/feedback';
+const FEEDBACK_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const FEEDBACK_AUDIO_LIMIT = 120;
+
+function feedbackBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === 'string'
+      ? resolve(reader.result.slice(reader.result.indexOf(',') + 1))
+      : reject(new Error('Could not read attachment.'));
+    reader.onerror = () => reject(new Error('Could not read attachment.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function FeedbackMediaPreview({ blob, audio = false }: { blob: Blob; audio?: boolean }) {
+  const [url, setUrl] = useState('');
+  useEffect(() => {
+    const next = URL.createObjectURL(blob);
+    setUrl(next);
+    return () => URL.revokeObjectURL(next);
+  }, [blob]);
+  return audio ? <audio controls src={url || undefined} aria-label="Recorded voice note" />
+    : <img src={url || undefined} alt="Attached screenshot preview" />;
+}
+
+function FeedbackWidget() {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const launcher = useRef<HTMLButtonElement>(null);
+  const textInput = useRef<HTMLTextAreaElement>(null);
+  const sending = useRef(false);
+  const recorder = useRef<MediaRecorder | null>(null);
+  const recordingTimer = useRef<number | undefined>(undefined);
+  const permissionGeneration = useRef(0);
+  const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState('suggestion');
+  const [content, setContent] = useState('');
+  const [images, setImages] = useState<File[]>([]);
+  const [audio, setAudio] = useState<{ blob: Blob; duration: number } | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [requestingMic, setRequestingMic] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+  const [success, setSuccess] = useState(false);
+  const [config, setConfig] = useState<{ enabled: boolean; audio: boolean; duration: number } | null>(null);
+  const [configError, setConfigError] = useState('');
+  const [configAttempt, setConfigAttempt] = useState(0);
+
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    let active = true;
+    const timer = setTimeout(() => controller.abort(), 10000);
+    setConfigError('');
+    void fetch(`${FEEDBACK_API}/config`, {
+      credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal,
+    }).then(async (response) => {
+      if (!response.ok) throw new Error();
+      const data = await response.json();
+      if (typeof data.enabled !== 'boolean' || typeof data.audio_enabled !== 'boolean' ||
+          !Number.isInteger(data.max_audio_duration_secs) || data.max_audio_duration_secs < 1) throw new Error();
+      if (active) setConfig({ enabled: data.enabled, audio: data.audio_enabled, duration: Math.min(FEEDBACK_AUDIO_LIMIT, data.max_audio_duration_secs) });
+    }).catch(() => {
+      if (active) setConfigError('Could not check feedback availability.');
+    }).finally(() => clearTimeout(timer));
+    return () => { active = false; clearTimeout(timer); controller.abort(); };
+  }, [open, configAttempt]);
+
+  useEffect(() => {
+    if (open && !dialog.current?.open) {
+      dialog.current?.showModal();
+      textInput.current?.focus();
+    } else if (!open && dialog.current?.open) dialog.current.close();
+  }, [open]);
+
+  function stopRecording() {
+    if (recorder.current?.state === 'recording') recorder.current.stop();
+    clearInterval(recordingTimer.current);
+    recordingTimer.current = undefined;
+  }
+
+  useEffect(() => () => {
+    permissionGeneration.current += 1;
+    const active = recorder.current;
+    if (active) {
+      active.onstop = null;
+      if (active.state === 'recording') active.stop();
+      active.stream.getTracks().forEach((track) => track.stop());
+    }
+    clearInterval(recordingTimer.current);
+  }, []);
+
+  useEffect(() => {
+    const stopHiddenRecording = () => {
+      if (!document.hidden) return;
+      permissionGeneration.current += 1;
+      setRequestingMic(false);
+      stopRecording();
+    };
+    document.addEventListener('visibilitychange', stopHiddenRecording);
+    return () => document.removeEventListener('visibilitychange', stopHiddenRecording);
+  }, []);
+
+  function close() {
+    permissionGeneration.current += 1;
+    setRequestingMic(false);
+    stopRecording();
+    setOpen(false);
+    launcher.current?.focus();
+  }
+
+  async function startRecording() {
+    if (requestingMic || recording || audio || pending) return;
+    setMessage('');
+    setSuccess(false);
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setMessage('Voice recording is unavailable in this browser. You can still send text or images.');
+      return;
+    }
+    const generation = ++permissionGeneration.current;
+    setRequestingMic(true);
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (generation !== permissionGeneration.current) { stream.getTracks().forEach((track) => track.stop()); return; }
+      const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus']
+        .find((type) => MediaRecorder.isTypeSupported(type));
+      if (!mimeType) throw new Error('No supported recording format is available.');
+      const active = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 32000 });
+      recorder.current = active;
+      const chunks: Blob[] = [];
+      let bytes = 0;
+      let failed = false;
+      const started = performance.now();
+      active.ondataavailable = (event) => {
+        bytes += event.data.size;
+        if (bytes > 2 * 1024 * 1024) {
+          failed = true;
+          setMessage('Voice note exceeded 2 MB. Record a shorter note.');
+          stopRecording();
+        } else if (event.data.size) chunks.push(event.data);
+      };
+      active.onerror = () => { failed = true; setMessage('Recording failed. Please try again.'); stopRecording(); };
+      active.onstop = () => {
+        active.stream.getTracks().forEach((track) => track.stop());
+        recorder.current = null;
+        clearInterval(recordingTimer.current);
+        recordingTimer.current = undefined;
+        setRecording(false);
+        const duration = Math.max(1, Math.round((performance.now() - started) / 1000));
+        if (duration > (config?.duration ?? FEEDBACK_AUDIO_LIMIT)) {
+          setMessage('The voice note exceeded the duration limit. Record a shorter note.');
+        } else if (!failed && bytes) {
+          setAudio({ blob: new Blob(chunks, { type: active.mimeType }), duration });
+        } else if (!failed) setMessage('The recording was empty. Please try again.');
+      };
+      active.start(500);
+      setRecording(true);
+      setRecordingSeconds(0);
+      recordingTimer.current = window.setInterval(() => {
+        const seconds = Math.floor((performance.now() - started) / 1000);
+        setRecordingSeconds(seconds);
+        if (seconds >= (config?.duration ?? FEEDBACK_AUDIO_LIMIT)) stopRecording();
+      }, 250);
+    } catch (error) {
+      stream?.getTracks().forEach((track) => track.stop());
+      if (generation === permissionGeneration.current) setMessage(error instanceof DOMException && error.name === 'NotAllowedError'
+        ? 'Microphone access was denied. You can still send text or images.'
+        : error instanceof Error ? error.message : 'Could not start recording.');
+    } finally {
+      if (generation === permissionGeneration.current) setRequestingMic(false);
+    }
+  }
+
+  function addImages(files: FileList | null) {
+    if (!files) return;
+    setSuccess(false);
+    const next = [...images, ...Array.from(files)];
+    if (next.length > 4 || next.some((file) => !FEEDBACK_IMAGE_TYPES.includes(file.type) || !file.size || file.size > 5 * 1024 * 1024) ||
+        next.reduce((total, file) => total + file.size, 0) > 12 * 1024 * 1024) {
+      setMessage('Use up to four PNG, JPEG, GIF, or WebP images: 5 MB each, 12 MB total. Existing attachments are unchanged.');
+      return;
+    }
+    setImages(next);
+    setMessage('');
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (sending.current || recording || requestingMic) return;
+    setSuccess(false);
+    if (!content.trim() && !audio && !images.length) { setMessage('Add text, a voice note, or images.'); return; }
+    if (content.length > 5000 || content.includes('\0')) { setMessage('Use at most 5,000 characters, without null characters.'); return; }
+    if (config && !config.enabled) { setMessage('Feedback is currently unavailable. Your draft is unchanged.'); return; }
+    sending.current = true;
+    setPending(true);
+    setMessage('');
+    const controller = new AbortController();
+    let timer: number | undefined;
+    let dispatched = false;
+    try {
+      const attachments = await Promise.all(images.map(async (file) => ({
+        image_base64: await feedbackBase64(file), content_type: file.type,
+      })));
+      const body = {
+        feedback_type: kind, content: content.trim(), channel: 'warning-watch',
+        // Only the route is context. Never send query/hash, URL credentials, or a referrer.
+        page_url: `${window.location.origin}${window.location.pathname}`,
+        metadata: { channel: 'warning-watch' },
+        ...(audio || images.length ? {
+          images: attachments,
+          ...(audio ? { audio_base64: await feedbackBase64(audio.blob), audio_duration_secs: audio.duration, audio_content_type: audio.blob.type } : {}),
+        } : {}),
+      };
+      timer = window.setTimeout(() => controller.abort(), 20000);
+      dispatched = true;
+      const response = await fetch(`${FEEDBACK_API}${audio || images.length ? '/audio' : ''}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+        credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error', signal: controller.signal,
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        dispatched = false;
+        throw new Error(response.status === 429 ? 'Feedback limit reached. Try again within an hour; your draft is unchanged.'
+          : response.status === 400 || response.status === 413 ? 'The intake rejected this feedback. Check the text and attachments; your draft is unchanged.'
+          : 'Feedback is unavailable. Your draft is unchanged; try later.');
+      }
+      const data = await response.json();
+      if (response.status !== 201 || typeof data.id !== 'string' ||
+          !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(data.id) ||
+          data.status !== 'new' || data.feedback_type !== kind || !Number.isFinite(Date.parse(data.created_at))) throw new Error();
+      setSuccess(true);
+      setMessage(`Feedback saved. Reference ${data.id.slice(0, 8)}.`);
+      setContent('');
+      setImages([]);
+      setAudio(null);
+    } catch (error) {
+      setMessage(dispatched ? 'Delivery could not be confirmed. Your draft is unchanged; retrying may send a duplicate.'
+        : error instanceof Error ? error.message : 'Could not prepare feedback. Your draft is unchanged.');
+    } finally {
+      clearTimeout(timer);
+      sending.current = false;
+      setPending(false);
+    }
+  }
+
+  return <>
+    <button ref={launcher} type="button" className="feedback-launcher" aria-haspopup="dialog"
+      aria-controls="feedback-dialog" aria-expanded={open} onClick={() => setOpen(true)}>Feedback</button>
+    <dialog ref={dialog} id="feedback-dialog" className="feedback-dialog" aria-labelledby="feedback-title"
+      aria-describedby="feedback-notice" onCancel={(event) => { event.preventDefault(); close(); }}
+      onClose={() => { setOpen(false); launcher.current?.focus(); }}>
+      <div className="feedback-heading"><h2 id="feedback-title">Feedback</h2><button type="button" onClick={close} aria-label="Close feedback">Close</button></div>
+      <p id="feedback-notice" className="feedback-notice">Not an emergency service or monitored in real time. For immediate danger, contact local emergency services.</p>
+      <p className="feedback-privacy">Sent anonymously to the shared Scry / ExoPriors feedback queue. The page route and your IP address accompany it. Avoid sensitive information. Drafts stay only in this tab until sent or reloaded.</p>
+      <form onSubmit={(event) => void submit(event)}>
+        <fieldset disabled={pending}><legend>Feedback type</legend><div className="feedback-kinds">
+          {[['suggestion', 'Idea'], ['bug', 'Bug'], ['other', 'Other']].map(([value, label]) =>
+            <label key={value}><input type="radio" name="feedback-kind" value={value} checked={kind === value} onChange={() => setKind(value)} />{label}</label>)}
+        </div></fieldset>
+        <label htmlFor="feedback-content">What should we know?</label>
+        <textarea ref={textInput} id="feedback-content" rows={5} maxLength={5000} value={content} disabled={pending}
+          onChange={(event) => { setContent(event.target.value); setSuccess(false); setMessage(''); }} />
+        <small>{content.length.toLocaleString()} / 5,000 characters</small>
+        <label className="feedback-upload">Add images
+          <input type="file" accept={FEEDBACK_IMAGE_TYPES.join(',')} multiple disabled={pending}
+            onChange={(event) => { addImages(event.target.files); event.target.value = ''; }} />
+        </label>
+        <small>Up to four images; 5 MB each, 12 MB total.</small>
+        {images.length > 0 && <ul className="feedback-images">{images.map((file, index) => <li key={`${file.name}-${index}`}>
+          <FeedbackMediaPreview blob={file} /><span>{file.name}</span><button type="button" disabled={pending}
+            aria-label={`Remove image ${index + 1}: ${file.name}`} onClick={() => setImages((current) => current.filter((_, item) => item !== index))}>Remove</button>
+        </li>)}</ul>}
+        <div className="feedback-voice">
+          {!audio && <button type="button" disabled={pending || requestingMic || !config?.audio} onClick={() => recording ? stopRecording() : void startRecording()}>
+            {recording ? `Stop recording (${recordingSeconds}s)` : requestingMic ? 'Waiting for microphone…' : 'Record voice note'}
+          </button>}
+          <small>Voice: up to {config?.duration ?? FEEDBACK_AUDIO_LIMIT} seconds, 2 MB. Recording stops when you close this form.</small>
+          {audio && <><FeedbackMediaPreview blob={audio.blob} audio /><button type="button" disabled={pending} onClick={() => setAudio(null)}>Remove voice note</button></>}
+        </div>
+        {config && !config.enabled && <p role="status">Feedback is currently unavailable. Your draft is unchanged.</p>}
+        {configError && <p role="status">{configError} <button type="button" disabled={pending} onClick={() => setConfigAttempt((value) => value + 1)}>Check again</button> Text and images can still be attempted.</p>}
+        {message && <p className={success ? 'feedback-result' : 'feedback-error'} role={success ? 'status' : 'alert'}>{message}</p>}
+        <button className="feedback-submit" type="submit" disabled={pending || recording || requestingMic || config?.enabled === false}>
+          {pending ? 'Sending…' : 'Send feedback'}
+        </button>
+      </form>
+    </dialog>
+  </>;
 }
 
 function DashboardPage() {
@@ -488,55 +785,72 @@ function DashboardPage() {
 
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
+    let controller: AbortController | null = null;
 
     async function load() {
+      if (inFlight) return;
+      inFlight = true;
+      const active = new AbortController();
+      controller = active;
+      const deadline = window.setTimeout(() => active.abort(), 20000);
       setStatus((current) => (current === 'ready' ? 'ready' : 'loading'));
       setError(null);
       try {
-        const businessEntry = await fetchDashboard('business', DASHBOARD_URLS.business);
-        const optionalResults = await Promise.allSettled(
+        const results = await Promise.allSettled(
           (Object.entries(DASHBOARD_URLS) as Array<[CohortKind, string]>)
-            .filter(([kind]) => kind !== 'business')
-            .map(([kind, baseUrl]) => fetchDashboard(kind, baseUrl)),
+            .map(([kind, baseUrl]) => fetchDashboard(kind, baseUrl, active.signal)),
         );
         if (cancelled) return;
-        const entries = [businessEntry];
+        const entries: Array<[CohortKind, DashboardResponse]> = [];
         const optionalErrors: string[] = [];
-        for (const result of optionalResults) {
+        for (const result of results) {
           if (result.status === 'fulfilled') {
             entries.push(result.value);
           } else {
             optionalErrors.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
           }
         }
+        if (!entries.length) throw new Error(optionalErrors.join('; ') || 'No cohort data is available.');
         setDashboards(Object.fromEntries(entries) as LoadedDashboards);
         setLastFetchedAt(new Date().toISOString());
         setStatus('ready');
-        setError(optionalErrors.length ? `Optional cohort data unavailable: ${optionalErrors.join('; ')}` : null);
+        setError(optionalErrors.length ? `Cohort data unavailable: ${optionalErrors.join('; ')}` : null);
       } catch (loadError) {
         if (cancelled) return;
         setStatus('error');
         setError(loadError instanceof Error ? loadError.message : String(loadError));
+      } finally {
+        window.clearTimeout(deadline);
+        inFlight = false;
       }
     }
 
     load();
-    const interval = window.setInterval(load, 5 * 60 * 1000);
+    const interval = window.setInterval(load, PAGE_REFRESH_MS);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
+      controller?.abort();
     };
   }, []);
 
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
+    let controller: AbortController | null = null;
 
     async function loadOperations() {
+      if (inFlight) return;
+      inFlight = true;
+      const active = new AbortController();
+      controller = active;
+      const deadline = window.setTimeout(() => active.abort(), 20000);
       setOperationsError(null);
       try {
         const [alertsResponse, takeoffsResponse] = await Promise.all([
-          fetch('/api/alerts?limit=8', { cache: 'no-store' }),
-          fetch('/api/takeoffs?limit=8', { cache: 'no-store' }),
+          fetch('/api/alerts?limit=8', { cache: 'no-store', signal: active.signal }),
+          fetch('/api/takeoffs?limit=8', { cache: 'no-store', signal: active.signal }),
         ]);
         if (!alertsResponse.ok) throw new Error(`Alert event request failed with ${alertsResponse.status}`);
         if (!takeoffsResponse.ok) throw new Error(`Takeoff event request failed with ${takeoffsResponse.status}`);
@@ -547,14 +861,18 @@ function DashboardPage() {
       } catch (loadError) {
         if (cancelled) return;
         setOperationsError(loadError instanceof Error ? loadError.message : String(loadError));
+      } finally {
+        window.clearTimeout(deadline);
+        inFlight = false;
       }
     }
 
     loadOperations();
-    const interval = window.setInterval(loadOperations, 5 * 60 * 1000);
+    const interval = window.setInterval(loadOperations, PAGE_REFRESH_MS);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
+      controller?.abort();
     };
   }, []);
 
@@ -573,11 +891,11 @@ function DashboardPage() {
   }
 
   if (status === 'error' && !combined) {
-    return <StatusPage title="Dashboard unavailable" detail={error ?? 'The dashboard data request failed.'} tone="error" />;
+    return <StatusPage title="Dashboard unavailable" detail={error ?? 'The dashboard data request failed.'} tone="error"><CohortControls selected={selected} onToggle={toggleKind} /></StatusPage>;
   }
 
   if (!combined) {
-    return <StatusPage title="No cohort selected" detail="Select at least one aircraft category." tone="error" />;
+    return <StatusPage title="Selected cohort unavailable" detail="No current signal can be assessed. Select another aircraft category or wait for recovery." tone="error"><CohortControls selected={selected} onToggle={toggleKind} /></StatusPage>;
   }
 
   return (
@@ -617,15 +935,28 @@ function DashboardPage() {
   );
 }
 
-function StatusPage({ title, detail, tone = 'normal' }: { title: string; detail: string; tone?: 'normal' | 'error' }) {
+function StatusPage({ title, detail, tone = 'normal', children }: { title: string; detail: string; tone?: 'normal' | 'error'; children?: ReactNode }) {
   return (
     <main className="app-shell">
       <section className={`panel loading-panel ${tone === 'error' ? 'error-panel' : ''}`}>
         <h1>{title}</h1>
         <p>{detail}</p>
+        {children}
       </section>
     </main>
   );
+}
+
+function CohortControls({ selected, onToggle }: { selected: SelectedCohorts; onToggle: (kind: CohortKind) => void }) {
+  return <fieldset className="chart-checkbox-group cohort-toggle-group">
+    <legend>Aircraft categories</legend>
+    {(Object.keys(CATEGORY_LABELS) as CohortKind[]).map((kind) => (
+      <label key={kind} className={`chart-checkbox-option cohort-toggle-option ${selected[kind] ? 'cohort-toggle-option-active' : ''}`}>
+        <input type="checkbox" checked={selected[kind]} onChange={() => onToggle(kind)} />
+        {CATEGORY_LABELS[kind]}
+      </label>
+    ))}
+  </fieldset>;
 }
 
 function HeroPanel() {
@@ -633,17 +964,17 @@ function HeroPanel() {
     <section className="panel hero-copy-panel">
       <h1>Apocalypse Early Warning System</h1>
       <p>
-        A continuously running instrument at <strong>warning.watch</strong>. Every 30 minutes it measures how many business
-        jets, military aircraft, and untracked transponders are airborne worldwide, and asks one question: is this normal for
-        this hour, or is something statistically extraordinary happening in the sky?
+        A continuously running instrument at <strong>warning.watch</strong>. It checks for new aircraft data every two
+        minutes and compares business-jet, military, and untracked-aircraft activity against historical baselines.
+        The current upstream archive publishes 30-minute slots; faster polling does not make those observations real time.
       </p>
       <p>
-        The premise is simple and old: people with the most information and the most resources move first. If they ever move
-        all at once, that movement is visible from public flight data before it is visible anywhere else.
+        Unusual aircraft movements can provide evidence worth investigating. They do not establish anyone&apos;s
+        intentions, predict an attack, or prove that conditions are safe.
       </p>
       <p>
-        It is calm by default. No baseline, no alert. Ordinary traffic, no alert. It speaks only when the measurement is
-        genuinely unusual — and every alert carries its numbers.
+        Every alert must carry its evidence. Missing baselines mean the detector cannot assess an anomaly; stale data means
+        the instrument is unavailable. Neither is an all-clear. Follow official emergency instructions.
       </p>
       <p className="hero-link-row">
         <a href="#get-alerts">Get alerts</a> / <a href="#how-to-read">How to read this</a> /{' '}
@@ -702,11 +1033,10 @@ function GetAlertsPanel() {
         <article className="channel-card">
           <h3>System health — silence must be distinguishable from death</h3>
           <p>
-            The worst failure of a warning system is dying quietly. This one watches itself hourly and publishes failures and
+            The instrument checks its own health every two minutes and publishes failures and
             recoveries to a separate operations channel:{' '}
             <code>https://ntfy.warning.watch/apocalypse-ews-ops</code>. The dashboard above always shows the timestamp of the
-            last ingested data slot — if it is more than a couple of hours old, treat the instrument as down, not the sky as
-            calm.
+            last ingested data slot — if it is more than 75 minutes old, treat the instrument as down, not the sky as calm.
           </p>
         </article>
       </div>
@@ -747,7 +1077,7 @@ function ReadingPanel() {
 }
 
 const LEVEL_NAMES: Record<number, string> = {
-  1: 'ALL CLEAR',
+  1: 'NO ANOMALY',
   2: 'NOTED',
   3: 'ELEVATED',
   4: 'HIGH',
@@ -755,7 +1085,7 @@ const LEVEL_NAMES: Record<number, string> = {
 };
 
 const LEVEL_MEANINGS: Record<number, string> = {
-  1: 'Nothing unusual in worldwide traffic right now.',
+  1: 'No elevated activity in the latest sample. This is not an all-clear or a prediction of safety.',
   2: 'Mildly above baseline — well within historical variation.',
   3: 'Meaningfully above baseline. Watch which category is driving it.',
   4: 'Statistically unusual activity. Check corroboration before concluding anything.',
@@ -780,29 +1110,34 @@ function deviationSentence(actual: number, expected: number, sigma: number) {
 
 const STALE_AFTER_MINUTES = 75;
 
-function dataAgeMinutes(asOf: string | null | undefined) {
+function dataAgeMinutes(asOf: string | null | undefined, now: number) {
   const time = Date.parse(asOf ?? '');
-  if (!Number.isFinite(time)) return null;
-  return Math.max(0, Math.round((Date.now() - time) / 60000));
+  if (!Number.isFinite(time) || time > now + 60000) return null;
+  return Math.max(0, Math.floor((now - time) / 60000));
 }
 
 function DialPanel({ combined, onEmergencyLevelTap }: { combined: CombinedDashboard; onEmergencyLevelTap: () => void }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 15000);
+    return () => window.clearInterval(interval);
+  }, []);
   const level = clampLevel(combined.signal.emergencyLevel);
   const seatCopy = combined.seats.estimatedSeats == null ? null : `≈${formatInteger(combined.seats.estimatedSeats)} passenger seats aloft`;
   const sigma = combined.signal.sigmaShift;
-  const ageMinutes = dataAgeMinutes(combined.asOf);
-  const stale = ageMinutes == null || ageMinutes > STALE_AFTER_MINUTES;
+  const ageMinutes = dataAgeMinutes(combined.asOf, now);
+  const stale = ageMinutes == null || ageMinutes >= STALE_AFTER_MINUTES;
 
-  if (stale) {
+  if (stale || combined.assessmentProblem) {
     return (
       <section className="panel dial-panel status-stale" aria-live="polite">
         <p className="status-kicker">Current status · {combined.selectedLabels.join(' + ')}</p>
-        <p className="status-word">INSTRUMENT STALE</p>
+        <p className="status-word">{ageMinutes == null || combined.assessmentProblem ? 'INSTRUMENT UNAVAILABLE' : 'INSTRUMENT STALE'}</p>
         <p className="status-meaning">
-          The last measurement is {ageMinutes == null ? 'of unknown age' : `${formatInteger(ageMinutes)} minutes old`} (bound: {STALE_AFTER_MINUTES} min).
-          Treat the instrument as down — <strong>not</strong> the sky as calm. Last known level: {level}/5.
+          {combined.assessmentProblem ?? (ageMinutes == null ? 'A selected cohort has missing or invalid measurement time.' : `The oldest selected measurement is ${formatInteger(ageMinutes)} minutes old (bound: ${STALE_AFTER_MINUTES} min).`)}
+          {' '}The current combined signal cannot be assessed. Treat the instrument as down — <strong>not</strong> the sky as calm.
         </p>
-        <p className="status-freshness">Last measurement {formatDateTime(combined.asOf)} · normally updates every 30 min</p>
+        <p className="status-freshness">Oldest selected measurement {formatDateTime(combined.asOf)} · source slots 30 min · polling 2 min</p>
       </section>
     );
   }
@@ -826,7 +1161,7 @@ function DialPanel({ combined, onEmergencyLevelTap }: { combined: CombinedDashbo
         {seatCopy ? ` ${seatCopy}.` : ''}
       </p>
       <p className="status-freshness">
-        Measured {ageMinutes === 0 ? 'just now' : `${formatInteger(ageMinutes)} min ago`} · updates every 30 min ·{' '}
+        Oldest selected sample {ageMinutes === 0 ? 'just now' : `${formatInteger(ageMinutes)} min ago`} · source slots 30 min · polling 2 min · page refresh 1 min ·{' '}
         <span className="status-figures">deviation {formatSigned(sigma, 1)}σ vs expected {formatNumber(combined.expectedCount, 0)}</span>
       </p>
     </section>
@@ -889,15 +1224,7 @@ function ArchivePanel({ combined, selected, onToggle }: { combined: CombinedDash
           </label>
         ))}
       </fieldset>
-      <fieldset className="chart-checkbox-group cohort-toggle-group">
-        <legend>Aircraft categories</legend>
-        {(Object.keys(CATEGORY_LABELS) as CohortKind[]).map((kind) => (
-          <label key={kind} className={`chart-checkbox-option cohort-toggle-option ${selected[kind] ? 'cohort-toggle-option-active' : ''}`}>
-            <input type="checkbox" checked={selected[kind]} onChange={() => onToggle(kind)} />
-            {CATEGORY_LABELS[kind]}
-          </label>
-        ))}
-      </fieldset>
+      <CohortControls selected={selected} onToggle={onToggle} />
       <LineChart
         title="Aircraft count history"
         data={visible}
@@ -1182,9 +1509,9 @@ function AboutPanel({ selectedLabels }: { selectedLabels: string[] }) {
       <h2 id="methodology">Methodology</h2>
       <div className="about-copy">
         <p>
-          Every 30 minutes the pipeline ingests global ADS-B Exchange heatmap slots — positions broadcast by aircraft
-          transponders and collected by a worldwide network of volunteer receivers — and counts concurrent airborne aircraft in
-          three independent cohorts: <strong>business jets</strong> (public airframe metadata keyed by ICAO hex),{' '}
+          Every two minutes the pipeline checks for new global ADS-B Exchange archive slots. The source publishes 30-minute
+          slots from aircraft transponders collected by a worldwide network of volunteer receivers. Each new slot is scored
+          once for three cohorts: <strong>business jets</strong> (public airframe metadata keyed by ICAO hex),{' '}
           <strong>military aircraft</strong>, and <strong>non-ICAO untracked transponders</strong> (traffic that avoids
           standard registration). Currently showing: {selectedLabels.join(' + ')}.
         </p>
@@ -1195,7 +1522,7 @@ function AboutPanel({ selectedLabels }: { selectedLabels: string[] }) {
         </p>
         <p>
           The pipeline runs on independent, self-operated infrastructure: one server, systemd timers, SQLite archives with
-          daily integrity-checked backups, an hourly self-watchdog, and delivery channels that fail independently. The seat
+          daily integrity-checked backups, a two-minute self-watchdog, and delivery channels that fail independently. The seat
           estimate is a maximum-capacity approximation from model labels — it is not a manifest and identifies no one.
         </p>
         <p>
@@ -1681,7 +2008,16 @@ function combineDashboards(dashboards: LoadedDashboards, selected: SelectedCohor
       };
 
   const primary = entries[0].dashboard;
-  const asOf = entries.map((entry) => entry.dashboard.current?.asOf ?? entry.dashboard.liveStatus?.latestSampledAt).filter((value): value is string => typeof value === 'string' && value.length > 0).sort().at(-1);
+  const measurementTimes = entries.map((entry) =>
+    Date.parse(entry.dashboard.current?.asOf ?? entry.dashboard.liveStatus?.latestSampledAt ?? ''));
+  const allSelectedPresent = entries.length === Object.values(selected).filter(Boolean).length;
+  const asOf = allSelectedPresent && measurementTimes.every((time) => Number.isFinite(time) && time <= Date.now() + 60000)
+    ? new Date(Math.min(...measurementTimes)).toISOString() : undefined;
+  const assessmentProblem = !allSelectedPresent ? 'Data for a selected cohort is unavailable.'
+    : entries.some(({ dashboard }) => (dashboard.current?.modelReady ?? dashboard.signals?.composite?.modelReady) !== true)
+      ? 'A selected cohort does not have a ready baseline.'
+      : asOf && Math.max(...measurementTimes) - Math.min(...measurementTimes) > 60000
+        ? 'Selected cohorts belong to different source slots. A combined current signal is unavailable.' : undefined;
   const holidayWindows = dedupeHolidayWindows(entries.flatMap((entry) => entry.dashboard.trends?.holidayWindows ?? []));
   const providerStatus = entries.map((entry) => {
     const live = entry.dashboard.liveStatus;
@@ -1696,8 +2032,8 @@ function combineDashboards(dashboards: LoadedDashboards, selected: SelectedCohor
       warnings.push(`${CATEGORY_LABELS[entry.kind]} provider error: ${live.lastError}`);
     }
     const sampledAt = Date.parse(live?.latestSampledAt || '');
-    if (Number.isFinite(sampledAt) && Date.now() - sampledAt > 24 * 60 * 60 * 1000) {
-      warnings.push(`${CATEGORY_LABELS[entry.kind]} ADS-B data is older than 24 hours.`);
+    if (!Number.isFinite(sampledAt) || sampledAt > Date.now() + 60000 || Date.now() - sampledAt > STALE_AFTER_MINUTES * 60000) {
+      warnings.push(`${CATEGORY_LABELS[entry.kind]} ADS-B data is stale or has an invalid timestamp.`);
     }
     return warnings;
   });
@@ -1714,6 +2050,7 @@ function combineDashboards(dashboards: LoadedDashboards, selected: SelectedCohor
     holidayWindows,
     trackedCount,
     actualCount,
+    assessmentProblem,
     expectedCount,
     stdDev,
     alarmSigmaThreshold,

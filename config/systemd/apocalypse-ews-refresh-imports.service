@@ -11,4 +11,7 @@ EnvironmentFile=/etc/apocalypse-ews.env
 Environment=NODE_ENV=production
 Environment=PATH=/opt/dev/apocalypse-ews/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/bin/node scripts/refresh_all_snapshots.js --refresh-imports
+TimeoutStartSec=1520
+TimeoutStopSec=5
+KillMode=control-group
 NoNewPrivileges=true

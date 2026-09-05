@@ -11,7 +11,7 @@ attached. Calm output is the normal output.
 ## How it works
 
 ```
-ADS-B Exchange public heatmaps (30-min slots, no API key)
+ADS-B Exchange public heatmaps (30-min source slots, checked every 2 min)
         │  ingest
         ▼
 SQLite per cohort (business jets ~31k airframes · military · non-ICAO)
@@ -23,10 +23,10 @@ concurrent-airborne anomaly (levels 1–5) + takeoff-batch rate z-score
 RSS · ntfy push · Telegram · web dashboard · email/SMS/web-push (optional stack)
 ```
 
-- **Detection is calm-by-default**: no baseline → no alert. Data problems are
-  never reported as world events.
-- **Exactly-once fanout**: alert events are keyed and cursored; every channel
-  publisher is idempotent and retry-safe.
+- **Detection is evidence-bound**: no baseline → no statistical alert. Missing
+  or stale data means the instrument is unavailable, never that the world is safe.
+- **Keyed, cursored fanout**: repeated samples do not create new statistical
+  evidence. External delivery can remain uncertain after a lost acknowledgment.
 - The full pipeline is one command (`npm run refresh:all`), designed to run
   from any scheduler (systemd timer, launchd, cron) on one cheap box.
 
@@ -42,7 +42,9 @@ npm start                     # dashboard + RSS at http://127.0.0.1:3030/
 Python 3 with `numpy` and `Pillow` is needed for ingestion
 (`pip install -r requirements.txt`). Baselines need ~7 days of history before
 anomaly models arm; `scripts/backfill_history.py --start-date … --end-date …`
-fills history from public archives.
+fills history from public archives. Polling every two minutes does **not**
+make those 30-minute archives a real-time feed. Genuine two-minute observations
+require an authorized live global source and separately validated calibration.
 
 ## Subscribing (for a running deployment)
 

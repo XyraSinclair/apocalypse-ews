@@ -8,8 +8,8 @@ const execFileAsync = promisify(execFile);
 
 const HEATMAP_SOURCE = "adsbx_heatmap";
 const HEATMAP_STATUS_META_KEY = "adsbx_heatmap_status";
-const HEATMAP_REFRESH_MS = 30 * 60 * 1000;
-const HEATMAP_RELEASE_LAG_MS = 2 * 60 * 1000;
+const HEATMAP_REFRESH_MS = 2 * 60 * 1000;
+const EXTERNAL_REFRESH = process.env.EWS_EXTERNAL_REFRESH === "1";
 const HEATMAP_SCRIPT_PATH = path.join(ROOT_DIR, "scripts", "update_latest_heatmap.py");
 
 function createDefaultStatus() {
@@ -17,10 +17,13 @@ function createDefaultStatus() {
     provider: HEATMAP_SOURCE,
     providerLabel: "ADS-B Exchange heatmap",
     cadenceMinutes: 30,
+    pollCadenceMinutes: 2,
     refreshing: false,
     nextRefreshAt: null,
     lastAttemptAt: null,
     lastSuccessAt: null,
+    lastPollSuccessAt: null,
+    lastNewObservationAt: null,
     lastError: null,
     latestSampledAt: null,
     latestSlotKey: null,
@@ -57,7 +60,7 @@ function persistStatus(status) {
 
 function nextRefreshAtIso(nowMs = Date.now()) {
   const nextBoundaryMs = Math.floor(nowMs / HEATMAP_REFRESH_MS) * HEATMAP_REFRESH_MS + HEATMAP_REFRESH_MS;
-  return new Date(nextBoundaryMs + HEATMAP_RELEASE_LAG_MS).toISOString();
+  return new Date(nextBoundaryMs).toISOString();
 }
 
 function delayUntilNextRefresh(nowMs = Date.now()) {
@@ -83,7 +86,7 @@ function createHeatmapCacheRefresher({ onRefreshComplete = null } = {}) {
   let timer = null;
   let inFlight = null;
 
-  persistStatus(status);
+  if (!EXTERNAL_REFRESH) persistStatus(status);
 
   function updateStatus(patch) {
     status = {
@@ -95,6 +98,7 @@ function createHeatmapCacheRefresher({ onRefreshComplete = null } = {}) {
   }
 
   function getStatus() {
+    if (EXTERNAL_REFRESH) status = loadSavedStatus();
     return { ...status };
   }
 
@@ -131,6 +135,7 @@ function createHeatmapCacheRefresher({ onRefreshComplete = null } = {}) {
   }
 
   async function refreshNow({ force = false } = {}) {
+    if (EXTERNAL_REFRESH) return getStatus();
     if (inFlight) {
       return inFlight;
     }
@@ -152,12 +157,17 @@ function createHeatmapCacheRefresher({ onRefreshComplete = null } = {}) {
         const { stdout } = await execFileAsync("python3", args, {
           cwd: ROOT_DIR,
           maxBuffer: 1024 * 1024,
+          timeout: 90_000,
+          killSignal: "SIGKILL",
         });
         const payload = JSON.parse(String(stdout || "{}").trim() || "{}");
+        const savedStatus = loadSavedStatus();
 
         updateStatus({
           refreshing: false,
-          lastSuccessAt: new Date().toISOString(),
+          lastPollSuccessAt: new Date().toISOString(),
+          lastSuccessAt: savedStatus.lastSuccessAt,
+          lastNewObservationAt: savedStatus.lastNewObservationAt,
           lastError: null,
           latestSampledAt: payload.latestSampledAt ?? status.latestSampledAt,
           latestSlotKey: payload.latestSlotKey ?? status.latestSlotKey,
@@ -168,7 +178,7 @@ function createHeatmapCacheRefresher({ onRefreshComplete = null } = {}) {
           airborneCount: payload.airborneCount ?? status.airborneCount,
           concurrentCount: payload.concurrentCount ?? status.concurrentCount,
         });
-        notifyRefreshComplete(true);
+        if (!payload.skipped) notifyRefreshComplete(true);
       } catch (error) {
         updateStatus({
           refreshing: false,
@@ -187,6 +197,7 @@ function createHeatmapCacheRefresher({ onRefreshComplete = null } = {}) {
   }
 
   function start() {
+    if (EXTERNAL_REFRESH) return;
     scheduleNextRefresh();
     void refreshNow();
   }

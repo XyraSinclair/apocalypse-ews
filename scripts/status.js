@@ -172,6 +172,15 @@ function alertsReport() {
 }
 
 const report = {
+  polling: safe(() => {
+    const state = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'refresh-state.json'), 'utf8'));
+    return {
+      ...state,
+      pollAgeMinutes: state.lastPollSuccessAt
+        ? Math.round((Date.now() - Date.parse(state.lastPollSuccessAt)) / 60000)
+        : null,
+    };
+  }),
   generatedAt: new Date().toISOString(),
   cohorts: [
     dbReport(path.join(DATA_DIR, 'ews-main.sqlite'), 'global_business_jet', 'concurrent_metrics'),
@@ -189,14 +198,22 @@ const report = {
 };
 
 // Instrument bounds (rationale table in OPERATIONS.md "Instrument bounds").
-// Slot cadence 30 min + refresh at :05/:35 means healthy data age tops out
-// near 40 min; 75 min = one full missed refresh cycle plus margin.
+// Archive cadence remains 30 min despite two-minute availability polling.
+// Keep the observation-age bound distinct from the scheduler's liveness.
 const MAX_DATA_AGE_HOURS = 1.25;
 const MAX_LIVE_AGE_MINUTES = 75;
 const MIN_LIVE_SLOTS_24H = 42; // 48 expected; tolerate 6 missed live slots/day
 const MIN_COMPLETENESS_PCT_30D = 98;
 
 const problems = [];
+if (!report.polling) {
+  problems.push('poll status missing — check apocalypse-ews-refresh.service');
+} else {
+  if (report.polling.lastError) problems.push(`refresh pipeline: ${report.polling.lastError}`);
+  if (!Number.isFinite(report.polling.pollAgeMinutes) || report.polling.pollAgeMinutes > 10) {
+    problems.push(`availability polling stale (${report.polling.pollAgeMinutes}m > 10m bound)`);
+  }
+}
 for (const cohort of report.cohorts) {
   if (cohort.missing) { problems.push(`${cohort.label}: database missing`); continue; }
   if (cohort.staleHours === null || cohort.staleHours > MAX_DATA_AGE_HOURS) {

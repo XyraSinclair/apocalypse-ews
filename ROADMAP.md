@@ -2,10 +2,10 @@
 
 ## 0. The contract (the whole system in one sentence)
 
-> **One Hetzner box ingests public ADS-B data every 30 minutes, scores how
-> out-of-distribution elite air traffic is against a seasonal baseline, and —
-> rarely, calibratedly — pushes an alert to everyone subscribed, while proving
-> its own liveness continuously.**
+> **One Hetzner box checks public ADS-B archives every two minutes, scores each
+> new 30-minute source observation against a seasonal baseline, and pushes
+> evidence-backed alerts while reporting its own failures. Genuine two-minute
+> observations require a live source and validated source-specific calibration.**
 
 Everything below either serves that sentence or gets cut. Corollaries:
 
@@ -46,8 +46,9 @@ Everything below either serves that sentence or gets cut. Corollaries:
   period, contributing aircraft, baseline sparkline, permalink. No vibes.
 
 ### Delivery reliability (D)
-- **D1 — Exactly-once per subscriber per event** (event_key uniqueness +
-  fanout cursor/leases — already built, keep tested).
+- **D1 — Deduplicated evidence and delivery state.** Unique event keys and
+  cursors prevent repeat scoring; external delivery after a lost acknowledgment
+  can be uncertain and must not be described as guaranteed exactly-once.
 - **D2 — Channel independence.** RSS, ntfy, Telegram, email, web push fail
   independently; one provider outage never blocks the others.
 - **D3 — Synthetic end-to-end canary.** Weekly injected test event must reach
@@ -86,7 +87,7 @@ Everything below either serves that sentence or gets cut. Corollaries:
   level seen roughly once per N years" — an anomaly report, not a doom oracle.
   Methodology page public. Base rates in every alert.
 - **P2 — Calibration published.** Backtest results, historical alert log, and
-  false-alarm record on the site. Trust through receipts.
+  false-alarm record on the site. Trust through evidence.
 - **P3 — Legal floor.** Informational service, no warranty; CAN-SPAM/GDPR
   basics (unsubscribe, deletion, minimal data). Free tier keeps this simple.
 
