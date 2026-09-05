@@ -276,6 +276,14 @@ business/military/non-ICAO databases. The last still had zero eligible samples
 because of the inherited timestamp-alignment limitation above. The deadline
 remains 90 seconds per child; it was not raised to conceal the query failure.
 
+Production activation at 02:47 Pacific on 2026-09-05 completed a new-sample pass
+in 6.58 seconds. The scheduled 02:48 unchanged poll completed in 0.72 seconds,
+kept the observation clock unchanged, and scheduled the next poll for 02:50.
+All three public dashboards agreed on the 02:29:50 observation, returned
+`Cache-Control: no-store`, and exposed no ingestion error. The public Feedback
+dialog opened and closed normally. Operational status reported only the existing
+nightly selftest failure; no failure state or detector threshold was suppressed.
+
 The locked frontend build and existing ingestion/alert-pipeline checks passed.
 Browser interception exercised stored-success, rejection, malformed success,
 duplicate submission, draft retention, image payloads, private-context exclusion,
