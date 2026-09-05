@@ -1,5 +1,11 @@
 # Roadmap — from "runs on my laptop" to premier public signal
 
+**Strategic redesign, 5 September 2026:** the proposed nuclear-risk mission,
+indicator atlas, decision architecture, and intelligence-first work sequence
+are in [https://github.com/XyraSinclair/apocalypse-ews/blob/main/NUCLEAR-WARNING-STRATEGY.md](https://github.com/XyraSinclair/apocalypse-ews/blob/main/NUCLEAR-WARNING-STRATEGY.md).
+The implementation roadmap below records the aviation-anomaly approach. Its
+statistical goals must not be read as validated nuclear-warning capability.
+
 ## 0. The contract (the whole system in one sentence)
 
 > **One Hetzner box checks public ADS-B archives every two minutes, scores each
