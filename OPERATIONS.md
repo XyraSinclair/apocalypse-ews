@@ -303,6 +303,32 @@ The actual nightly unit passed in five seconds at 05:06 Pacific, two-minute
 polling remained active, and operational status reported healthy. That
 operational verdict does not close the statistical limitations above.
 
+### Frozen count-likelihood candidate rejected
+
+The follow-on 2026-09-05 experiment kept the August 29 training cutoff and
+seven-day holdout fixed. Training contained 2,537 observed half-hours:
+52.85 observed days, not the 66.21 elapsed days across gaps. Median/MAD
+plug-in negative-binomial likelihood ratios were evaluated as heuristic
+scores, not calibrated probabilities; stock-count serial dependence remained.
+
+At HIGH/CRITICAL cutoffs 12/20, the candidate produced three training
+crossings, including one critical: 1.703/0.568 per 30 observed days, above
+the literal 1.5/0.5 budgets. The frozen sigma control produced two/one.
+For the 28 quiet holdout windows with expected mean 3–10, the candidate
+improved three-times-expected HIGH/CRITICAL successes from 9/0 to 17/19,
+but three-times-observed successes remained 13/15. Holdout noise was zero.
+
+Rejecting every training critical requires a cutoff above the observed
+39.122 excursion. Four contributions capped at eight can accumulate at most
+32 from zero, so this candidate cannot then add two-hour critical detection.
+Kimi-k3 independently recommended keeping production unchanged. This rejects
+the tested clipped-likelihood design, not every possible detector.
+
+The existing assurance checks round permitted event counts upward; their
+passing verdict is not proof that literal rates hold in a short sample.
+No threshold, production scoring law, or permanent test was changed by
+this experiment, and the holdout was not recycled into a new calibration.
+
 ### Detector assurance status
 
 The business-jet nightly replay ending 2026-09-04 18:45 Pacific failed its
