@@ -206,6 +206,14 @@ resumption time; neither layout overflowed. Two independent read-only reviewers
 cleared the repaired lifecycle and inference/publication boundaries. GDELT's
 upstream 429 remains a coverage gap with bounded recovery, not a healthy feed.
 
+Production activated `ea11874` at 21:38 Pacific. Schema 2 passed integrity and
+foreign-key checks; all 253 pre-migration evidence records were retained.
+At 21:52 Pacific, the original backlog was empty: 82 leads had completed
+screening and 73 investigations had completed since activation. The daily
+ledger total was $0.0829 against $0.10. One newly arrived lead remained in
+bounded retry; rejected output was not published, and the minute timer remained
+active. The live desktop and mobile surfaces exposed no unreviewed threads.
+
 ### Implementation evidence — 5 September 2026
 
 The release build and existing alert-pipeline smoke passed. Nine temporary
