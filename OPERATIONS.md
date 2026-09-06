@@ -196,6 +196,13 @@ and `qs` 6.15.2 advisories. These versions are unchanged from the pre-watch
 deployment. No blanket dependency upgrade or unrelated operational remediation
 was performed.
 
+The corrected production transport reached GDELT in 10.9 seconds, within the
+unchanged deadline, and received HTTP 429. At 17:30 Pacific, 20 enabled
+definitions were healthy and GDELT remained explicitly degraded. No route,
+credential, access-control bypass, or immediate retry was introduced; its normal
+30-minute source cadence remains in force. Public source titles are marked as
+quoted source material, not verified events or machine findings.
+
 ## Assurance contract
 
 This is a consequential public instrument, not a certified emergency-warning

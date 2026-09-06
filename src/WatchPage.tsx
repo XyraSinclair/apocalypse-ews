@@ -139,7 +139,7 @@ export default function WatchPage() {
       <div className="watch-workspace">
         <section className="watch-panel watch-queue" aria-labelledby="incident-heading">
           <div className="watch-section-heading"><div><p className="watch-eyebrow">01 / INCIDENT MEMORY</p><h2 id="incident-heading">Evidence queue</h2></div><label className="watch-filter">Show<select value={queue} onChange={event => { setQueue(event.target.value); setCursors([null]); }}><option value="open">Open</option><option value="resolved">Resolved</option><option value="all">All threads</option></select></label></div>
-          <p className="watch-muted">{incidents.length} returned threads · {data.counts.openIncidents} open overall. Expand a thread to inspect its evidence.</p>
+          <p className="watch-muted">{incidents.length} returned threads · {data.counts.openIncidents} open overall. Sources may include unverified reports; inclusion is not verification. Expand a thread to inspect its evidence.</p>
           {!incidents.length && <div className="watch-empty"><h3>{data.run.lastFinishedAt ? 'No matching incident threads' : 'Building the first source baseline'}</h3><p>Coverage is limited to the registry below. An empty queue is not a safety assessment.</p></div>}
           {incidents.map(incident => <IncidentCard key={`${token ? 'operator' : 'public'}:${incident.id}`} incident={incident} token={token} now={now} onReview={() => setRevision(n => n + 1)} />)}
           <nav className="watch-section-heading" aria-label="Incident pages">
@@ -152,7 +152,7 @@ export default function WatchPage() {
           <p className="watch-eyebrow">02 / SHIFT HANDOVER</p><h2 id="handover-heading">What remains open</h2>
           <p>{data.handover.summary || 'No completed handover yet.'}</p>
           <p className="watch-clock"><Clock value={data.handover.generatedAt} /></p>
-          <h3>Open questions</h3>{data.handover.openQuestions.length ? <ul>{data.handover.openQuestions.map((question, index) => <li key={index}>{question}</li>)}</ul> : <p className="watch-muted">No questions recorded.</p>}
+          <h3>{token ? 'Open questions' : 'Source material to review'}</h3>{!token && <p className="watch-muted">Recorded source material, not the watch’s findings.</p>}{data.handover.openQuestions.length ? <ul>{data.handover.openQuestions.map((question, index) => <li key={index}>{token ? question : <q>{question}</q>}</li>)}</ul> : <p className="watch-muted">{token ? 'No questions recorded.' : 'No source material awaiting review.'}</p>}
           <h3>Coverage gaps</h3>{data.handover.coverageGaps.length ? <ul>{data.handover.coverageGaps.map((gap, index) => <li key={index}>{gap}</li>)}</ul> : <p className="watch-muted">No gaps recorded in the handover. The source registry remains the coverage boundary.</p>}
           <dl className="watch-facts"><div><dt>Run started</dt><dd><Clock value={data.run.lastStartedAt} /></dd></div><div><dt>Run finished</dt><dd><Clock value={data.run.lastFinishedAt} /></dd></div><div><dt>Investigation engine</dt><dd>{data.agent.configured ? 'Configured' : 'Not configured'}{data.agent.reason ? ` · ${data.agent.reason}` : ''}</dd></div></dl>
           {data.run.lastError && <p className="watch-error">{data.run.lastError}</p>}
@@ -188,7 +188,7 @@ function IncidentCard({ incident, token, now, onReview }: { incident: Incident; 
   const [expanded, setExpanded] = useState(false);
   return <article className="watch-incident"><button className="watch-incident-toggle" aria-expanded={expanded} aria-controls={`incident-${incident.id}`} onClick={() => setExpanded(value => !value)}>
     <span className="watch-incident-top"><span className="watch-badge">{incident.status}</span><span className="watch-priority">Investigation priority: {label(incident.attention)}</span><span aria-hidden="true">{expanded ? '−' : '+'}</span></span>
-    <strong>{incident.title}</strong><span className="watch-muted">{incident.region || 'Region unspecified'} · {incident.evidenceCount} evidence records · {incident.sourceIds.length} sources</span><span className="watch-clock">Last observed {age(incident.lastObservedAt, now)} · investigation {incident.investigation.status}</span>
+    <span className="watch-eyebrow">Source material</span><strong><q>{incident.title}</q></strong><span className="watch-muted">{incident.region || 'Region unspecified'} · {incident.evidenceCount} evidence records · {incident.sourceIds.length} sources</span><span className="watch-clock">Last observed {age(incident.lastObservedAt, now)} · investigation {incident.investigation.status}</span>
   </button>{expanded && <div id={`incident-${incident.id}`} className="watch-incident-body"><IncidentDetail id={incident.id} token={token} now={now} onReview={onReview} /></div>}</article>;
 }
 function IncidentDetail({ id, token, now, onReview }: { id: string; token: string; now: number; onReview: () => void }) {
