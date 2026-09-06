@@ -7,6 +7,8 @@ const { XMLParser, XMLValidator } = require('fast-xml-parser');
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_ITEMS = 500;
+const SOURCE_TIMEOUT_MS = 25000;
+let sourceDispatcher;
 const USER_AGENT = 'Warning.watch/1.0 (https://warning.watch; public civilian warning research)';
 const THEATERS = [
   ['US/NATO–Russia', /russi|ukrain|nato|moscow|kremlin|росси|украин/iu],
@@ -120,8 +122,13 @@ function result(observations, metadata = {}) {
 }
 
 async function fetchBody(url, options) {
-  const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(25000)]) : AbortSignal.timeout(25000);
-  const response = await (options.fetchImpl || fetch)(url, { signal, redirect: 'error', headers: { 'User-Agent': USER_AGENT, Accept: 'application/geo+json, application/json, application/xml, application/rss+xml, text/xml;q=0.9' } });
+  const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(SOURCE_TIMEOUT_MS)]) : AbortSignal.timeout(SOURCE_TIMEOUT_MS);
+  if (!options.fetchImpl && !sourceDispatcher) {
+    // TLS establishment must fit the same total deadline, not fetch's shorter 10-second default.
+    const { Agent } = require('undici');
+    sourceDispatcher = new Agent({ connectTimeout: SOURCE_TIMEOUT_MS });
+  }
+  const response = await (options.fetchImpl || fetch)(url, { signal, dispatcher: options.fetchImpl ? undefined : sourceDispatcher, redirect: 'error', headers: { 'User-Agent': USER_AGENT, Accept: 'application/geo+json, application/json, application/xml, application/rss+xml, text/xml;q=0.9' } });
   if (!response.ok) {
     await response.body?.cancel();
     throw new Error(`Source HTTP ${response.status}${[401, 403].includes(response.status) ? ' (access gated)' : ''}${response.status === 429 ? ' (rate limited; no retry claimed)' : ''}`);

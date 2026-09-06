@@ -102,6 +102,10 @@ at 20 seconds, 8 MiB, 20,000 frames, or 500 relevant observations; its continuat
 coverage metadata, and backlog state remain visible. Only 200 matched records
 are retained in its edit/delete tracking cursor. There is no pre-enrollment or
 complete global-post coverage claim.
+TLS connection establishment shares that same total 25-second deadline through
+a pooled Undici dispatcher. The default 10-second connect limit was shorter
+than the measured 10.09-second GDELT TLS handshake on the production host;
+the change does not increase the overall request budget or weaken TLS checks.
 
 Unchanged semantic content is deduplicated without advancing the observation
 clock. Provider publication, observation, poll, and sample freshness are
@@ -177,6 +181,20 @@ repairs. Desktop and 390-pixel browser exercises verified layout, private
 draft access, saved local review, citation anchors, and absence of persisted
 operator credentials. Public/private API checks returned 200/401 as intended,
 invalid cursors returned 400, and all watch responses used `no-store`.
+
+Production activation completed at 17:08 Pacific. The web service, minute watch
+timer, and existing two-minute aviation timer were active. All four databases
+had integrity-checked backups under `data/backups/2026-09-06/`. The production
+service identity and private environment completed a three-call inference
+exercise on retained official advisories. By 17:22 Pacific, two genuine
+post-enrollment source changes had independently produced completed three-call
+investigations with resolvable citations. No synthetic incident or human review
+was inserted into production.
+
+The dependency audit also reported inherited `nanoid` 3.3.15, `postcss` 8.5.15,
+and `qs` 6.15.2 advisories. These versions are unchanged from the pre-watch
+deployment. No blanket dependency upgrade or unrelated operational remediation
+was performed.
 
 ## Assurance contract
 
