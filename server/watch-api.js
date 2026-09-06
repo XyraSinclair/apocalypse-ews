@@ -1,4 +1,4 @@
-const { getWatchSnapshot, getIncident, reviewIncident } = require("./watch-store");
+const { getWatchSnapshot, getOfficialNotices, getIncident, reviewIncident } = require("./watch-store");
 
 function mountWatchRoutes(app, { getDb, requireInternalAuth, getAgentConfiguration }) {
   if (typeof getDb !== "function" || typeof requireInternalAuth !== "function" || (getAgentConfiguration != null && typeof getAgentConfiguration !== "function")) throw new TypeError("Watch routes require database and authentication functions.");
@@ -51,6 +51,10 @@ function mountWatchRoutes(app, { getDb, requireInternalAuth, getAgentConfigurati
     });
   }
   app.get("/api/watch", snapshot(false));
+  app.get("/api/watch/official", route(false, (request, response, db) => {
+    if (Object.keys(request.query).some(key => key !== "state")) return response.status(400).json({ error: "Unknown official notice query parameter." });
+    return response.json(getOfficialNotices(db, { state: request.query.state ?? null }));
+  }));
   app.get("/api/watch/incidents/:id", detail(false));
   app.get("/api/admin/watch", snapshot(true));
   app.get("/api/admin/watch/incidents/:id", detail(true));

@@ -1,5 +1,6 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import WatchPage, { WatchNavigation } from './WatchPage';
+import AlertPlan from './AlertPlan';
 
 const DASHBOARD_URLS = {
   business: import.meta.env.VITE_DASHBOARD_URL || '/dashboard.json',
@@ -474,8 +475,9 @@ function App() {
   const page = path.startsWith('/signup') ? <SignupPage />
     : path.startsWith('/manage') ? <ManagePage />
     : path.startsWith('/event-signals') ? <EventSignalsPage />
+    : path === '/plan' ? <AlertPlan />
     : path === '/aviation' ? <DashboardPage /> : <WatchPage />;
-  return <><WatchNavigation />{page}<FeedbackWidget /></>;
+  return <><WatchNavigation />{page}{path !== '/plan' && <FeedbackWidget />}</>;
 }
 
 const FEEDBACK_API = 'https://api.scry.io/v1/feedback';

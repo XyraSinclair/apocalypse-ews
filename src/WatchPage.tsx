@@ -1,5 +1,7 @@
-import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import './watch.css';
+import { Clock, SourceLink, request, useWatchRead } from './watchShared';
+import OfficialNotices from './OfficialNotices';
 
 type Evidence = {
   id: string; sourceId: string; sourceName: string; family: string; mechanism: string; dependenceGroup: string;
@@ -39,12 +41,7 @@ type Snapshot = {
 };
 
 const POLL_MS = 30_000;
-const DATE_FORMAT = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'America/Los_Angeles' });
 const money = (nano: number) => `$${(nano / 1_000_000_000).toFixed(3)}`;
-function Clock({ value }: { value: string | null }) {
-  return value && Number.isFinite(Date.parse(value))
-    ? <time dateTime={value}>{DATE_FORMAT.format(new Date(value))} Pacific</time> : <span>Not recorded</span>;
-}
 function age(value: string | null, now: number) {
   if (!value || !Number.isFinite(Date.parse(value))) return 'not yet recorded';
   const seconds = Math.max(0, Math.floor((now - Date.parse(value)) / 1000));
@@ -53,53 +50,12 @@ function age(value: string | null, now: number) {
   return `${Math.floor(seconds / 3600)}h ago`;
 }
 function label(value: string) { return value.replaceAll('_', ' '); }
-function SourceLink({ url, children }: { url: string; children: ReactNode }) {
-  let safe = false;
-  try { const parsed = new URL(url); safe = ['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password; } catch { /* Invalid source URLs are never linked. */ }
-  return safe ? <a href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">{children} <span aria-hidden="true">↗</span></a> : <span>{children} (link unavailable)</span>;
-}
-async function request<T>(path: string, token: string, signal: AbortSignal, body?: object): Promise<T> {
-  const response = await fetch(path, {
-    signal, cache: 'no-store', credentials: 'omit', redirect: 'error',
-    method: body ? 'POST' : 'GET',
-    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  if (!response.ok) throw new Error(response.status === 401 || response.status === 403
-    ? 'Operator access denied. Check your token or leave operator mode.' : `Watch request failed (HTTP ${response.status}).`);
-  return response.json();
-}
-function useWatchRead<T>(path: string, token: string, revision = 0) {
-  const [state, setState] = useState<{ path: string; token: string; data: T | null; error: string | null; loading: boolean }>({ path, token, data: null, error: null, loading: true });
-  const [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    let stopped = false;
-    let active: AbortController | null = null;
-    let timer: number | undefined;
-    async function load() {
-      active = new AbortController();
-      const deadline = setTimeout(() => active?.abort(), 15_000);
-      setState(previous => ({ path, token, data: previous.path === path && previous.token === token ? previous.data : null, error: previous.path === path && previous.token === token ? previous.error : null, loading: true }));
-      try {
-        const data = await request<T>(path, token, active.signal);
-        if (!stopped) setState({ path, token, data, error: null, loading: false });
-      } catch (error) {
-        if (!stopped) setState(previous => ({ ...previous, loading: false, error: active?.signal.aborted ? 'Watch request timed out.' : error instanceof Error ? error.message : 'Watch request failed.' }));
-      } finally {
-        clearTimeout(deadline);
-        if (!stopped) timer = window.setTimeout(load, POLL_MS);
-      }
-    }
-    void load();
-    return () => { stopped = true; clearTimeout(timer); active?.abort(); };
-  }, [path, token, revision, attempt]);
-  return { ...(state.path === path && state.token === token ? state : { data: null, error: null, loading: true }), retry: () => setAttempt(n => n + 1) };
-}
 
 export function WatchNavigation() {
   const path = window.location.pathname;
   return <header className="watch-navigation"><a className="watch-wordmark" href="/">warning<span>.watch</span></a><nav aria-label="Primary">
     <a href="/watch" aria-current={path === '/' || path === '/watch' ? 'page' : undefined}>Watch</a>
+    <a href="/plan" aria-current={path === '/plan' ? 'page' : undefined}>Your alert plan</a>
     <a href="/aviation" aria-current={path === '/aviation' ? 'page' : undefined}>Aviation</a>
     <a href="/event-signals" aria-current={path.startsWith('/event-signals') ? 'page' : undefined}>Event signals</a>
   </nav></header>;
@@ -133,6 +89,8 @@ export default function WatchPage() {
     : !data.run.lastFinishedAt ? 'Warming up' : 'Watch up to date';
   function enterOperator(event: FormEvent) { event.preventDefault(); setToken(credential.trim()); setCredential(''); setCursors([null]); }
   return <main className="watch-page">
+    <OfficialNotices />
+    <section className="watch-panel resident-plan-access"><h2>Make your household alert plan</h2><p>Official phone alerts, local emergency management, and a battery radio are primary channels. This supplementary page does not wake a closed or locked device. Aviation signup is not a nuclear-alert subscription.</p><a href="/plan">Build a private plan · save an offline copy →</a></section>
     <section className="watch-intro" aria-labelledby="watch-title">
       <div><p className="watch-eyebrow">DIGITAL EARLY WARNING · PUBLIC EVIDENCE</p><h1 id="watch-title">Continuous digital watch</h1><p className="watch-lede">Source coverage, investigation progress, and deliberately published evidence. Raw leads and machine findings stay in the private watch.</p></div>
       <div className="watch-operating"><span className="watch-eyebrow">OPERATING STATE</span><strong>{operating}</strong><span>Snapshot {age(data?.generatedAt ?? null, now)}</span><span>Refresh every 30 seconds</span></div>

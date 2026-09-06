@@ -47,7 +47,7 @@ const SOURCE_DEFINITIONS = [
   definition('faa-status', 'FAA national airspace status', 'civil_transport', 'civil_aviation_status', 'faa-nas', 'https://nasstatus.faa.gov/api/airport-status-information', 300, 1800,
     'R03: Public XML current civil airport disruption snapshot. Disappearance means no longer listed, not a verified cancellation; partial local times remain verbatim, never assigned a year.', { adapter: 'faa' }),
   definition('nws-civil-alerts', 'NWS public civil emergency alerts', 'warning_emissions', 'official_public_alert', 'nws-cap', 'https://api.weather.gov/alerts', 120, 900,
-    'R13: Selected civil emergency/radiological/evacuation/shelter/tsunami CAP event types, including updates, cancellations and explicit tests. Last 24 hours, at most three pages. Ordinary weather is excluded; this is not comprehensive IPAWS or a nuclear-intent signal.', { adapter: 'nws' }),
+    'R13: Selected civil emergency/radiological/evacuation/shelter/tsunami CAP events. Active alerts plus seven-day amendments/cancellations, at most four pages and 1000 records. Ordinary weather is excluded; not comprehensive IPAWS or a nuclear-intent signal.', { adapter: 'nws' }),
   definition('usgs-significant', 'USGS significant seismic events', 'radiation_geophysics', 'seismic_catalog', 'usgs-earthquake-catalog', 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/significant_week.geojson', 300, 1800,
     'R15: Significant past-week catalog; agency classification and revisions only. A seismic event is not nuclear confirmation; absence cannot exclude an airburst.', { adapter: 'usgs' }),
   definition('usgs-relevant', 'USGS relevant daily seismic events', 'radiation_geophysics', 'seismic_catalog', 'usgs-earthquake-catalog', 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson', 300, 1800,
@@ -150,7 +150,8 @@ async function fetchBody(url, options) {
       ...(Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 0 ? { retryAfterMs } : {}),
     });
   }
-  if (Number(response.headers.get('content-length')) > MAX_BYTES) {
+  const maxBytes = options.maxBytes ?? MAX_BYTES;
+  if (Number(response.headers.get('content-length')) > maxBytes) {
     await response.body?.cancel();
     throw sourceError('invalid_source_response', 'Source response exceeds 8 MiB cap');
   }
@@ -164,9 +165,11 @@ async function fetchBody(url, options) {
       const { value, done } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
-      if (bytes > MAX_BYTES) throw sourceError('invalid_source_response', 'Source response exceeds 8 MiB cap');
+      if (bytes > maxBytes) throw sourceError('invalid_source_response', 'Source response exceeds remaining collection byte cap');
       chunks.push(value);
     }
+  } catch (error) {
+    throw Object.assign(error, { bytes });
   } finally { await reader.cancel(); reader.releaseLock(); }
   return { body: Buffer.concat(chunks, bytes).toString('utf8'), bytes };
 }
@@ -273,56 +276,145 @@ function faa(def, doc) {
   return result([observation({ externalId: 'nas-current-status', title: 'FAA civil airport disruption snapshot', summary: categories.map(c => `${c.name}: ${c.listedCount}`).join('; ') || 'FAA lists no delay categories in this snapshot; not an all-clear assessment.', url: def.url, region: 'United States', topics: ['civil_aviation_disruption', 'weather_confound'], data: { categories, total, omittedCount, contentDigest, validity: 'Current listings only; omitted programs are no longer listed, not independently confirmed resolved' } })], { sourceUpdatedAt: iso(root.Update_Time), listedPrograms: total, omittedCount, truncated: omittedCount > 0, coverage: 'United States civil NAS status; event start times not inferred. Details bounded to 52KB, category totals retain all listed programs.' });
 }
 
+const US_STATE_CODES = new Set('AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY AS GU MP PR VI UM'.split(' '));
+const SAME_STATES = Object.fromEntries('01:AL 02:AK 04:AZ 05:AR 06:CA 08:CO 09:CT 10:DE 11:DC 12:FL 13:GA 15:HI 16:ID 17:IL 18:IN 19:IA 20:KS 21:KY 22:LA 23:ME 24:MD 25:MA 26:MI 27:MN 28:MS 29:MO 30:MT 31:NE 32:NV 33:NH 34:NJ 35:NM 36:NY 37:NC 38:ND 39:OH 40:OK 41:OR 42:PA 44:RI 45:SC 46:SD 47:TN 48:TX 49:UT 50:VT 51:VA 53:WA 54:WV 55:WI 56:WY 60:AS 66:GU 69:MP 72:PR 74:UM 78:VI'.split(' ').map(value => value.split(':')));
+function capTime(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(value)) return null;
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number);
+  if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()) return null;
+  return iso(value);
+}
 async function nws(def, options) {
-  const url = new URL(def.url);
-  url.searchParams.set('limit', '250');
-  url.searchParams.set('event', CIVIL_EVENTS.join(','));
-  url.searchParams.set('start', new Date(options.now - 86400000).toISOString());
-  let next = url.href;
+  const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(SOURCE_TIMEOUT_MS)]) : AbortSignal.timeout(SOURCE_TIMEOUT_MS);
+  const lanes = ['active', 'history'].map(name => {
+    const url = new URL(def.url);
+    url.searchParams.set('limit', '250');
+    url.searchParams.set('event', CIVIL_EVENTS.join(','));
+    if (name === 'active') url.searchParams.set('active', 'true');
+    else url.searchParams.set('start', new Date(options.now - 7 * 86400000).toISOString());
+    return { name, next: url.href, pages: 0, scannedCount: 0, error: null };
+  });
   let sourceUpdatedAt = null;
   let bytes = 0;
   let scannedCount = 0;
   let excludedCount = 0;
   let pages = 0;
+  let contentTruncations = 0;
+  let geographyTruncations = 0;
   const observations = new Map();
-  while (next && pages < 3) {
-    const response = await fetchBody(next, options);
-    bytes += response.bytes;
-    const doc = parseJson(response.body);
-    requireShape(doc.type === 'FeatureCollection' && Array.isArray(doc.features), 'NWS FeatureCollection missing');
-    requireShape(doc.features.length <= 250, 'NWS page exceeds requested limit');
-    sourceUpdatedAt = iso(doc.updated) || sourceUpdatedAt;
-    for (const feature of doc.features) {
-      const p = feature.properties;
-      requireShape(p && typeof p.id === 'string' && typeof p.event === 'string' && typeof p.status === 'string' && typeof p.messageType === 'string', 'NWS CAP identity/type missing');
-      scannedCount++;
-      if (!CIVIL_EVENTS.includes(p.event)) { excludedCount++; continue; }
-      const actual = p.status === 'Actual' && p.scope === 'Public';
-      requireShape(p.id.trim() && p.id.length <= 1000, 'NWS CAP identifier missing or exceeds 1000 characters');
-      const references = list(p.references);
-      requireShape(references.length <= 50 && JSON.stringify(references).length <= 30000, 'NWS CAP references exceed complete-reference guard; cancellation coverage unavailable');
-      for (const reference of references) {
-        requireShape(reference && typeof reference === 'object' && !Array.isArray(reference) && typeof reference.identifier === 'string' && reference.identifier.trim() && reference.identifier.length <= 1000, 'NWS CAP reference identifier missing or exceeds 1000 characters');
+  const activeIds = new Set();
+  let firstError = null;
+  let retryAfterMs = 0;
+  let rateLimited = false;
+  // Alternate lanes so a large active snapshot cannot starve cancellation history.
+  while (pages < 4 && lanes.some(lane => lane.next && !lane.error)) {
+    for (const lane of lanes) {
+      if (!lane.next || lane.error || pages >= 4) continue;
+      const pageItems = new Map();
+      const priorCounts = { scannedCount, excludedCount, contentTruncations, geographyTruncations, laneScanned: lane.scannedCount };
+      pages++;
+      try {
+      requireShape(!signal.aborted && bytes < MAX_BYTES, 'NWS collection deadline or byte cap reached');
+      const response = await fetchBody(lane.next, { ...options, signal, maxBytes: MAX_BYTES - bytes });
+      bytes += response.bytes;
+      const doc = parseJson(response.body);
+      requireShape(doc.type === 'FeatureCollection' && Array.isArray(doc.features), 'NWS FeatureCollection missing');
+      requireShape(doc.features.length <= 250, 'NWS page exceeds requested limit');
+      const updated = capTime(doc.updated);
+      // Commit only after the complete page, including pagination, validates.
+      for (const feature of doc.features) {
+        const p = feature.properties;
+        requireShape(p && typeof p.id === 'string' && typeof p.event === 'string' && typeof p.status === 'string' && typeof p.messageType === 'string', 'NWS CAP identity/type missing');
+        scannedCount++;
+        lane.scannedCount++;
+        if (!CIVIL_EVENTS.includes(p.event)) { excludedCount++; continue; }
+        requireShape(['Actual', 'Exercise', 'System', 'Test', 'Draft'].includes(p.status)
+          && ['Public', 'Restricted', 'Private'].includes(p.scope)
+          && ['Alert', 'Update', 'Cancel', 'Ack', 'Error'].includes(p.messageType), 'NWS CAP status, scope or message type malformed');
+        const actual = p.status === 'Actual' && p.scope === 'Public';
+        requireShape(p.id.trim() && p.id.length <= 1000, 'NWS CAP identifier missing or exceeds 1000 characters');
+        requireShape(typeof p.sender === 'string' && p.sender.trim() && p.sender.length <= 1000, 'NWS CAP sender missing or exceeds 1000 characters');
+        requireShape(p.references == null || Array.isArray(p.references), 'NWS CAP references malformed');
+        const references = list(p.references).map(reference => {
+          requireShape(reference && typeof reference === 'object' && !Array.isArray(reference) && typeof reference.identifier === 'string' && reference.identifier.trim() && reference.identifier.length <= 1000 && typeof reference.sender === 'string' && reference.sender.trim() && reference.sender.length <= 1000 && capTime(reference.sent), 'NWS CAP reference sender, identifier or sent missing or malformed');
+          return { sender: reference.sender, identifier: reference.identifier, sent: capTime(reference.sent) };
+        });
+        requireShape(references.length <= 50 && JSON.stringify(references).length <= 30000, 'NWS CAP references exceed complete-reference guard; cancellation coverage unavailable');
+        requireShape(p.areaDesc == null || (typeof p.areaDesc === 'string' && p.areaDesc.length <= 20000), 'NWS area description exceeds 20000-character guard or is malformed');
+        const area = p.areaDesc || '';
+        const stateCodes = new Set();
+        const geocode = { UGC: [], SAME: [] };
+        let geographyUnresolved = false;
+        let geographyTruncated = false;
+        for (const key of ['UGC', 'SAME']) {
+          const codes = list(p.geocode?.[key]);
+          if (codes.length > 1000) geographyTruncated = true;
+          for (const code of codes.slice(0, 1000)) {
+            if (typeof code !== 'string' || !(key === 'UGC' ? /^[A-Z]{2}[CZ]\d{3}$/ : /^\d{6}$/).test(code)) { geographyUnresolved = true; continue; }
+            geocode[key].push(code);
+            const state = key === 'UGC' ? code.slice(0, 2) : SAME_STATES[code.slice(1, 3)];
+            if (US_STATE_CODES.has(state)) stateCodes.add(state);
+            else geographyUnresolved = true;
+          }
+        }
+        geographyUnresolved ||= !stateCodes.size || geographyTruncated;
+        if (geographyTruncated) geographyTruncations++;
+        const sentAt = capTime(p.sent);
+        // CAP 1.2 §3.2.2: absent effective defaults to sent, not malformed input.
+        const effectiveAt = p.effective == null ? sentAt : capTime(p.effective);
+        const expiresAt = capTime(p.expires);
+        const endsAt = capTime(p.ends);
+        // No-expiry protective instructions remain unverified under our conservative recipient policy.
+        // Cancel controls use sent/reference identity, not optional info/event-window fields.
+        const timingValid = p.messageType === 'Cancel' ? Boolean(sentAt && references.length)
+          : Boolean(sentAt && effectiveAt && expiresAt && (p.ends == null || endsAt) && Date.parse(expiresAt) > Date.parse(effectiveAt) && (endsAt == null || Date.parse(endsAt) >= Date.parse(effectiveAt)));
+        requireShape([p.description, p.instruction, p.headline].every(value => value == null || typeof value === 'string'), 'NWS CAP text malformed');
+        const data = { officialVersion: 2, messageId: p.id, sender: p.sender, event: p.event, capStatus: p.status, messageType: p.messageType, scope: p.scope, actual, test: p.status !== 'Actual', area, senderName: text(p.senderName, 300), severity: text(p.severity, 50), certainty: text(p.certainty, 50), urgency: text(p.urgency, 50), sentAt, effectiveAt, expiresAt, endsAt, timingValid, headline: p.headline || p.event, description: p.description || '', instruction: p.instruction || '', references, geocode, stateCodes: [...stateCodes].sort(), geographyUnresolved, geographyTruncated, contentTruncated: false, sourceInstructionOnly: true, nuclearIntentEstablished: false };
+        // Preserve original line breaks and full instructions; clip only with an explicit flag.
+        for (const key of ['description', 'instruction', 'headline']) {
+          while (JSON.stringify(data).length > 64000 && data[key].length) {
+            data.contentTruncated = true;
+            data[key] = data[key].slice(0, Math.max(0, data[key].length - Math.max(256, JSON.stringify(data).length - 63900)));
+          }
+        }
+        requireShape(JSON.stringify(data).length <= 64000, 'NWS CAP observation exceeds complete-data guard');
+        if (data.contentTruncated) contentTruncations++;
+        const item = observation({ externalId: p.id, title: text(p.headline, 500) || text(p.event, 500), summary: text(p.description), url: safeUrl(feature.id || p['@id']), occurredAt: capTime(p.onset), publishedAt: sentAt, region: `United States: ${text(area, 485)}`, topics: ['civil_protection', /Tsunami/iu.test(p.event) ? 'natural_hazard' : 'official_warning'], kind: actual ? 'official_alert' : 'context', status: p.messageType === 'Cancel' ? 'cancelled' : p.messageType === 'Update' ? 'updated' : 'current', data });
+        const previous = pageItems.get(p.id);
+        if (!previous || (item.publishedAt || '') >= (previous.publishedAt || '')) pageItems.set(p.id, item);
       }
-      requireShape(p.areaDesc == null || (typeof p.areaDesc === 'string' && p.areaDesc.length <= 20000), 'NWS area description exceeds 20000-character guard or is malformed');
-      const area = p.areaDesc || '';
-      const id = p.id;
-      const item = observation({ externalId: id, title: text(p.headline, 500) || text(p.event, 500), summary: text(p.description), url: safeUrl(feature.id || p['@id']), occurredAt: iso(p.onset), publishedAt: iso(p.sent), region: `United States: ${text(area, 485)}`, topics: ['civil_protection', /Tsunami/iu.test(p.event) ? 'natural_hazard' : 'official_warning'], kind: actual ? 'official_alert' : 'context', status: p.messageType === 'Cancel' ? 'cancelled' : p.messageType === 'Update' ? 'updated' : 'current',
-        data: { messageId: p.id, event: p.event, capStatus: p.status, messageType: p.messageType, scope: p.scope, actual, test: p.status !== 'Actual', area, senderName: text(p.senderName, 300), severity: text(p.severity, 50), certainty: text(p.certainty, 50), urgency: text(p.urgency, 50), effectiveAt: iso(p.effective), expiresAt: iso(p.expires), endsAt: iso(p.ends), instruction: text(p.instruction), references, sourceInstructionOnly: true, nuclearIntentEstablished: false },
-      });
-      requireShape(JSON.stringify(item.data).length <= 64000, 'NWS CAP observation exceeds complete-data guard');
-      const previous = observations.get(id);
-      if (!previous || (item.publishedAt || '') > (previous.publishedAt || '')) observations.set(id, item);
-    }
-    pages++;
-    next = doc.pagination?.next || null;
-    if (next) {
-      const target = new URL(next);
-      requireShape(target.origin === 'https://api.weather.gov' && target.pathname === '/alerts' && !target.username && !target.password, 'NWS pagination leaves approved endpoint');
-      next = target.href;
+      lane.next = doc.pagination?.next || null;
+      if (lane.next) {
+        const target = new URL(lane.next);
+        requireShape(target.origin === 'https://api.weather.gov' && target.pathname === '/alerts' && !target.username && !target.password && !target.hash, 'NWS pagination leaves approved endpoint');
+        lane.next = target.href;
+      }
+      lane.pages++;
+      if (updated && (!sourceUpdatedAt || updated > sourceUpdatedAt)) sourceUpdatedAt = updated;
+      for (const [id, item] of pageItems) {
+        const previous = observations.get(id);
+        if (!previous || (item.publishedAt || '') >= (previous.publishedAt || '')) observations.set(id, item);
+        if (lane.name === 'active') activeIds.add(id);
+      }
+      } catch (error) {
+        bytes += Number.isFinite(error.bytes) ? error.bytes : 0;
+        firstError ||= error;
+        if (Number.isFinite(error.retryAfterMs) && error.retryAfterMs >= 0) retryAfterMs = Math.max(retryAfterMs, Math.min(30 * 86400000, error.retryAfterMs));
+        rateLimited ||= error.httpStatus === 429;
+        lane.error = { code: error.code || 'invalid_source_response', message: text(error.message, 500), page: lane.pages + 1 };
+        lane.next = null;
+        ({ scannedCount, excludedCount, contentTruncations, geographyTruncations } = priorCounts);
+        lane.scannedCount = priorCounts.laneScanned;
+        // A provider delay or exhausted shared bound stops further requests in either lane.
+        if (signal.aborted || rateLimited || retryAfterMs > 0 || /byte cap|MiB cap|remaining collection/iu.test(error.message || '')) {
+          for (const pending of lanes) if (pending.next && !pending.error) pending.error = { code: rateLimited || retryAfterMs > 0 ? 'provider_delay' : 'collection_bound', message: rateLimited || retryAfterMs > 0 ? 'Source requested a retry delay.' : 'Shared deadline or byte bound reached.', page: pending.pages + 1 };
+        }
+      }
     }
   }
-  return result([...observations.values()].sort((a, b) => (a.publishedAt || '').localeCompare(b.publishedAt || '') || a.externalId.localeCompare(b.externalId)), { sourceUpdatedAt, bytes, pages, scannedCount, excludedCount, truncated: Boolean(next), nextPage: next, coverage: 'Selected civil alert types in last 24 hours; maximum 750 distinct CAP messages, chronologically ordered with complete references within explicit guards. Older active warnings and comprehensive IPAWS coverage not guaranteed.' });
+  if (!lanes.some(lane => lane.pages)) throw firstError || sourceError('invalid_source_response', 'No NWS page validated');
+  const incompleteLanes = lanes.filter(lane => lane.next || lane.error).map(lane => ({ lane: lane.name, pages: lane.pages, scannedCount: lane.scannedCount, ...(lane.error || { code: 'page_bound', message: 'Four-page collection bound reached.', page: lane.pages + 1 }) }));
+  return { ...result([...observations.values()].sort((a, b) => (a.publishedAt || '').localeCompare(b.publishedAt || '') || a.externalId.localeCompare(b.externalId)), { officialVersion: 2, sourceUpdatedAt, bytes, pages, scannedCount, excludedCount, contentTruncations, geographyTruncations, retryAfterMs, rateLimited, sourceGap: incompleteLanes.length > 0, incompleteLanes, truncated: incompleteLanes.length > 0 || contentTruncations > 0 || geographyTruncations > 0, activeCoverage: !lanes[0].next && !lanes[0].error, historyCoverage: !lanes[1].next && !lanes[1].error, coverage: 'Selected active civil alerts plus seven-day amendment history; at most four attempted pages and 1000 records. Snapshot absence is not cancellation. Not comprehensive IPAWS coverage.' }), activeIds: [...activeIds] };
 }
 function usgs(def, doc) {
   requireShape(doc.type === 'FeatureCollection' && Array.isArray(doc.features) && doc.metadata?.status === 200, 'USGS catalog envelope missing');
@@ -493,4 +585,4 @@ async function collectSource(definitionValue, options = {}) {
   return output;
 }
 
-module.exports = { SOURCE_DEFINITIONS, collectSource };
+module.exports = { SOURCE_DEFINITIONS, collectSource, US_STATE_CODES };

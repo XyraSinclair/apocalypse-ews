@@ -3,6 +3,7 @@ const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const Database = require("better-sqlite3");
 const { DEFAULT_DAILY_BUDGET_NANO, reservationNano, chargeNano } = require("./watch-budget");
+const { US_STATE_CODES } = require("./watch-sources");
 
 const DAY = 86400000;
 const MAX_ATTEMPTS = 3;
@@ -180,6 +181,45 @@ function openWatchDb(filename = process.env.EWS_WATCH_DB_PATH || path.join(__dir
       db.pragma("user_version = 2");
     }).immediate();
   }
+  if (db.pragma("user_version", { simple: true }) < 3) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE watch_items ADD COLUMN listed_active_at INTEGER;
+        CREATE INDEX watch_items_active ON watch_items(source_id,listed_active_at);
+        CREATE INDEX watch_evidence_source_recent ON watch_evidence(source_id,observed_at DESC);
+        PRAGMA user_version=3;
+      `);
+    }).immediate();
+  }
+  if (db.pragma("user_version", { simple: true }) < 4) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE watch_items ADD COLUMN listed_active INTEGER NOT NULL DEFAULT 0 CHECK(listed_active IN (0,1));
+        CREATE INDEX watch_items_membership ON watch_items(source_id,listed_active,listed_active_at DESC);
+        UPDATE watch_items SET listed_active=1 WHERE listed_active_at IS NOT NULL
+          AND listed_active_at=(SELECT success_at FROM watch_sources WHERE id=watch_items.source_id);
+        CREATE TABLE watch_official_controls (
+          source_id TEXT NOT NULL REFERENCES watch_sources(id),
+          identifier TEXT NOT NULL, sender TEXT NOT NULL, sent_at INTEGER NOT NULL,
+          successor TEXT NOT NULL REFERENCES watch_evidence(id),
+          control_sent_at INTEGER NOT NULL, message_type TEXT NOT NULL CHECK(message_type IN ('Cancel','Update')),
+          PRIMARY KEY(successor,identifier,sender,sent_at)
+        );
+        CREATE INDEX watch_official_controls_target
+          ON watch_official_controls(source_id,identifier,sender,sent_at,message_type,control_sent_at);
+      `);
+      // One-time projection rebuild; immutable originals/references remain unchanged.
+      for (let after = ""; ;) {
+        const batch = sql(db, `SELECT h.external_id,e.id,e.observation FROM watch_items h
+          JOIN watch_evidence e ON e.id=h.evidence_id
+          WHERE h.source_id='nws-civil-alerts' AND h.external_id>? ORDER BY h.external_id LIMIT 200`).all(after);
+        if (!batch.length) break;
+        for (const row of batch) projectOfficialControls(db, "nws-civil-alerts", row.id, parse(row.observation));
+        after = batch.at(-1).external_id;
+      }
+      db.pragma("user_version = 4");
+    }).immediate();
+  }
   return db;
 }
 function syncSources(db, definitions, now = Date.now()) {
@@ -263,6 +303,25 @@ function attachCandidateContext(db, incident, now) {
   for (const candidate of candidates) added += sql(db, "INSERT OR IGNORE INTO watch_incident_evidence(incident_id,evidence_id,association) VALUES(?,?,'candidate_context')").run(incident.id, candidate.id).changes;
   return added;
 }
+function projectOfficialControls(db, sourceId, successor, item) {
+  if (sourceId !== "nws-civil-alerts") return;
+  sql(db, "DELETE FROM watch_official_controls WHERE successor=?").run(successor);
+  const data = item.data;
+  const sent = Date.parse(data.sentAt || "");
+  const identity = value => typeof value === "string" && value.trim().length > 0 && value.length <= 1000;
+  if (item.kind !== "official_alert" || data.officialVersion !== 2 || data.capStatus !== "Actual"
+    || data.scope !== "Public" || !["Cancel", "Update"].includes(data.messageType)
+    || !identity(data.sender) || !identity(data.messageId) || !Number.isFinite(sent)
+    || !Array.isArray(data.references) || !data.references.length || data.references.length > 50
+    || !data.references.every(ref => ref && identity(ref.sender) && identity(ref.identifier)
+      && Number.isFinite(Date.parse(ref.sent || "")) && Date.parse(ref.sent) <= sent)) return;
+  // CAP lifecycle controls are independent of optional protective-instruction timing.
+  for (const ref of data.references) {
+    sql(db, `INSERT OR IGNORE INTO watch_official_controls
+      (source_id,identifier,sender,sent_at,successor,control_sent_at,message_type) VALUES(?,?,?,?,?,?,?)`)
+      .run(sourceId, ref.identifier, ref.sender, Date.parse(ref.sent), successor, sent, data.messageType);
+  }
+}
 function recordSourceResult(db, sourceId, result, now = Date.now(), { startedAt = now } = {}) {
   if (!result || !Array.isArray(result.observations) || result.observations.length > 2000) throw problem("Invalid source result.");
   if (!Number.isFinite(startedAt) || startedAt > now) throw problem("Invalid source attempt timestamp.");
@@ -270,6 +329,12 @@ function recordSourceResult(db, sourceId, result, now = Date.now(), { startedAt 
   if (new Set(items.map((item) => item.externalId)).size !== items.length) throw problem("Duplicate external IDs in source result.");
   const sourceMetadata = result.metadata == null ? null : object(result.metadata, "source metadata");
   if (sourceMetadata?.sourceUpdatedAt != null) sourceMetadata.sourceUpdatedAt = timestamp(sourceMetadata.sourceUpdatedAt, "upstream source timestamp");
+  const activeIds = result.activeIds;
+  if (sourceId === "nws-civil-alerts" && sourceMetadata?.officialVersion === 2) {
+    const itemIds = new Set(items.map(item => item.externalId));
+    if (!Array.isArray(activeIds) || activeIds.length > 1000 || new Set(activeIds).size !== activeIds.length
+      || activeIds.some(id => typeof id !== "string" || !itemIds.has(id))) throw problem("Invalid NWS active membership.");
+  } else if (activeIds != null) throw problem("Active membership requires NWS format 2.");
   const metadata = sourceMetadata == null ? null : JSON.stringify(sourceMetadata);
   const cursor = result.cursor == null ? null : text(result.cursor, "cursor", 160000, true);
   return db.transaction(() => {
@@ -282,17 +347,27 @@ function recordSourceResult(db, sourceId, result, now = Date.now(), { startedAt 
     for (const item of items) {
       const hash = digest(item);
       const previous = sql(db, "SELECT e.* FROM watch_items i JOIN watch_evidence e ON e.id=i.evidence_id WHERE i.source_id=? AND i.external_id=?").get(sourceId, item.externalId);
-      if (previous?.digest === hash) continue;
+      if (previous?.digest === hash) {
+        projectOfficialControls(db, sourceId, previous.id, item);
+        continue;
+      }
       const id = randomUUID();
       const provenance = { sourceId, sourceName: definition.name, family: definition.family, mechanism: definition.mechanism, dependenceGroup: definition.dependenceGroup };
       sql(db, "INSERT INTO watch_evidence(id,source_id,external_id,digest,observation,provenance,observed_at,supersedes) VALUES(?,?,?,?,?,?,?,?)").run(id, sourceId, item.externalId, hash, JSON.stringify(item), JSON.stringify(provenance), now, previous?.id || null);
       sql(db, "INSERT INTO watch_items(source_id,external_id,evidence_id) VALUES(?,?,?) ON CONFLICT(source_id,external_id) DO UPDATE SET evidence_id=excluded.evidence_id").run(sourceId, item.externalId, id);
+      if (previous) sql(db, "DELETE FROM watch_official_controls WHERE successor=?").run(previous.id);
+      projectOfficialControls(db, sourceId, id, item);
       if (previous) {
         counts.changed++;
         sql(db, "INSERT OR IGNORE INTO watch_evidence_edges(successor,predecessor) VALUES(?,?)").run(id, previous.id);
       } else counts.inserted++;
       for (const reference of item.data.references || []) sql(db, "INSERT OR IGNORE INTO watch_evidence_references(successor,source_id,identifier) VALUES(?,?,?)").run(id, sourceId, typeof reference === "string" ? reference : reference.identifier);
       staged.push({ id, item, previous });
+    }
+    if (Array.isArray(activeIds)) {
+      // Retire membership without erasing the last positive listing, even on equal clocks.
+      sql(db, "UPDATE watch_items SET listed_active=0 WHERE source_id=? AND listed_active=1").run(sourceId);
+      for (const id of activeIds) sql(db, "UPDATE watch_items SET listed_active=1,listed_active_at=? WHERE source_id=? AND external_id=?").run(now, sourceId, id);
     }
     // Resolve after staging the entire batch. Persisted reference names also catch late originals.
     sql(db, `INSERT OR IGNORE INTO watch_evidence_edges(successor,predecessor)
@@ -347,7 +422,10 @@ function recordSourceResult(db, sourceId, result, now = Date.now(), { startedAt 
     }
     for (const [id, title] of changedIncidents) sql(db, "UPDATE watch_incidents SET title=COALESCE(?,title),last_at=?,generation=generation+1,status='open',attention=?,attempts=0,next_attempt_at=0,resolution_kind=NULL,resolution_reason=NULL,triage_result=NULL,investigation_status=CASE WHEN investigation_status IN ('running','triage_running') THEN investigation_status ELSE ? END,last_error=NULL,updated_at=? WHERE id=?").run(title, now, baselineAttention(db, id), admissionStage(db, id), now, id);
     const observed = staged.length ? now : source.observed_at;
-    sql(db, "UPDATE watch_sources SET checked_at=?,success_at=?,observed_at=?,baseline_at=COALESCE(baseline_at,?),last_error=NULL,error_code=NULL,http_status=NULL,consecutive_failures=0,next_check_at=NULL,retry_after_until=NULL,observation_count=observation_count+?,cursor=COALESCE(?,cursor),metadata=? WHERE id=?").run(startedAt, now, observed, now, counts.inserted, cursor, metadata, sourceId);
+    const retryDelay = sourceId === "nws-civil-alerts" && sourceMetadata?.sourceGap === true
+      && (sourceMetadata.rateLimited === true || (Number.isFinite(sourceMetadata.retryAfterMs) && sourceMetadata.retryAfterMs > 0))
+      ? now + Math.max(definition.pollSeconds * 1000, Math.min(30 * DAY, sourceMetadata.retryAfterMs || 0)) : null;
+    sql(db, "UPDATE watch_sources SET checked_at=?,success_at=?,observed_at=?,baseline_at=COALESCE(baseline_at,?),last_error=NULL,error_code=NULL,http_status=NULL,consecutive_failures=0,next_check_at=?,retry_after_until=?,observation_count=observation_count+?,cursor=COALESCE(?,cursor),metadata=? WHERE id=?").run(startedAt, now, observed, now, retryDelay, retryDelay, counts.inserted, cursor, metadata, sourceId);
     return counts;
   }).immediate();
 }
@@ -657,6 +735,137 @@ function getWatchSnapshot(db, { internal = false, limit = 40, status = "all", cu
   if (internal && Array.isArray(handover.coverageGaps)) coverageGaps.push(...handover.coverageGaps.filter((gap) => typeof gap === "string").slice(0, 50));
   return { generatedAt: iso(now), mode: "machine_watch", page, budget, processing, reviewPolicy: "Investigation priority is not a threat level. Machine drafts require human review; missing coverage is not evidence of safety.", run: { lastStartedAt: iso(run.started_at), lastFinishedAt: iso(run.finished_at), lastError: internal ? run.last_error : run.last_error ? "The last watch run reported an error." : null, running: Boolean(run.owner && run.lease_until > now) }, agent, counts: { sources: sources.length, enabled: sources.filter((source) => source.enabled).length, healthy: sources.filter((source) => source.health === "healthy").length, degraded: sources.filter((source) => source.enabled && source.health !== "healthy").length, pending, openIncidents }, sources, incidents, handover: { generatedAt: iso(run.finished_at), summary: internal && typeof handover.summary === "string" ? handover.summary : sources.length ? `${openIncidents} publicly reviewed open threads. Collection and machine work do not establish safety or danger.` : "Watch source registry has not been initialized.", openQuestions, coverageGaps: [...new Set(coverageGaps)] } };
 }
+function getOfficialNotices(db, { state = null, now = Date.now() } = {}) {
+  if (state !== null && (typeof state !== "string" || !US_STATE_CODES.has(state))) throw problem("State must be an uppercase US state or territory code.");
+  if (!Number.isFinite(now)) throw problem("Invalid official notice clock.");
+  const source = sql(db, "SELECT * FROM watch_sources WHERE id='nws-civil-alerts'").get();
+  const definition = source ? parse(source.definition) : null;
+  const metadata = source?.metadata ? parse(source.metadata) : null;
+  const pollSeconds = definition?.pollSeconds || 120;
+  const staleAfterSeconds = definition?.staleSeconds || 900;
+  // Only attributed CAP heads enter this surface. Incident publication, model output,
+  // operator notes and generic supersession edges are deliberately not consulted.
+  // LIMIT the indexed candidate sets before joining/parsing/filtering any observations.
+  // Current active-feed membership cannot be displaced by obsolete historical heads.
+  const currentRows = sql(db, `SELECT e.id,e.external_id,e.observation,e.observed_at,h.listed_active_at,h.listed_active
+    FROM (SELECT external_id,evidence_id,listed_active_at,listed_active FROM watch_items INDEXED BY watch_items_membership
+      WHERE source_id='nws-civil-alerts' AND listed_active=1 LIMIT 2001) h
+    JOIN watch_evidence e ON e.id=h.evidence_id`).all();
+  const recentlyListedRows = sql(db, `SELECT e.id,e.external_id,e.observation,e.observed_at,h.listed_active_at,h.listed_active
+    FROM (SELECT external_id,evidence_id,listed_active_at,listed_active FROM watch_items INDEXED BY watch_items_membership
+      WHERE source_id='nws-civil-alerts' AND listed_active=0 AND listed_active_at>=?
+      ORDER BY listed_active_at DESC LIMIT 2001) h
+    JOIN watch_evidence e ON e.id=h.evidence_id`).all(now - 7 * DAY);
+  const historyRows = sql(db, `SELECT e.id,e.external_id,e.observation,e.observed_at,h.listed_active_at,h.listed_active
+    FROM (SELECT id,external_id,observation,observed_at FROM watch_evidence INDEXED BY watch_evidence_source_recent
+      WHERE source_id='nws-civil-alerts' AND observed_at>=? ORDER BY observed_at DESC LIMIT 2001) e
+    JOIN watch_items h ON h.source_id='nws-civil-alerts' AND h.external_id=e.external_id AND h.evidence_id=e.id`).all(now - 7 * DAY);
+  // A separate index-only sentinel reports history-bound pressure even if revisions
+  // no longer have heads and therefore disappear in the outer join.
+  const historyOverflow = Boolean(sql(db, `SELECT 1 FROM watch_evidence INDEXED BY watch_evidence_source_recent
+    WHERE source_id='nws-civil-alerts' AND observed_at>=? ORDER BY observed_at DESC LIMIT 1 OFFSET 2000`).get(now - 7 * DAY));
+  const candidates = [...new Map([...currentRows, ...recentlyListedRows, ...historyRows].map(row => [row.id, row])).values()];
+  const selectionTruncated = currentRows.length > 2000 || recentlyListedRows.length > 2000 || historyOverflow || candidates.length > 2000;
+  const rows = candidates.slice(0, 2000).filter(row => {
+    const item = parse(row.observation);
+    const data = item.data;
+    return item.kind === "official_alert" && data.capStatus === "Actual" && data.scope === "Public"
+      && (state === null || data.geographyUnresolved !== false || !Array.isArray(data.stateCodes)
+        || !data.stateCodes.length || data.stateCodes.includes(state));
+  });
+  // The normalized current-head projection excludes irrelevant controls before lookup.
+  // Exact tuple/type/range probes establish authority without JSON or raw-edge scans.
+  const successorQuery = `SELECT 1 FROM watch_official_controls INDEXED BY watch_official_controls_target
+    WHERE source_id='nws-civil-alerts' AND identifier=? AND sender=? AND sent_at=?
+      AND message_type=? AND control_sent_at>=? AND control_sent_at<=? LIMIT 1`;
+  let unresolvedLocations = 0;
+  let snapshotLoss = 0;
+  let unsupported = 0;
+  let clipped = false;
+  let confirmationGap = false;
+  const notices = rows.map(row => {
+    const item = parse(row.observation);
+    const data = item.data;
+    const states = Array.isArray(data.stateCodes) ? data.stateCodes.filter(code => US_STATE_CODES.has(code)) : [];
+    if (!states.length || data.geographyUnresolved !== false) unresolvedLocations++;
+    const supported = data.officialVersion === 2;
+    if (!supported) unsupported++;
+    const inSnapshot = supported && metadata?.officialVersion === 2 && row.listed_active === 1
+      && row.listed_active_at === source?.success_at;
+    const sent = Date.parse(data.sentAt || "");
+    const effective = Date.parse(data.effectiveAt || "");
+    const expires = Date.parse(data.expiresAt || "");
+    const ends = data.endsAt == null ? null : Date.parse(data.endsAt);
+    const identityValid = supported && typeof data.sender === "string" && data.sender.length > 0
+      && Number.isFinite(sent) && sent <= now;
+    const valid = identityValid && data.timingValid === true
+      && Number.isFinite(effective) && Number.isFinite(expires) && expires > effective
+      && (ends === null || (Number.isFinite(ends) && ends >= effective));
+    let successor = 0;
+    if (identityValid) {
+      if (sql(db, successorQuery).get(data.messageId, data.sender, sent, "Cancel", sent, now)) successor = 2;
+      else if (sql(db, successorQuery).get(data.messageId, data.sender, sent, "Update", sent, now)) successor = 1;
+    }
+    let status = "unverified";
+    const cancellationValid = identityValid && data.messageType === "Cancel" && Array.isArray(data.references)
+      && data.references.length > 0 && data.references.every(ref => ref && typeof ref.sender === "string"
+        && ref.sender && typeof ref.identifier === "string" && ref.identifier
+        && Number.isFinite(Date.parse(ref.sent || "")) && Date.parse(ref.sent) <= sent);
+    if (cancellationValid || successor === 2) status = "cancelled";
+    else if (successor === 1) status = "superseded";
+    else if (valid) {
+      if (expires <= now || (ends !== null && ends <= now)) status = "expired";
+      else if (!inSnapshot) snapshotLoss++;
+      else if (["Alert", "Update"].includes(data.messageType)) status = effective > now ? "upcoming" : "active";
+    }
+    const contentTruncated = !supported || data.contentTruncated !== false;
+    clipped ||= contentTruncated || data.geographyTruncated === true;
+    // Archive-only ended/legacy context is retained, but does not invalidate a
+    // complete current snapshot merely because its old text/geography is limited.
+    const affectsConfirmation = row.listed_active === 1
+      || (supported && !["cancelled", "superseded", "expired"].includes(status));
+    if (affectsConfirmation && (status === "unverified" || contentTruncated
+      || data.geographyTruncated === true || !states.length || data.geographyUnresolved !== false)) confirmationGap = true;
+    return {
+      id: row.external_id, evidenceId: row.id, url: item.url, event: typeof data.event === "string" ? data.event : "",
+      headline: supported && typeof data.headline === "string" ? data.headline : item.title,
+      description: supported && typeof data.description === "string" ? data.description : item.summary,
+      instruction: typeof data.instruction === "string" ? data.instruction : "",
+      issuer: typeof data.senderName === "string" ? data.senderName : "", area: typeof data.area === "string" ? data.area : "",
+      stateCodes: states, status, sentAt: Number.isFinite(sent) ? iso(sent) : null,
+      effectiveAt: Number.isFinite(effective) ? iso(effective) : null, expiresAt: Number.isFinite(expires) ? iso(expires) : null,
+      endsAt: Number.isFinite(ends) ? iso(ends) : null, observedAt: iso(row.observed_at),
+      severity: typeof data.severity === "string" ? data.severity : "", urgency: typeof data.urgency === "string" ? data.urgency : "",
+      certainty: typeof data.certainty === "string" ? data.certainty : "",
+      references: (data.references || []).map(ref => typeof ref === "string" ? ref : ref.identifier), contentTruncated,
+    };
+  });
+  const priority = { active: 0, upcoming: 1, unverified: 2, cancelled: 3, superseded: 4, expired: 5 };
+  notices.sort((a, b) => priority[a.status] - priority[b.status] || (b.sentAt || "").localeCompare(a.sentAt || "") || a.id.localeCompare(b.id));
+  const counts = { active: 0, upcoming: 0, ended: 0, unverified: 0 };
+  for (const notice of notices) counts[["active", "upcoming", "unverified"].includes(notice.status) ? notice.status : "ended"]++;
+  const moreAvailable = selectionTruncated || notices.length > 200;
+  const truncated = metadata?.truncated === true || selectionTruncated || moreAvailable || clipped;
+  const currentTransport = Boolean(source?.enabled && source.success_at != null && !source.last_error
+    && source.success_at <= now && now - source.success_at <= staleAfterSeconds * 1000);
+  const completeSnapshot = metadata?.officialVersion === 2 && metadata.activeCoverage === true && metadata.historyCoverage === true && metadata.sourceGap !== true;
+  const status = !source || source.success_at == null ? "unavailable"
+    : currentTransport && completeSnapshot && !selectionTruncated && counts.active + counts.upcoming <= 200
+      && !snapshotLoss && !confirmationGap ? "current" : "degraded";
+  const detail = [
+    "Selected NWS civil alerts only; not comprehensive local or IPAWS coverage. State filtering is not address containment. Silence is not an all-clear.",
+    !currentTransport ? "Source check unavailable, failed, disabled or stale; retained notice timing is separate from transport freshness." : "",
+    !completeSnapshot ? "Active/history coverage is incomplete or has not been collected with the current format." : "",
+    ...(Array.isArray(metadata?.incompleteLanes) ? metadata.incompleteLanes.slice(0, 2).map(lane => `${lane.lane === "active" ? "Active" : "History"} lane incomplete at page ${Number.isInteger(lane.page) ? lane.page : "unknown"} (${typeof lane.code === "string" ? lane.code.slice(0, 80) : "source_error"}).`) : []),
+    snapshotLoss ? `${snapshotLoss} otherwise-live notices are missing from the latest snapshot and remain unverified; absence is not cancellation.` : "",
+    unresolvedLocations ? `${unresolvedLocations} notices have unresolved geography and remain included under state filtering.` : "",
+    unsupported ? `${unsupported} legacy notices need re-observation before validity or complete text can be verified.` : "",
+    unsupported || unresolvedLocations || clipped ? "Limits on archive-only ended or legacy context do not by themselves invalidate current-feed confirmation." : "",
+    truncated ? "Source, content or display bounds were reached; this is not a complete listing." : "",
+    `Counts cover at most 2000 stored candidates: current snapshot heads, then heads listed within seven days, then seven-day recent revisions. The first 200 notices are returned, current instructions first. Correction authority uses exact indexed public CAP reference tuples.`,
+  ].filter(Boolean).join(" ");
+  return { generatedAt: iso(now), selection: { state }, coverage: { status, checkedAt: iso(source?.checked_at), successAt: iso(source?.success_at), pollSeconds, staleAfterSeconds, sourceUrl: "https://api.weather.gov/alerts", detail, truncated, unresolvedLocations }, counts, notices: notices.slice(0, 200), moreAvailable };
+}
 function reviewIncident(db, id, { status, note, publishEvidence = false, expectedGeneration }, now = Date.now()) {
   if (!["open", "resolved"].includes(status)) throw problem("Review status must be open or resolved.");
   if (typeof publishEvidence !== "boolean") throw problem("Invalid evidence publication choice.");
@@ -679,4 +888,4 @@ function pruneWatch(db, now = Date.now()) {
     return { runs, evidence: evidenceCount };
   }).immediate();
 }
-module.exports = { openWatchDb, syncSources, listDueSources, claimRun, finishRun, recordSourceResult, recordSourceFailure, claimInvestigation, completeInvestigation, failInvestigation, claimTriage, completeTriage, failTriage, getWatchSnapshot, getIncident, reviewIncident, pruneWatch, getInvestigationBudget };
+module.exports = { openWatchDb, syncSources, listDueSources, claimRun, finishRun, recordSourceResult, recordSourceFailure, claimInvestigation, completeInvestigation, failInvestigation, claimTriage, completeTriage, failTriage, getWatchSnapshot, getOfficialNotices, getIncident, reviewIncident, pruneWatch, getInvestigationBudget };

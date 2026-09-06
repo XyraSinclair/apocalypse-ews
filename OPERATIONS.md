@@ -1,10 +1,12 @@
 # Operations — Apocalypse EWS
 
-The primary surface is a continuous digital watch: source observations,
+The public surface combines a browser-local household alert plan, a separate
+official-source notice display, and a continuous digital watch of observations,
 immutable revisions, incident threads, bounded investigations, and handovers.
 The existing aviation instrument remains at `/aviation`, with three aggregate
 cohorts: `global_business_jet`, `global_military_aircraft`, and
-`non_icao_untracked`. Neither instrument establishes attack intent or safety.
+`non_icao_untracked`. None establishes attack intent, safety, or successful
+warning delivery to a resident.
 
 ## Re-entry protocol (start here after any absence)
 
@@ -68,6 +70,8 @@ Endpoints (public via the tunnel, or loopback via `ssh -L 3030:127.0.0.1:3030
 xyra-dev-hetzner`):
 
 - Watch: <https://warning.watch/> and `/watch`; public `/api/watch` and `/api/watch/incidents/:id`
+- Household planner: <https://warning.watch/plan>; private browser storage, offline HTML and print, blank-plan sharing only
+- Official-source notices: `/api/watch/official`, optionally `?state=CA`; independent of the private incident publication gate
 - Aviation: <https://warning.watch/aviation>; `/dashboard.json`, `/military-dashboard.json`, `/untracked-dashboard.json`
 - Operator watch: the on-page operator control uses the existing `INTERNAL_ALERT_TOKEN` for `/api/admin/watch`, incident detail, and review. The token is held only in page memory; refresh clears it.
 - **RSS feed**: <https://warning.watch/rss.xml> — fires on emergency-level changes and alert events
@@ -157,9 +161,11 @@ visibly unavailable/failed; collection continues. A direct
 `OPENROUTER_API_KEY` is supported only when explicitly configured without Scry,
 not as a runtime fallback.
 
-Public APIs expose coverage, aggregate processing progress, and only source
+The incident APIs expose coverage, aggregate processing progress, and only source
 evidence deliberately published by an operator, never raw queued reports,
-machine assessments, or review notes. Private review does not publish evidence.
+machine assessments, or review notes. The separate official-notice API below
+mirrors qualified NWS source messages without that publication gate.
+Private review does not publish evidence.
 Publishing requires approval of the exact current evidence generation; revisions
 and newly attached candidate context invalidate that approval. Public filtering
 happens before counts and pagination. Authentication is required to inspect
@@ -255,6 +261,109 @@ definitions were healthy and GDELT remained explicitly degraded. No route,
 credential, access-control bypass, or immediate retry was introduced; its normal
 30-minute source cadence remains in force. Public source titles are marked as
 quoted source material, not verified events or machine findings.
+
+## Civilian reliance contract
+
+The resident product is a plan for receiving and acting on an official warning
+while continuing ordinary city life. Its useful unit is a household decision,
+not a dramatic signal, a queue item, or a predicted attack probability. Preparation,
+warning delivery, protective action, and later official updates are different
+jobs: a successful page load must not be mistaken for successful warning delivery.
+
+The design was decomposed across civilian decisions, official message integrity,
+and the actual delivery chain. Independent source/code investigations exposed
+two consequential gaps: official messages were behind human publication, and
+existing subscriptions delivered aviation anomalies rather than civil warnings.
+The following taxonomy ties product properties to concrete ways they can fail.
+
+| Property | Required behavior | Discriminating failure scenario |
+|---|---|---|
+| Role clarity | A resident can identify the primary warning routes, the stored plan, and this site's supplementary evidence without understanding operations | A sleeping resident believes an open website or aviation signup will wake their phone for a civil warning |
+| Actionable preparation | Record phone settings checked by the user, complementary local enrollment, radio/power backup, and remaining practical work; do not manufacture a readiness score | Every form field is filled, but emergency alerts are disabled or the radio has no usable power |
+| Shelter feasibility | Identify reachable places at home, work and elsewhere, with access hours, keys, mobility constraints and alternatives | The planned building is locked at night or the preferred route requires an unavailable lift |
+| Household continuity | Record out-of-area contact arrangements and school/care plans before an alert; do not direct families to travel through a radiation emergency to reunite | The only person who knows the plan is absent, or a parent goes outside to collect a child already sheltered at school |
+| Primary-source authority | Keep issuer, original area, exact source instructions, references and dates distinct from reporting or interpretation | A model summary or an operator's private note appears to be an official protective instruction |
+| Geographic applicability | Label state filtering as coarse; retain unresolved areas and disclose missing jurisdictions rather than infer an address match | A traveller keeps their home-state selection, or an unmapped notice silently vanishes from a filtered view |
+| Message lifecycle | Distinguish active, upcoming, expired, cancelled, superseded and unverified messages; only qualified actual/public corrections alter real-message state | A test cancellation suppresses a real notice, an old update wins, or an ended instruction remains current |
+| Time and failure visibility | Separate source success, observation age and validity; age retained content even when refresh fails; silence is not a safety state | A recently rendered page contains yesterday's source data, or a sleeping tab resumes with expired instructions |
+| Critical-path independence | Source-attributed official notices do not wait for model credit, investigation leases, or an awake operator | A real public CAP warning enters the private queue while the model budget is exhausted |
+| Delivery diversity | Primary phone/local alerts and a non-internet backup are explicit; permission, enrollment and successful delivery are different facts | Internet loss defeats two apps sharing the same connection, or an enabled permission is mistaken for end-to-end delivery |
+| Offline usefulness | A downloaded or printed plan contains the actual entries and immediate guidance, without scripts, external assets, account access or live-status claims | The network fails and the saved item is only a bookmark, a login page, or a stale green dashboard |
+| Privacy and preservation | Household details remain browser-local; public sharing includes no entries; storage failures are visible and preserve recoverable data | A shared-device user sees another household's plan, a public link contains contacts, or a quota failure silently loses edits |
+| Cognitive and physical access | Instructions remain readable, keyboard-accessible and non-color-dependent on a narrow screen and on paper | A resident with tremor, low vision or stress cannot find the next action without navigating operational metrics |
+| Practice without deception | Practice is always visibly labelled, sends no warning, and records only a self-reported exercise | A drill looks like a real emergency, or completion of a walkthrough implies a device or shelter was verified |
+| Community trust and maintenance | Share the blank planner; identify source/review/export dates and practical assumptions needing review; do not invent staffed monitoring | A forwarded plan leaks personal details, or an old shelter/access assumption is treated as a maintained community guarantee |
+| Evidence proportionate to reliance | Release claims follow direct behavior, independent review and live verification; compilation alone proves neither timely delivery nor useful action | Correct code and attractive screens are used to claim unobserved locked-device delivery or survival outcomes |
+
+The current resident surface is [https://warning.watch/plan](https://warning.watch/plan).
+Its entries are local to that browser, not an encrypted household account or a
+community coordination service. The static export is a separate private copy;
+deleting browser data does not erase copies already downloaded or printed.
+The interface is English; linked official guidance provides additional resources.
+
+`GET /api/watch/official` is a no-store, deterministic mirror of selected NWS
+Actual/Public civil notices. Its only optional query is an uppercase US
+state/territory code. The source checks active messages and bounded seven-day
+history, including older active alerts. At most four pages/1000 records are
+collected per pass. Validated pages survive another lane's failure or source
+deadline, but run cancellation still prevents publication; incomplete coverage
+remains explicit. A partial HTTP 429 response retains its Retry-After deadline,
+including under forced collection.
+
+Schema version 4 preserves immutable evidence and separates current active
+membership from the last positive membership time. The public read considers
+at most 2000 current heads, recently listed prior heads, and recent revisions,
+in that priority order, and returns at most 200. Qualified current-head CAP
+controls use an indexed full sender/identifier/sent tuple and causal control
+time; test, private, mismatched, or obsolete revisions cannot control a real
+notice. The one-time projection migration uses bounded 200-row keyset pages.
+Counts and truncation describe those bounds, not a complete national emergency
+inventory. Unmapped geography stays visible. Missing snapshot membership is
+uncertainty, not cancellation; a source outage does not rewrite an issuer's
+validity window. Browser timing follows server time plus monotonic elapsed
+time. Resume, clock discontinuity, and failed refresh withhold confirmation
+until a fresh matching snapshot arrives.
+
+There is no background civil-warning delivery from this page, comprehensive
+IPAWS subscription, verified shelter directory, or staffed household check-in.
+Existing aviation subscriptions keep their original purpose. Adding a delivery
+promise requires explicit geographic enrollment, correction/withdrawal handling,
+observable endpoint failures, and evidence from the actual locked-device path;
+it cannot be inferred from this official-message display.
+
+Protective guidance is grounded in
+[https://www.ready.gov/radiation](https://www.ready.gov/radiation),
+[https://www.cdc.gov/radiation-emergencies/response/get-inside.html](https://www.cdc.gov/radiation-emergencies/response/get-inside.html),
+and [https://www.cdc.gov/radiation-emergencies/response/stay-inside.html](https://www.cdc.gov/radiation-emergencies/response/stay-inside.html).
+The distinction between automatic compatible-phone WEA and complementary local
+enrollment follows [https://www.weather.gov/wrn/wea](https://www.weather.gov/wrn/wea).
+These sources were read directly on 5 September 2026; neither a generic shelter
+duration nor a message disappearing constitutes an automatic all-clear.
+
+### Resident release verification — 6 September 2026
+
+Disposable execution covered 18 public CAP lifecycle cases, coarse state
+filtering, unresolved geography, expiry, staleness, partial history failure,
+153 non-authoritative controls, a ten-day unchanged alert disappearing,
+2500 obsolete heads, and schema 2→4 migration with original evidence preserved.
+The actual collector CLI retained a validated notice after its source deadline
+but published nothing after run interruption. Partial Retry-After admission
+remained enforced even with `--force`.
+
+Two independent background Chromium pages proved concurrent-save preservation,
+clear-confirmation invalidation, the delayed-storage-event deletion guard, and
+erasure of recovery data. Fast and slow device clocks retained correct notice
+timing; failed refresh after resume withheld confirmation. HTTP exercises
+confirmed query rejection, no-store output and the operator authentication
+boundary. The actual 390px surface had no horizontal overflow. The generated PDF
+placed protective action first and printed full entries; downloaded HTML opened
+with networking disabled, without scripts or external assets, preserving input
+literally. The production build passed.
+
+Independent resident-reliance and official-integrity reviews closed their
+findings before release. These checks do not establish locked-device delivery,
+complete jurisdiction coverage, or survival outcomes. No permanent tests were
+added.
 
 ## Assurance contract
 

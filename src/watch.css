@@ -143,3 +143,37 @@
   .watch-priority { font-size: 10px; }
   .watch-footer > span { width: 100%; }
 }
+
+.official-notices { border-top: 4px solid #254e77; }
+.official-notice-card { margin: 20px 0; padding: 18px; border: 1px solid var(--watch-line); border-radius: 6px; }
+.official-source-text, .plan-print-entry { white-space: pre-wrap; overflow-wrap: anywhere; }
+.official-source-text { margin-bottom: 16px; }
+.resident-plan-access { background: #edf3f8; }
+.resident-plan-access a { font-weight: 700; }
+.resident-plan { max-width: 1000px; }
+.resident-plan > header { margin-bottom: 28px; }
+.plan-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+.plan-fields label { align-content: start; }
+.plan-fields .watch-muted { font-weight: 400; min-height: 3.2em; }
+.plan-fields textarea { font: inherit; }
+.plan-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.resident-plan .plan-check { display: flex; align-items: start; gap: 10px; margin: 18px 0; font-weight: 500; }
+.plan-check input { flex: none; margin-top: 5px; }
+.plan-print-entry { display: none; }
+.plan-practice [tabindex="-1"]:focus-visible { outline: 3px solid #5f83ac; outline-offset: 4px; }
+@media (max-width: 650px) {
+  .plan-fields { grid-template-columns: minmax(0, 1fr); }
+  .plan-fields .watch-muted { min-height: 0; }
+  .official-notice-card { padding: 12px; }
+}
+@media print {
+  .watch-navigation, .resident-plan button, .resident-plan textarea, .resident-plan .plan-clear, .resident-plan .plan-practice button { display: none !important; }
+  .resident-plan { max-width: none; padding: 0; color: #000; font-size: 11pt; }
+  .resident-plan::before { content: "STATIC PRIVATE PLAN · NOT A LIVE WARNING · No automatic updates"; display: block; border: 2px solid; padding: 12px; margin-bottom: 18px; font-weight: 700; }
+  .resident-plan .watch-panel { border: 0; border-top: 1px solid #777; padding: 16px 0; box-shadow: none; }
+  .resident-plan .plan-fields { display: block; }
+  .resident-plan .plan-fields label { margin-bottom: 18px; break-inside: avoid; }
+  .resident-plan .plan-print-entry { display: block; font-weight: 400; }
+  .resident-plan h2, .resident-plan h3 { break-after: avoid; }
+  .resident-plan a[href^="http"]::after { content: " (" attr(href) ")"; }
+}

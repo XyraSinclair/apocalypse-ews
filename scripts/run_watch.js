@@ -84,7 +84,9 @@ async function run() {
         summary.collection.sources += 1;
         try {
           const result = await collectSource(source, { now: Date.now(), signal, publishedDir, cursor: source.cursor || null });
-          signal.throwIfAborted();
+          runController.signal.throwIfAborted();
+          // A source deadline may leave validated NWS pages; run cancellation never may.
+          if (source.id !== 'nws-civil-alerts' || result.metadata?.officialVersion !== 2 || result.metadata?.sourceGap !== true) signal.throwIfAborted();
           const counts = recordSourceResult(db, source.id, result, Date.now(), { startedAt: sourceStartedAt });
           summary.collection.inserted += counts.inserted;
           summary.collection.changed += counts.changed;
