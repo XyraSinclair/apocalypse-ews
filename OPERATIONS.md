@@ -82,7 +82,7 @@ Logs: `journalctl -u apocalypse-ews-refresh` (and the other unit names).
 Deploying a change: commit and push to `main`, then
 
 ```sh
-ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-only && sudo -u xyra npm ci && sudo -u xyra npm run build && systemctl restart apocalypse-ews.service'
+ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -H -u xyra git pull --ff-only && sudo -H -u xyra npm ci --include=dev && sudo -H -u xyra npm run build && systemctl restart apocalypse-ews.service'
 # unit-file changes additionally need:
 #   cp config/systemd/* /etc/systemd/system/ && systemctl daemon-reload
 ```
@@ -364,6 +364,31 @@ Independent resident-reliance and official-integrity reviews closed their
 findings before release. These checks do not establish locked-device delivery,
 complete jurisdiction coverage, or survival outcomes. No permanent tests were
 added.
+
+Activated `a1b32cc` from `5288d25` on 6 September 2026 at 01:45 Pacific.
+The watch timer and collector were paused around the cutover. A fresh watch-only
+backup at
+`data/backups/resident-release-2026-09-06T08-42-04-160Z/ews-watch.sqlite`
+passed integrity checking. The live schema is 4; all 406 pre-cutover evidence
+observations remained byte-identical by ID, with zero missing or changed.
+The deployed database integrity check passed, and the web service and watch
+timer were active afterward. The scheduled source refreshed again at 01:48.
+
+The real NWS collection completed both bounded lanes without a failure or
+truncation. Official coverage was current with zero selected notices, while
+model investigations were budget-paused: official intake did not depend on
+model credit. Zero notices is not an all-clear. Public browser requests to both
+official selections, the watch endpoint, and all three aviation JSON endpoints
+returned HTTP 200 with no-store. The live 390px planner rendered without overflow;
+the watch visibly retained its incomplete-coverage and no-all-clear boundaries.
+
+The separate local dashboard-bundle verifier rejected absent absolute
+`VITE_*_DASHBOARD_URL` configuration and root-relative fallbacks. No dashboard
+URL contract changed; the actual same-origin deployment paths were verified
+above instead. The unchanged lockfile's dependency audit reported four high
+advisories (`concurrently`, `shell-quote`, `nanoid`, `postcss`) and one moderate
+(`qs`). No dependency upgrade or exploitability judgment was made in this
+resident-product release.
 
 ## Assurance contract
 
