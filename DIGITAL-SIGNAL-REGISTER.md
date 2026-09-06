@@ -4,6 +4,13 @@
 
 This is the collection side of the early-warning system: **12 watch families, 64 candidate observable changes, and 26 named source surfaces**. It is not 64 validated predictors or 26 integrations. Aircraft, public posts, official decisions, infrastructure observations, and environmental measurements belong in the same persistent watch, with different roles and evidential weight.
 
+**Implementation note:** the first tranche now has 39 executable source
+definitions, 21 enabled, including three existing aircraft cohorts and ten
+country-specific advisories. [OPERATIONS.md](OPERATIONS.md) describes the
+implemented watch and inactive/access-gated coverage. The research-status
+letters and candidate roster below remain the dated planning inventory,
+not a claim that all observables are collected or validated.
+
 The families organize work; they do **not** certify independence. A GNSS map derived from ADS-B is not a second aircraft-independent instrument. Two institutions can respond to the same order. Physical sensors can independently corroborate the same event without independently establishing its cause or intent.
 
 **Role tags:** B = baseline/context; C = possible crisis precursor; E = event/consequence verification; D = disconfirmation/recovery; H = observation health. Every candidate should be examined in both directions when the source permits. A normal post-event radiation reading cannot disconfirm preparations for future use.

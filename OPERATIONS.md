@@ -1,9 +1,10 @@
 # Operations — Apocalypse EWS
 
-The signal: sustained anomalies in the number of business jets simultaneously
-airborne (the "elite exodus" cohort, 31k+ tracked airframes), plus batch-takeoff
-rate anomalies (z-score over a 28-day baseline), across three cohorts:
-`global_business_jet`, `global_military_aircraft`, `non_icao_untracked`.
+The primary surface is a continuous digital watch: source observations,
+immutable revisions, incident threads, bounded investigations, and handovers.
+The existing aviation instrument remains at `/aviation`, with three aggregate
+cohorts: `global_business_jet`, `global_military_aircraft`, and
+`non_icao_untracked`. Neither instrument establishes attack intent or safety.
 
 ## Re-entry protocol (start here after any absence)
 
@@ -15,10 +16,12 @@ only — its launchd agents were retired 2026-08-27).
 ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && npm run status'
 ```
 
-If `verdict.healthy` is true, the system has been running the whole time and
-there is nothing to do. If not, the `problems` array names each issue and its
-fix. Stale history repairs itself within 6 hours via the repair timer, or
-force it now:
+`verdict.healthy` and `problems` retain the existing aviation/infrastructure
+notification contract. Inspect `watch.healthy`, its source problems, run age,
+agent availability, and service states separately for the digital watch.
+Watch gaps also appear on the public surface; this release does not add new
+ntfy, email, SMS, or Telegram messages. Aviation history repairs itself within
+6 hours via the repair timer, or force it now:
 
 ```sh
 ssh xyra-dev-hetzner 'systemctl start apocalypse-ews-repair.service'
@@ -46,10 +49,11 @@ token).
 |---|---|---|
 | `apocalypse-ews.service` | `server/index.js` Express server on 127.0.0.1:3030 | always on |
 | `apocalypse-ews-refresh.timer` | incremental pass (check archive → ingest new slot → snapshots/detection once per sample → retry delivery → feeds) | every 2 min, single active pass |
+| `apocalypse-ews-watch.timer` | `run_watch.js` — collect due sources, preserve revisions, investigate queued changes, write handover | every minute, one leased pass |
 | `apocalypse-ews-refresh-imports.timer` | same plus aircraft-metadata reimport | daily 00:29 |
 | `apocalypse-ews-repair.timer` | `repair_history_gaps.js` — self-heals trailing gaps AND interior holes across all three cohorts, bounded to 30 days | every 6 h |
 | `apocalypse-ews-watchdog.timer` | `ops_alert.js` — status verdict → ops ntfy topic (deduped, 6 h re-alert, recovery note) | every 2 min |
-| `apocalypse-ews-backup.timer` | `backup_databases.js` — `VACUUM INTO data/backups/<day>/` for all three DBs, integrity-checked, 14 days kept; staleness feeds the status verdict (and therefore the watchdog). Restore = stop service, copy the day's file over `data/*.sqlite`, start. Off-box: manual sha256-verified copies land at `xyra-sanctuary:/srv/sanctuary/backups/apocalypse-ews/<day>/` (first: 2026-08-30; automation pending a box→sanctuary credential) | daily 02:10 |
+| `apocalypse-ews-backup.timer` | `backup_databases.js` — `VACUUM INTO data/backups/<day>/` for all four DBs (three aviation cohorts plus `ews-watch.sqlite`), integrity-checked, 14 days kept; staleness feeds the existing status verdict. Restore requires stopping all relevant writers first. Off-box: manual sha256-verified copies land at `xyra-sanctuary:/srv/sanctuary/backups/apocalypse-ews/<day>/` (automation pending a box→sanctuary credential) | daily 02:10 |
 | `cloudflared.service` | Cloudflare tunnel `apocalypse-ews` (id `d27a04ac-5b8a-4d84-a4c9-ccf61978694d`) — serves <https://warning.watch> from loopback:3030 and <https://ntfy.warning.watch> from loopback:2586 with no open inbound ports. Installed via `cloudflared service install <token>`; ingress config lives in the CF dashboard/API (`config_src: cloudflare`), not on disk | always on |
 | `ntfy.service` | self-hosted ntfy 2.27.0 (`/etc/ntfy/server.yml`): loopback:2586, `auth-default-access: read-only`, user `publisher` has rw on both topics, `upstream-base-url: ntfy.sh` for iOS instant delivery. Auth DB `/var/lib/ntfy/user.db`. Box-side publishers use `EWS_NTFY_SERVER=http://127.0.0.1:2586` (loopback survives a tunnel outage; subscribers reconnect and receive cached messages) | always on |
 | `apocalypse-ews-canary.timer` | `canary_delivery.js` — synthetic end-to-end proof through the **public** path: site health, RSS, and an ops-topic ntfy publish polled back as a subscriber would. Deliberately the opposite path from the watchdog (loopback), so each pages when the other's path dies. Failure leaves the unit `failed`, which the status verdict flags | weekly Mon 17:00 UTC |
@@ -63,7 +67,9 @@ confirmation and management links absolute.
 Endpoints (public via the tunnel, or loopback via `ssh -L 3030:127.0.0.1:3030
 xyra-dev-hetzner`):
 
-- Dashboard: <https://warning.watch/> (UI), `/dashboard.json`, `/military-dashboard.json`, `/untracked-dashboard.json`
+- Watch: <https://warning.watch/> and `/watch`; public `/api/watch` and `/api/watch/incidents/:id`
+- Aviation: <https://warning.watch/aviation>; `/dashboard.json`, `/military-dashboard.json`, `/untracked-dashboard.json`
+- Operator watch: the on-page operator control uses the existing `INTERNAL_ALERT_TOKEN` for `/api/admin/watch`, incident detail, and review. The token is held only in page memory; refresh clears it.
 - **RSS feed**: <https://warning.watch/rss.xml> — fires on emergency-level changes and alert events
 - Ops/event feeds: `data/published/operations.json`, `event-signals.json`
 
@@ -76,6 +82,101 @@ ssh xyra-dev-hetzner 'cd /opt/dev/apocalypse-ews && sudo -u xyra git pull --ff-o
 # unit-file changes additionally need:
 #   cp config/systemd/* /etc/systemd/system/ && systemctl daemon-reload
 ```
+
+## Continuous digital watch
+
+`server/watch-sources.js` is the executable source registry. The 21 enabled
+definitions cover three existing aviation cohorts, ten GOV.UK advisories,
+EASA conflict-zone bulletins, FAA airspace status, selected NWS civil warnings,
+two USGS feeds, NOAA Kp, GDELT reporting, and Bluesky public post discovery.
+Eighteen other definitions remain explicitly inactive or access-gated; an
+inactive entry is not collection coverage. Source families and dependence
+groups are not counts of independent corroboration.
+
+The minute timer checks source-specific cadences, not every source every minute.
+Four bounded collectors run concurrently; each request has a 25-second and
+8-MiB ceiling. A pass is capped at 210 seconds, with a 270-second SQLite lease
+and a 240-second systemd timeout. The Bluesky v2 stream starts at the live tail
+on enrollment, then resumes an inclusive durable sequence. Each window stops
+at 20 seconds, 8 MiB, 20,000 frames, or 500 relevant observations; its continuation,
+coverage metadata, and backlog state remain visible. Only 200 matched records
+are retained in its edit/delete tracking cursor. There is no pre-enrollment or
+complete global-post coverage claim.
+
+Unchanged semantic content is deduplicated without advancing the observation
+clock. Provider publication, observation, poll, and sample freshness are
+separate clocks. Initial enrollment and replayed old reporting do not manufacture
+new incidents. Official current civil alerts can be observed immediately.
+CAP amendments/cancellations preserve all referenced predecessors; corrections
+reach every linked incident without turning candidate context into corroboration.
+Source disappearance, expiry, or a normal environmental measurement does not
+establish an all-clear.
+
+Investigations use `POST https://api.scry.io/v1/scry/openrouter` with the existing
+funded Scry key. The production unit fixes `google/gemini-2.5-flash-lite` and a
+default limit of twelve attempts per UTC day. A failed attempt consumes the
+same daily slot. At most one attempt normally runs per pass: independent
+specialist and skeptical calls, followed by synthesis. Per attempt: 24 evidence
+records, 7,000 evidence bytes, three requests of at most 24 KiB, 1,600 output
+tokens per request, 45 seconds per call, and 100 seconds total. There are no
+model tools, arbitrary research URLs, automatic credential changes, or unbounded
+agent recursion. Responses must have the configured served model, a complete
+finish reason, bounded structured fields, and citations to supplied evidence.
+Provider usage is recorded, including returned partial usage on failure.
+
+Keep `SCRY_API_KEY` in root-owned mode-0600 `/etc/apocalypse-ews-watch.env`;
+systemd reads it before dropping privileges to `xyra`. Do not copy it into the
+web-server environment, repository, browser, or logs. `EWS_WATCH_DAILY_INVESTIGATIONS`
+can lower the daily attempt limit; it is a work cap, not a currency-denominated
+billing cap. Missing funding, credentials, invalid responses, or timeouts leave
+investigations visibly unavailable/failed; collection continues. A direct
+`OPENROUTER_API_KEY` is supported only when explicitly configured without Scry,
+not as a runtime fallback.
+
+Public APIs expose source facts, queue state, and nonstrategic handovers, never
+machine assessments or operator notes. Authentication is required to inspect
+drafts, record a human review, or resolve/reopen a thread. Drafts cease to be
+current when underlying evidence changes. Resolving a thread closes review work;
+it is not a public safety declaration. There is no publish-to-subscribers action.
+The incident API accepts `status=open|resolved|all`, `limit`, and the opaque
+`cursor` returned as `page.nextCursor`; the UI follows this continuation.
+
+Watch state is isolated in `data/ews-watch.sqlite` with WAL, FULL synchronization,
+foreign keys, and versioned migrations. Backup covers the watch as the fourth
+database. To restore it, stop the watch timer, watch service, and web service,
+preserve the existing database and sidecars, restore an integrity-checked copy,
+then restart the web service and timer. Source cursors, evidence history,
+incidents, reviews, daily attempt accounting, and handovers are in that file.
+Retention prunes old unreferenced non-current evidence after 90 days; current
+heads and incident-linked evidence remain. Collection failures preserve history
+and cursor state rather than substituting empty successful results.
+
+The watch is not predictive validation or a certified warning channel. Historical
+case replay, broader source discovery/enrollment, a learned routine calendar,
+validated official-warning relay, and public strategic assessment remain open
+work. The current source registry and visible coverage gaps are the operational
+truth, not the wider planning roster.
+
+### Implementation evidence — 5 September 2026
+
+The release build and existing alert-pipeline smoke passed. Nine temporary
+behavior scenarios exercised immutable reversion, duplicate clocks, multilingual
+triage and replay fencing, plain social text and durable stream continuation,
+multi-parent CAP cancellation and late originals, candidate correction
+propagation, queue continuation beyond 120 threads, cited originals after
+85 revisions, model validity/citations/partial usage, and disk restart/freshness.
+The scenarios were throwaway execution proofs, not new permanent tests.
+
+A real collection pass checked all 21 enabled definitions and stored 193
+observations without a source failure. Real Scry inference on captured public
+reporting completed exactly three calls, with specialist, skeptical, and
+synthesis findings citing only supplied evidence. Role attribution belongs to
+the orchestrator, not model-generated labels. Two independent reviews drove
+the correction-graph, context-validity, replay, pagination, and source-boundary
+repairs. Desktop and 390-pixel browser exercises verified layout, private
+draft access, saved local review, citation anchors, and absence of persisted
+operator credentials. Public/private API checks returned 200/401 as intended,
+invalid cursors returned 400, and all watch responses used `no-store`.
 
 ## Assurance contract
 

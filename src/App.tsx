@@ -1,4 +1,5 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import WatchPage, { WatchNavigation } from './WatchPage';
 
 const DASHBOARD_URLS = {
   business: import.meta.env.VITE_DASHBOARD_URL || '/dashboard.json',
@@ -472,8 +473,9 @@ function App() {
   const path = window.location.pathname;
   const page = path.startsWith('/signup') ? <SignupPage />
     : path.startsWith('/manage') ? <ManagePage />
-    : path.startsWith('/event-signals') ? <EventSignalsPage /> : <DashboardPage />;
-  return <>{page}<FeedbackWidget /></>;
+    : path.startsWith('/event-signals') ? <EventSignalsPage />
+    : path === '/aviation' ? <DashboardPage /> : <WatchPage />;
+  return <><WatchNavigation />{page}<FeedbackWidget /></>;
 }
 
 const FEEDBACK_API = 'https://api.scry.io/v1/feedback';
@@ -1712,7 +1714,7 @@ function SignupPage() {
             Prefer no personal info at all? Use browser push below, or subscribe to{' '}
             <code>https://ntfy.warning.watch/apocalypse-ews-alerts</code> in the free ntfy app.
           </p>
-          <p className="hero-link-row"><a href="/">Back to Dashboard</a></p>
+          <p className="hero-link-row"><a href="/aviation">Back to Aviation</a></p>
         </section>
         <section className="panel signup-panel">
           <h2>Notification Signup</h2>
@@ -1783,7 +1785,7 @@ function EventSignalsPage() {
       <section className="panel hero-copy-panel">
         <h1>Event Signal Review</h1>
         <p>Live alert events and localized historical disaster-window research share one surface so operators can compare takeoff clusters, anomaly scores, and provenance.</p>
-        <p className="hero-link-row"><a href="/">Back to Dashboard</a> / <a href="/signup">Get alerts</a></p>
+        <p className="hero-link-row"><a href="/aviation">Back to Aviation</a> / <a href="/signup">Get alerts</a></p>
       </section>
       {error ? <div className="status-banner status-banner-error"><strong>Signal feed error:</strong> {error}</div> : null}
       <section className="panel operations-panel">
@@ -1895,7 +1897,7 @@ function ManagePage() {
         <section className="panel hero-copy-panel signup-copy-panel">
           <h1>Manage Notifications</h1>
           <p>Change alert channels, unsubscribe, or manage billing without exposing your contact details publicly.</p>
-          <p className="hero-link-row"><a href="/">Back to Dashboard</a></p>
+          <p className="hero-link-row"><a href="/aviation">Back to Aviation</a></p>
         </section>
         <section className="panel signup-panel">
           <h2>Subscription Settings</h2>

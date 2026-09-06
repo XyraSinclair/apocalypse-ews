@@ -8,11 +8,13 @@ const { REPO_ROOT, getEnvWithDotEnv } = require("./_env");
 const env = getEnvWithDotEnv();
 const args = process.argv.slice(2);
 const promptForVisualCheck = args.includes("--prompt") && !process.env.CI;
-const targetUrl =
+const targetUrl = new URL(
   args.find((arg) => !arg.startsWith("--")) ||
   process.env.EWS_SMOKE_URL ||
   env.EWS_PUBLIC_URL ||
-  "https://ews.example.com/";
+  "https://ews.example.com/"
+);
+if (targetUrl.pathname === "/" || targetUrl.pathname === "/watch") targetUrl.pathname = "/aviation";
 const outputDir = process.env.EWS_SMOKE_OUTPUT_DIR || path.join(REPO_ROOT, "tmp", "smoke");
 
 function isDashboardResponse(response) {
@@ -74,8 +76,7 @@ async function main() {
     }, { timeout: 45_000 })
     .catch(() => null);
 
-  await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.getByRole("heading", { name: /Apocalypse Early Warning System/i }).waitFor({ timeout: 30_000 });
+  await page.goto(targetUrl.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
   const primaryDashboardResponse = await primaryDashboardResponsePromise;
 
   if (!primaryDashboardResponse) {

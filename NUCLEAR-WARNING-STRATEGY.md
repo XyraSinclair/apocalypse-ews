@@ -22,6 +22,13 @@ The existing operational system can keep running under its present anomaly-repor
 
 **Concrete collection register:** [https://github.com/XyraSinclair/apocalypse-ews/blob/main/DIGITAL-SIGNAL-REGISTER.md](https://github.com/XyraSinclair/apocalypse-ews/blob/main/DIGITAL-SIGNAL-REGISTER.md) — 12 watch families, 64 observable changes, 26 source surfaces, access/latency findings, and seven inspected ordinary responses. The 36-item atlas below supplies analytic questions; the register supplies digital instruments.
 
+**Implementation note:** the initial collection, incident-memory, bounded
+specialist/skeptic/synthesis, handover, and operator-review loops are implemented.
+Their actual source coverage and limits are in [OPERATIONS.md](OPERATIONS.md).
+This document remains the broader strategy; historical replay, learned routine
+calendars, expanded discovery, and warning-delivery validation are not implied
+by activation of that first tranche.
+
 ### What the consultations changed
 
 Fable's central correction was that the first draft repaired the analytic layer but broke the collection layer: it delayed observation and automation until a human institution had validated them. Kimi independently proposed standing sentinels, persistent incident threads, domain investigators, a skeptical investigator, and explicit watch handovers. Both consultations were substantive design opinions, not evidence of predictive accuracy.

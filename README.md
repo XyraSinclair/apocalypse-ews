@@ -1,14 +1,32 @@
 # Apocalypse EWS
 
-An early-warning system that watches for one specific anomaly: **an unusual
-number of business jets taking off at once** — the "elites are fleeing"
-signal — plus military and untracked-aircraft cohorts as corroboration.
+A continuous public-source watch with persistent evidence, incident threads,
+and bounded machine investigations. The watch combines existing aggregate
+aviation observations with official advisories, airspace status, civil warnings,
+public reporting, and environmental measurements.
 
-It is a measurement instrument, not an oracle. Every alert reports how far
-current activity deviates from a seasonal baseline, with the evidence
-attached. Calm output is the normal output.
+The watch reports what changed and what remains unverified. It does not estimate
+the probability of nuclear use, infer intent from aircraft activity, or treat
+quiet sources as evidence of safety. Machine assessments remain operator-only;
+existing aviation notification channels keep their existing policy.
 
 ## How it works
+
+```
+21 enabled source definitions → immutable observations and source health
+                                      │ semantic changes
+                                      ▼
+                               persistent incident threads
+                                      │ bounded investigations
+                                      ▼
+                         specialist + skeptic → synthesis
+                                      │
+                                      ▼
+                      private operator review + next questions
+```
+
+The public watch at `/` shows source facts, open threads, coverage gaps, and
+handover state. `/aviation` retains the existing instrument:
 
 ```
 ADS-B Exchange public heatmaps (30-min source slots, checked every 2 min)
@@ -33,10 +51,11 @@ RSS · ntfy push · Telegram · web dashboard · email/SMS/web-push (optional st
 ## Quickstart
 
 ```sh
-npm install
+npm ci
 cp .env.example .env          # defaults work for local use
 npm run refresh:all           # ingest latest slot, detect, export feeds
-npm start                     # dashboard + RSS at http://127.0.0.1:3030/
+npm run watch:run -- --collect-only  # collect enabled public sources without inference
+npm run build && npm start    # watch, aviation, and RSS at http://127.0.0.1:3030/
 ```
 
 Python 3 with `numpy` and `Pillow` is needed for ingestion
@@ -45,6 +64,20 @@ anomaly models arm; `scripts/backfill_history.py --start-date … --end-date …
 fills history from public archives. Polling every two minutes does **not**
 make those 30-minute archives a real-time feed. Genuine two-minute observations
 require an authorized live global source and separately validated calibration.
+
+Node 22 or newer is required for the watch's built-in WebSocket client.
+Automatic investigations use an existing funded `SCRY_API_KEY`; keep it in a
+private environment file and set `EWS_WATCH_ENV_PATH` when running locally.
+The default model is `google/gemini-2.5-flash-lite`, with at most twelve
+investigation attempts per UTC day and three calls per attempt. Missing inference
+credentials do not stop source collection. Production uses the separate
+`/etc/apocalypse-ews-watch.env`, read only by the watch service.
+
+The registry contains 39 definitions, including ten country-specific travel
+advisories: 21 enabled and 18 explicitly inactive or access-gated. These are
+not 39 independent instruments or all 64 candidate observables in the planning
+register. Predictive validation, broader source enrollment, and new warning
+delivery channels remain outside the implemented watch.
 
 ## Subscribing (for a running deployment)
 
@@ -57,10 +90,11 @@ require an authorized live global source and separately validated calibration.
 
 ## Operations
 
-See [OPERATIONS.md](OPERATIONS.md) for the runbook and
-[ROADMAP.md](ROADMAP.md) for the path to a fully calibrated public signal
-(seasonal robust baselines, anytime-valid sequential testing, extreme-value
-return periods, k-of-n corroboration).
+See [OPERATIONS.md](OPERATIONS.md) for deployment, resource bounds, access, and
+recovery. [NUCLEAR-WARNING-STRATEGY.md](NUCLEAR-WARNING-STRATEGY.md) and
+[DIGITAL-SIGNAL-REGISTER.md](DIGITAL-SIGNAL-REGISTER.md) retain the wider design
+and candidate-source register. [ROADMAP.md](ROADMAP.md) records the aviation
+instrument's calibration work, not validated nuclear-warning capability.
 
 ## Provenance
 

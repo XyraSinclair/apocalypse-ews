@@ -8,6 +8,10 @@ The concrete collection register is
 The implementation roadmap below records the aviation-anomaly approach. Its
 statistical goals must not be read as validated nuclear-warning capability.
 
+The initial continuous watch is implemented separately from the aviation
+calibration roadmap. Its enabled sources, bounds, operator-only assessments,
+and remaining coverage limits are documented in [OPERATIONS.md](OPERATIONS.md).
+
 ## 0. The contract (the whole system in one sentence)
 
 > **One Hetzner box checks public ADS-B archives every two minutes, scores each
