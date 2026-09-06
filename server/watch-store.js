@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const Database = require("better-sqlite3");
+const { DEFAULT_DAILY_BUDGET_NANO, reservationNano, chargeNano } = require("./watch-budget");
 
 const DAY = 86400000;
 const MAX_ATTEMPTS = 3;
@@ -150,6 +151,35 @@ function openWatchDb(filename = process.env.EWS_WATCH_DB_PATH || path.join(__dir
       `);
     }).immediate();
   }
+  if (db.pragma("user_version", { simple: true }) < 2) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE watch_sources ADD COLUMN error_code TEXT;
+        ALTER TABLE watch_sources ADD COLUMN http_status INTEGER;
+        ALTER TABLE watch_sources ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE watch_sources ADD COLUMN next_check_at INTEGER;
+        ALTER TABLE watch_sources ADD COLUMN retry_after_until INTEGER;
+        ALTER TABLE watch_incidents ADD COLUMN resolution_kind TEXT;
+        ALTER TABLE watch_incidents ADD COLUMN resolution_reason TEXT;
+        ALTER TABLE watch_incidents ADD COLUMN triage_result TEXT;
+        ALTER TABLE watch_reviews ADD COLUMN publish_evidence INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE watch_incidents ADD COLUMN review_generation INTEGER;
+        ALTER TABLE watch_reviews ADD COLUMN generation INTEGER;
+        CREATE TABLE watch_triage_batches (
+          id TEXT PRIMARY KEY, owner TEXT NOT NULL, started_at INTEGER NOT NULL, lease_until INTEGER NOT NULL,
+          finished_at INTEGER, status TEXT NOT NULL, items TEXT NOT NULL, result TEXT, error TEXT
+        );
+        CREATE INDEX watch_triage_day ON watch_triage_batches(started_at);
+      `);
+      for (const row of sql(db, "SELECT i.*,j.result FROM watch_incidents i JOIN watch_jobs j ON j.incident_id=i.id AND j.generation=i.generation WHERE i.investigation_status='completed' AND j.status='completed' AND j.id=(SELECT id FROM watch_jobs WHERE incident_id=i.id AND generation=i.generation AND status='completed' ORDER BY started_at DESC,id DESC LIMIT 1)").all()) {
+        if (!sql(db, "SELECT 1 FROM watch_reviews WHERE incident_id=?").get(row.id)) applyAssessment(db, row.id, parse(row.result));
+      }
+      for (const row of sql(db, "SELECT * FROM watch_incidents WHERE status='open' AND investigation_status IN ('pending','failed') AND NOT EXISTS(SELECT 1 FROM watch_reviews WHERE incident_id=watch_incidents.id)").all()) {
+        if (admissionStage(db, row.id) === "triage_pending") sql(db, "UPDATE watch_incidents SET investigation_status='triage_pending',attempts=0,next_attempt_at=0 WHERE id=?").run(row.id);
+      }
+      db.pragma("user_version = 2");
+    }).immediate();
+  }
   return db;
 }
 function syncSources(db, definitions, now = Date.now()) {
@@ -175,8 +205,9 @@ function syncSources(db, definitions, now = Date.now()) {
 function listDueSources(db, definitions, now = Date.now(), { force = false } = {}) {
   return definitions.flatMap((definition) => {
     if (!definition.enabled) return [];
-    const row = sql(db, "SELECT checked_at,cursor FROM watch_sources WHERE id=?").get(definition.id);
-    return !row || force || row.checked_at == null || now - row.checked_at >= definition.pollSeconds * 1000
+    const row = sql(db, "SELECT checked_at,cursor,next_check_at,retry_after_until FROM watch_sources WHERE id=?").get(definition.id);
+    if (row?.retry_after_until > now || (!force && row?.next_check_at > now)) return [];
+    return !row || force || row.checked_at == null || Math.floor(now / (definition.pollSeconds * 1000)) > Math.floor(row.checked_at / (definition.pollSeconds * 1000))
       ? [{ ...definition, cursor: row?.cursor || null }] : [];
   });
 }
@@ -214,10 +245,10 @@ function explicitRegion(region) {
   return Boolean(region.trim()) && !/global|unknown|unspecified|worldwide|multiple|;/i.test(region);
 }
 function attachCandidateContext(db, incident, now) {
-  if (!explicitRegion(incident.region)) return;
+  if (!explicitRegion(incident.region)) return 0;
   const generic = new Set(["public_post", "official_warning", "observation_context", "scientific_context", "aviation_activity", "conflict_zone", "aviation_notice", "news", "context"]);
   const topics = parse(incident.topics).filter((topic) => !generic.has(topic));
-  if (!topics.length) return;
+  if (!topics.length) return 0;
   const candidates = sql(db, `SELECT e.id FROM watch_evidence e JOIN watch_items h ON h.evidence_id=e.id
     WHERE json_extract(e.observation,'$.region')=? AND e.observed_at>=?
       AND e.source_id NOT IN (SELECT p.source_id FROM watch_incident_evidence l JOIN watch_evidence p ON p.id=l.evidence_id WHERE l.incident_id=? AND l.association='primary')
@@ -228,10 +259,13 @@ function attachCandidateContext(db, incident, now) {
       AND NOT EXISTS(SELECT 1 FROM watch_evidence_edges n WHERE n.predecessor=e.id)
       AND EXISTS(SELECT 1 FROM json_each(e.observation,'$.topics') t JOIN json_each(?) wanted ON t.value=wanted.value)
     ORDER BY e.observed_at DESC LIMIT 12`).all(incident.region, now - 3 * DAY, incident.id, iso(now - 3 * DAY), iso(now + 300000), iso(now), JSON.stringify(topics));
-  for (const candidate of candidates) sql(db, "INSERT OR IGNORE INTO watch_incident_evidence(incident_id,evidence_id,association) VALUES(?,?,'candidate_context')").run(incident.id, candidate.id);
+  let added = 0;
+  for (const candidate of candidates) added += sql(db, "INSERT OR IGNORE INTO watch_incident_evidence(incident_id,evidence_id,association) VALUES(?,?,'candidate_context')").run(incident.id, candidate.id).changes;
+  return added;
 }
-function recordSourceResult(db, sourceId, result, now = Date.now()) {
+function recordSourceResult(db, sourceId, result, now = Date.now(), { startedAt = now } = {}) {
   if (!result || !Array.isArray(result.observations) || result.observations.length > 2000) throw problem("Invalid source result.");
+  if (!Number.isFinite(startedAt) || startedAt > now) throw problem("Invalid source attempt timestamp.");
   const items = result.observations.map(observation);
   if (new Set(items.map((item) => item.externalId)).size !== items.length) throw problem("Duplicate external IDs in source result.");
   const sourceMetadata = result.metadata == null ? null : object(result.metadata, "source metadata");
@@ -298,7 +332,7 @@ function recordSourceResult(db, sourceId, result, now = Date.now()) {
       let incident = sql(db, "SELECT * FROM watch_incidents WHERE group_key=? AND last_at>=? ORDER BY last_at DESC,id LIMIT 1").get(key, now - 3 * DAY);
       if (!incident) {
         incident = { id: randomUUID() };
-        sql(db, "INSERT INTO watch_incidents(id,group_key,title,region,topics,attention,first_at,last_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)").run(incident.id, key, item.title, item.region, JSON.stringify(item.topics), item.kind === "official_alert" ? "review" : "investigate", now, now, now);
+        sql(db, "INSERT INTO watch_incidents(id,group_key,title,region,topics,attention,first_at,last_at,updated_at,investigation_status) VALUES(?,?,?,?,?,?,?,?,?,?)").run(incident.id, key, item.title, item.region, JSON.stringify(item.topics), item.kind === "official_alert" ? "review" : "investigate", now, now, now, item.kind === "report" ? "triage_pending" : "pending");
         counts.incidentsOpened++;
       } else changedIncidents.set(incident.id, item.title);
       sql(db, "INSERT INTO watch_incident_evidence(incident_id,evidence_id) VALUES(?,?) ON CONFLICT(incident_id,evidence_id) DO UPDATE SET association='primary'").run(incident.id, id);
@@ -311,15 +345,25 @@ function recordSourceResult(db, sourceId, result, now = Date.now()) {
         INSERT OR IGNORE INTO watch_incident_evidence(incident_id,evidence_id,association)
         SELECT l.incident_id,a.id,l.association FROM watch_incident_evidence l CROSS JOIN ancestors a WHERE l.evidence_id=?`).run(id, id);
     }
-    for (const [id, title] of changedIncidents) sql(db, "UPDATE watch_incidents SET title=COALESCE(?,title),last_at=?,generation=generation+1,status='open',attempts=0,next_attempt_at=0,investigation_status=CASE WHEN investigation_status='running' THEN 'running' ELSE 'pending' END,last_error=NULL,updated_at=? WHERE id=?").run(title, now, now, id);
+    for (const [id, title] of changedIncidents) sql(db, "UPDATE watch_incidents SET title=COALESCE(?,title),last_at=?,generation=generation+1,status='open',attention=?,attempts=0,next_attempt_at=0,resolution_kind=NULL,resolution_reason=NULL,triage_result=NULL,investigation_status=CASE WHEN investigation_status IN ('running','triage_running') THEN investigation_status ELSE ? END,last_error=NULL,updated_at=? WHERE id=?").run(title, now, baselineAttention(db, id), admissionStage(db, id), now, id);
     const observed = staged.length ? now : source.observed_at;
-    sql(db, "UPDATE watch_sources SET checked_at=?,success_at=?,observed_at=?,baseline_at=COALESCE(baseline_at,?),last_error=NULL,observation_count=observation_count+?,cursor=COALESCE(?,cursor),metadata=? WHERE id=?").run(now, now, observed, now, counts.inserted, cursor, metadata, sourceId);
+    sql(db, "UPDATE watch_sources SET checked_at=?,success_at=?,observed_at=?,baseline_at=COALESCE(baseline_at,?),last_error=NULL,error_code=NULL,http_status=NULL,consecutive_failures=0,next_check_at=NULL,retry_after_until=NULL,observation_count=observation_count+?,cursor=COALESCE(?,cursor),metadata=? WHERE id=?").run(startedAt, now, observed, now, counts.inserted, cursor, metadata, sourceId);
     return counts;
   }).immediate();
 }
 function recordSourceFailure(db, sourceId, error, now = Date.now()) {
-  const message = text(error, "source error", 20000).slice(0, 2000);
-  if (!sql(db, "UPDATE watch_sources SET checked_at=?,last_error=? WHERE id=?").run(now, message, sourceId).changes) throw problem("Unknown watch source.", 404);
+  const message = text(error instanceof Error ? error.message : error, "source error", 20000).slice(0, 2000);
+  db.transaction(() => {
+    const source = sql(db, "SELECT * FROM watch_sources WHERE id=?").get(sourceId);
+    if (!source) throw problem("Unknown watch source.", 404);
+    const code = ["http_429", "http_503", "transport_error", "source_timeout", "invalid_source_response"].includes(error?.code) ? error.code : "transport_error";
+    const httpStatus = Number.isInteger(error?.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599 ? error.httpStatus : null;
+    const failures = source.consecutive_failures + 1;
+    const cadence = parse(source.definition).pollSeconds * 1000;
+    const retryAfter = Number.isFinite(error?.retryAfterMs) && error.retryAfterMs >= 0 ? Math.min(30 * DAY, error.retryAfterMs) : 0;
+    const next = now + Math.max(cadence, Math.min(6 * 3600000, cadence * 2 ** Math.min(failures - 1, 16)), retryAfter);
+    sql(db, "UPDATE watch_sources SET checked_at=?,last_error=?,error_code=?,http_status=?,consecutive_failures=?,next_check_at=?,retry_after_until=? WHERE id=?").run(now, message, code, httpStatus, failures, next, code === "http_429" ? next : retryAfter ? now + retryAfter : null, sourceId);
+  }).immediate();
 }
 function evidenceRows(db, id, citationIds = []) {
   return sql(db, `SELECT e.*,l.association,json_extract(s.definition,'$.sampleStaleSeconds') AS sample_stale_seconds,
@@ -337,7 +381,7 @@ function evidence(row, now, internal) {
   result.data = internal ? item.data : Object.fromEntries(Object.entries(item.data).filter(([key]) => ["expiresAt", "severity", "urgency", "certainty", "event", "area", "effectiveAt", "instruction", "level", "count", "anomaly", "sampledAt", "unit", "value", "actual", "test", "capStatus", "scope", "messageType"].includes(key)));
   if (item.data.expiresAt && Date.parse(item.data.expiresAt) <= now) result.data.expired = true;
   const sampleAt = Date.parse(item.publishedAt || item.occurredAt || "");
-  if (row.sample_stale_seconds != null && (!Number.isFinite(sampleAt) || sampleAt > now + 300000 || now - sampleAt > row.sample_stale_seconds * 1000)) result.data.stale = true;
+  if (item.kind !== "report" && row.sample_stale_seconds != null && (!Number.isFinite(sampleAt) || sampleAt > now + 300000 || now - sampleAt > row.sample_stale_seconds * 1000)) result.data.stale = true;
   result.data.current = Boolean(row.is_head && item.status !== "cancelled" && !result.data.expired && !result.data.stale && item.data.actual !== false && item.data.test !== true);
   result.data.supersedes = row.supersedes;
   result.data.supersedesIds = parse(row.predecessor_ids);
@@ -345,25 +389,120 @@ function evidence(row, now, internal) {
   if (row.association === "candidate_context") result.data.association = "candidate_context";
   return result;
 }
-function getInvestigationBudget(db, dailyLimit = 12, now = Date.now()) {
-  if (!Number.isInteger(dailyLimit) || dailyLimit < 0 || dailyLimit > 24) throw problem("Invalid daily investigation limit.");
-  const start = Math.floor(now / DAY) * DAY;
-  const used = sql(db, "SELECT count(*) AS n FROM watch_jobs WHERE started_at>=? AND started_at<?").get(start, start + DAY).n;
-  return { dailyLimit, used, remaining: Math.max(0, dailyLimit - used), resetsAt: iso(start + DAY) };
+function admissionStage(db, id) {
+  return sql(db, "SELECT 1 FROM watch_incident_evidence l JOIN watch_evidence e ON e.id=l.evidence_id WHERE l.incident_id=? AND l.association='primary' AND json_extract(e.observation,'$.kind')!='report' LIMIT 1").get(id) ? "pending" : "triage_pending";
 }
-function claimInvestigation(db, owner, now = Date.now(), leaseMs = 180000, { dailyLimit = 12 } = {}) {
+function baselineAttention(db, id) {
+  return sql(db, "SELECT 1 FROM watch_incident_evidence l JOIN watch_evidence e ON e.id=l.evidence_id WHERE l.incident_id=? AND l.association='primary' AND json_extract(e.observation,'$.kind')='official_alert' LIMIT 1").get(id) ? "review" : "investigate";
+}
+function applyAssessment(db, id, result) {
+  const kind = result.attention === "background" ? "machine_background" : ["routine", "correction"].includes(result.resolution) ? `machine_${result.resolution}` : null;
+  sql(db, "UPDATE watch_incidents SET attention=?,status=CASE WHEN ? IS NULL THEN status ELSE 'resolved' END,resolution_kind=?,resolution_reason=? WHERE id=?").run(result.attention, kind, kind, kind ? result.summary : null, id);
+}
+function getInvestigationBudget(db, dailyBudgetNano = DEFAULT_DAILY_BUDGET_NANO, now = Date.now()) {
+  if (!Number.isSafeInteger(dailyBudgetNano) || dailyBudgetNano < 0 || dailyBudgetNano > DEFAULT_DAILY_BUDGET_NANO) throw problem("Invalid daily watch budget.");
+  const start = Math.floor(now / DAY) * DAY;
+  const rows = sql(db, "SELECT 'investigation' AS kind,status,result FROM watch_jobs WHERE started_at>=? AND started_at<? UNION ALL SELECT 'triage' AS kind,status,result FROM watch_triage_batches WHERE started_at>=? AND started_at<?").all(start, start + DAY, start, start + DAY);
+  let usedNano = 0;
+  let reservedNano = 0;
+  for (const row of rows) {
+    const charge = chargeNano(row.kind, row.result ? parse(row.result) : null, { complete: row.status === "completed" });
+    if (row.status === "running") reservedNano += charge;
+    else usedNano += charge;
+  }
+  return { limitNano: dailyBudgetNano, usedNano, reservedNano, remainingNano: Math.max(0, dailyBudgetNano - usedNano - reservedNano), resetsAt: iso(start + DAY) };
+}
+function settleTriageItems(db, batch, now, decisions = null) {
+  for (const item of parse(batch.items)) {
+    const row = sql(db, "SELECT * FROM watch_incidents WHERE id=? AND owner=? AND investigation_status='triage_running'").get(item.id, batch.owner);
+    if (!row) continue;
+    const current = row.generation === item.generation;
+    const decision = current ? decisions?.get(item.id) : null;
+    const stage = !current ? admissionStage(db, row.id) : decision ? (decision.disposition === "background" ? "completed" : "pending") : row.attempts < MAX_ATTEMPTS ? "triage_pending" : "failed";
+    sql(db, "UPDATE watch_incidents SET investigation_status=?,owner=NULL,lease_until=NULL,attempts=?,next_attempt_at=?,last_error=?,updated_at=? WHERE id=?").run(stage, decision ? 0 : row.attempts, decision || !current ? now : now + Math.min(3600000, 60000 * 2 ** row.attempts), decisions || !current ? null : "Triage did not complete; retry retained.", now, row.id);
+    if (decision && row.review_generation !== row.generation) {
+      sql(db, "UPDATE watch_incidents SET triage_result=?,attention=?,status=?,resolution_kind=?,resolution_reason=? WHERE id=?").run(JSON.stringify(decision), decision.disposition, decision.disposition === "background" ? "resolved" : "open", decision.disposition === "background" ? "machine_background" : null, decision.disposition === "background" ? decision.reason : null, row.id);
+    }
+  }
+}
+function claimTriage(db, owner, now = Date.now(), leaseMs = 60000, { dailyBudgetNano = DEFAULT_DAILY_BUDGET_NANO } = {}) {
+  text(owner, "owner", 200);
+  if (!Number.isFinite(leaseMs) || leaseMs < 1000 || leaseMs > 3600000) throw problem("Invalid triage lease.");
+  return db.transaction(() => {
+    for (const batch of sql(db, "SELECT * FROM watch_triage_batches WHERE status='running' AND lease_until<=?").all(now)) {
+      sql(db, "UPDATE watch_triage_batches SET status='expired',finished_at=?,error='Worker lease expired.' WHERE id=?").run(now, batch.id);
+      settleTriageItems(db, batch, now);
+    }
+    const urgent = sql(db, "SELECT 1 FROM watch_incidents WHERE status='open' AND investigation_status='pending' AND attention IN ('urgent','review') AND attempts<? LIMIT 1").get(MAX_ATTEMPTS);
+    if (urgent && sql(db, "SELECT 1 FROM watch_incidents WHERE status='open' AND investigation_status='pending' AND attention IN ('urgent','review') AND next_attempt_at<=? AND attempts<? LIMIT 1").get(now, MAX_ATTEMPTS)) return null;
+    const required = reservationNano("triage") + (urgent ? reservationNano("investigation") : 0);
+    if (getInvestigationBudget(db, dailyBudgetNano, now).remainingNano < required) return null;
+    const rows = sql(db, "SELECT * FROM watch_incidents WHERE status='open' AND investigation_status='triage_pending' AND next_attempt_at<=? AND attempts<? ORDER BY CASE attention WHEN 'urgent' THEN 0 WHEN 'review' THEN 1 ELSE 2 END,first_at,id LIMIT 16").all(now, MAX_ATTEMPTS);
+    if (!rows.length) return null;
+    const id = randomUUID();
+    const items = rows.map((row) => ({ id: row.id, generation: row.generation, title: row.title, region: row.region, observations: evidenceRows(db, row.id).map((item) => evidence(item, now, true)) }));
+    const claimed = items.map((item) => ({ id: item.id, generation: item.generation, evidenceIds: item.observations.map((entry) => entry.id) }));
+    sql(db, "INSERT INTO watch_triage_batches(id,owner,started_at,lease_until,status,items) VALUES(?,?,?,?,'running',?)").run(id, owner, now, now + leaseMs, JSON.stringify(claimed));
+    for (const row of rows) sql(db, "UPDATE watch_incidents SET investigation_status='triage_running',owner=?,lease_until=?,claimed_generation=generation,attempts=attempts+1,updated_at=? WHERE id=?").run(owner, now + leaseMs, now, row.id);
+    return { id, items };
+  }).immediate();
+}
+function ownedTriage(db, id, owner, now) {
+  const batch = sql(db, "SELECT * FROM watch_triage_batches WHERE id=? AND owner=? AND status='running' AND lease_until>?").get(id, owner, now);
+  if (!batch) throw problem("Triage lease is not owned or has expired.", 409);
+  return batch;
+}
+function completeTriage(db, batchId, owner, result, now = Date.now()) {
+  db.transaction(() => {
+    const batch = ownedTriage(db, batchId, owner, now);
+    const items = new Map(parse(batch.items).map((item) => [item.id, new Set(item.evidenceIds)]));
+    object(result, "triage result");
+    text(result.model, "model", 500);
+    object(result.usage, "usage");
+    if (!Array.isArray(result.decisions) || result.decisions.length !== items.size) throw problem("Invalid triage coverage.");
+    const decisions = new Map();
+    for (const decision of result.decisions) {
+      const allowed = items.get(decision.id);
+      if (!allowed || decisions.has(decision.id) || !["background", "investigate", "review"].includes(decision.disposition)) throw problem("Invalid triage decision.");
+      text(decision.reason, "triage reason", 4000);
+      if (!Array.isArray(decision.evidenceIds) || !decision.evidenceIds.length || decision.evidenceIds.some((id) => !allowed.has(id))) throw problem("Invalid triage citation.");
+      decisions.set(decision.id, decision);
+    }
+    sql(db, "UPDATE watch_triage_batches SET status='completed',finished_at=?,result=? WHERE id=?").run(now, JSON.stringify(result), batchId);
+    settleTriageItems(db, batch, now, decisions);
+  }).immediate();
+}
+function failTriage(db, batchId, owner, error, now = Date.now(), audit = null) {
+  const message = text(error instanceof Error ? error.message : error, "triage error", 20000).slice(0, 2000);
+  const partial = failureAudit(audit, ["triage"]);
+  db.transaction(() => {
+    const batch = ownedTriage(db, batchId, owner, now);
+    sql(db, "UPDATE watch_triage_batches SET status='failed',finished_at=?,error=?,result=? WHERE id=?").run(now, message, partial, batchId);
+    settleTriageItems(db, batch, now);
+  }).immediate();
+}
+function claimInvestigation(db, owner, now = Date.now(), leaseMs = 180000, { dailyBudgetNano = DEFAULT_DAILY_BUDGET_NANO } = {}) {
   text(owner, "owner", 200);
   if (!Number.isFinite(leaseMs) || leaseMs < 1000 || leaseMs > 3600000) throw problem("Invalid investigation lease.");
   return db.transaction(() => {
     for (const row of sql(db, "SELECT * FROM watch_incidents WHERE investigation_status='running' AND lease_until<=? LIMIT 100").all(now)) {
       sql(db, "UPDATE watch_jobs SET status='expired',finished_at=?,error='Worker lease expired.' WHERE incident_id=? AND owner=? AND status='running'").run(now, row.id, row.owner);
-      const status = row.attempts >= MAX_ATTEMPTS ? "failed" : "pending";
+      const newer = row.generation !== row.claimed_generation;
+      const status = newer ? admissionStage(db, row.id) : row.attempts >= MAX_ATTEMPTS ? "failed" : "pending";
       sql(db, "UPDATE watch_incidents SET investigation_status=?,owner=NULL,lease_until=NULL,last_error='Worker lease expired.',updated_at=? WHERE id=?").run(status, now, row.id);
     }
-    if (getInvestigationBudget(db, dailyLimit, now).remaining === 0) return null;
-    const row = sql(db, "SELECT * FROM watch_incidents WHERE status='open' AND investigation_status='pending' AND next_attempt_at<=? AND attempts<? ORDER BY CASE attention WHEN 'urgent' THEN 0 WHEN 'review' THEN 1 ELSE 2 END,last_at DESC LIMIT 1").get(now, MAX_ATTEMPTS);
+    // Legacy in-flight report attempts can outlive migration; do not retry them past admission.
+    for (const row of sql(db, "SELECT id FROM watch_incidents WHERE status='open' AND investigation_status IN ('pending','failed') AND triage_result IS NULL AND review_generation IS NULL AND NOT EXISTS(SELECT 1 FROM watch_jobs WHERE incident_id=watch_incidents.id AND status='completed') AND NOT EXISTS(SELECT 1 FROM watch_triage_batches b,json_each(b.items) item WHERE json_extract(item.value,'$.id')=watch_incidents.id)").all()) {
+      if (admissionStage(db, row.id) === "triage_pending") sql(db, "UPDATE watch_incidents SET investigation_status='triage_pending',attempts=0,next_attempt_at=0 WHERE id=?").run(row.id);
+    }
+    if (getInvestigationBudget(db, dailyBudgetNano, now).remainingNano < reservationNano("investigation")) return null;
+    const row = sql(db, "SELECT * FROM watch_incidents WHERE status='open' AND investigation_status='pending' AND next_attempt_at<=? AND attempts<? ORDER BY CASE attention WHEN 'urgent' THEN 0 WHEN 'review' THEN 1 ELSE 2 END,first_at,id LIMIT 1").get(now, MAX_ATTEMPTS);
     if (!row) return null;
-    attachCandidateContext(db, row, now);
+    if (attachCandidateContext(db, row, now)) {
+      // Publication approves an evidence set, not future context attached by a worker.
+      sql(db, "UPDATE watch_incidents SET generation=generation+1,triage_result=NULL,updated_at=? WHERE id=?").run(now, row.id);
+      row.generation += 1;
+    }
     const prior = sql(db, "SELECT result FROM watch_jobs WHERE incident_id=? AND status='completed' ORDER BY started_at DESC,id DESC LIMIT 1").get(row.id);
     const previousFindings = prior ? parse(prior.result).findings : [];
     const observations = evidenceRows(db, row.id, citedIds(previousFindings)).map((item) => evidence(item, now, true));
@@ -394,14 +533,15 @@ function completeInvestigation(db, incidentId, owner, result, now = Date.now()) 
     }
     if (citedIds(clean.findings).length > 240) throw problem("Too many investigation citations.");
     sql(db, "UPDATE watch_jobs SET status='completed',finished_at=?,result=? WHERE id=?").run(now, JSON.stringify(clean), job.id);
-    sql(db, "UPDATE watch_incidents SET investigation_status=?,owner=NULL,lease_until=NULL,last_error=NULL,updated_at=? WHERE id=?").run(incident.generation === job.generation ? "completed" : "pending", now, incidentId);
+    const current = incident.generation === job.generation;
+    sql(db, "UPDATE watch_incidents SET investigation_status=?,owner=NULL,lease_until=NULL,last_error=NULL,updated_at=? WHERE id=?").run(current ? "completed" : admissionStage(db, incidentId), now, incidentId);
+    if (current && incident.review_generation !== incident.generation) applyAssessment(db, incidentId, clean);
   }).immediate();
 }
 function citedIds(findings) {
   return [...new Set((findings || []).flatMap((finding) => finding.evidenceIds))];
 }
-function failInvestigation(db, incidentId, owner, error, now = Date.now(), audit = null) {
-  const message = text(error, "investigation error", 20000).slice(0, 2000);
+function failureAudit(audit, roles) {
   let partial = null;
   if (audit != null) {
     const clean = object(audit, "failed investigation audit");
@@ -412,12 +552,15 @@ function failInvestigation(db, incidentId, owner, error, now = Date.now(), audit
       if (typeof value === "number") return Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
       return depth < 5 && value && typeof value === "object" && !Array.isArray(value) && Object.entries(value).every(([key, child]) => /^[a-z_]{1,64}$/i.test(key) && validNumbers(child, depth + 1));
     };
+    const validCoverage = roles.includes("triage")
+      ? usage.coverage && Object.keys(usage.coverage).length === 1 && Array.isArray(usage.coverage.items) && usage.coverage.items.length <= 16 && usage.coverage.items.every((item) => item && typeof item.id === "string" && item.id.length <= 200 && validNumbers(Object.fromEntries(Object.entries(item).filter(([key]) => key !== "id"))))
+      : validNumbers(usage.coverage);
     if (usage.provider == null) {
       if (!validNumbers(usage) || JSON.stringify(usage).length > 8000) throw problem("Invalid failed investigation usage.");
     } else {
-      if (!["scry", "openrouter"].includes(usage.provider) || usage.complete !== false || !validNumbers(usage.coverage) || !Array.isArray(usage.calls) || usage.calls.length > 3 || JSON.stringify(usage).length > 30000) throw problem("Invalid failed investigation usage.");
+      if (!["scry", "openrouter"].includes(usage.provider) || usage.complete !== false || !validCoverage || !Array.isArray(usage.calls) || usage.calls.length > roles.length || JSON.stringify(usage).length > 30000) throw problem("Invalid failed investigation usage.");
       for (const call of usage.calls) {
-        if (!call || !["specialist", "skeptic", "synthesis"].includes(call.role)) throw problem("Invalid failed investigation call.");
+        if (!call || !roles.includes(call.role)) throw problem("Invalid failed investigation call.");
         text(call.model, "call model", 500);
         if (call.servedModel != null) text(call.servedModel, "served model", 500);
         if (!validNumbers(call.usage) || JSON.stringify(call.usage).length > 8000 || Object.keys(call).some((key) => !["role", "model", "servedModel", "usage"].includes(key))) throw problem("Invalid failed investigation call usage.");
@@ -426,18 +569,29 @@ function failInvestigation(db, incidentId, owner, error, now = Date.now(), audit
     }
     partial = JSON.stringify({ model, usage, incomplete: true });
   }
+  return partial;
+}
+function failInvestigation(db, incidentId, owner, error, now = Date.now(), audit = null) {
+  const message = text(error instanceof Error ? error.message : error, "investigation error", 20000).slice(0, 2000);
+  const partial = failureAudit(audit, ["specialist", "skeptic", "synthesis"]);
   db.transaction(() => {
     const { incident, job } = ownedJob(db, incidentId, owner, now);
     sql(db, "UPDATE watch_jobs SET status='failed',finished_at=?,error=?,result=? WHERE id=?").run(now, message, partial, job.id);
     const newer = incident.generation !== job.generation;
-    sql(db, "UPDATE watch_incidents SET investigation_status=?,owner=NULL,lease_until=NULL,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?").run(newer || incident.attempts < MAX_ATTEMPTS ? "pending" : "failed", message, newer ? now : now + Math.min(3600000, 60000 * 2 ** incident.attempts), now, incidentId);
+    sql(db, "UPDATE watch_incidents SET investigation_status=?,owner=NULL,lease_until=NULL,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?").run(newer ? admissionStage(db, incidentId) : incident.attempts < MAX_ATTEMPTS ? "pending" : "failed", message, newer ? now : now + Math.min(3600000, 60000 * 2 ** incident.attempts), now, incidentId);
   }).immediate();
 }
 function serializeIncident(db, row, { internal, now, detail = false }) {
   const links = sql(db, "SELECT DISTINCT e.source_id FROM watch_incident_evidence l JOIN watch_evidence e ON e.id=l.evidence_id WHERE l.incident_id=?").all(row.id);
   const count = sql(db, "SELECT count(*) AS n FROM watch_incident_evidence WHERE incident_id=?").get(row.id).n;
   const result = { id: row.id, title: row.title, region: row.region, topics: parse(row.topics), status: row.status, attention: row.attention, firstObservedAt: iso(row.first_at), lastObservedAt: iso(row.last_at), sourceIds: links.map((item) => item.source_id), evidenceCount: count, investigation: { status: row.investigation_status, lastError: internal ? row.last_error : row.last_error ? "Investigation unavailable; operator review required." : null, updatedAt: iso(row.updated_at) } };
+  result.reviewed = row.review_generation === row.generation;
+  result.publicVisible = Boolean(sql(db, "SELECT publish_evidence FROM watch_reviews WHERE incident_id=? AND generation=? ORDER BY id DESC LIMIT 1").get(row.id, row.generation)?.publish_evidence);
+  result.generation = row.generation;
+  result.resolutionKind = row.resolution_kind;
+  if (internal) result.resolutionReason = row.resolution_reason;
   if (internal) {
+    result.triage = row.triage_result ? parse(row.triage_result) : null;
     const job = row.investigation_status === "completed" ? sql(db, "SELECT result FROM watch_jobs WHERE incident_id=? AND generation=? AND status='completed' ORDER BY started_at DESC,id DESC LIMIT 1").get(row.id, row.generation) : null;
     if (job) result.assessment = parse(job.result);
     const review = sql(db, "SELECT note,reviewed_at FROM watch_reviews WHERE incident_id=? ORDER BY id DESC LIMIT 1").get(row.id);
@@ -450,10 +604,11 @@ function serializeIncident(db, row, { internal, now, detail = false }) {
   return result;
 }
 function getIncident(db, id, { internal = false, now = Date.now() } = {}) {
-  const row = sql(db, "SELECT * FROM watch_incidents WHERE id=?").get(id);
+  const row = sql(db, `SELECT * FROM watch_incidents WHERE id=? AND (? OR ${PUBLIC_VISIBLE})`).get(id, Number(internal));
   return row ? serializeIncident(db, row, { internal, now, detail: true }) : null;
 }
-function getWatchSnapshot(db, { internal = false, limit = 40, status = "all", cursor = null, now = Date.now() } = {}) {
+const PUBLIC_VISIBLE = "COALESCE((SELECT publish_evidence FROM watch_reviews WHERE incident_id=watch_incidents.id AND generation=watch_incidents.generation ORDER BY id DESC LIMIT 1),0)=1";
+function getWatchSnapshot(db, { internal = false, limit = 40, status = "all", cursor = null, now = Date.now(), dailyBudgetNano, agentConfiguration } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw problem("Invalid watch limit.");
   if (!["all", "open", "resolved"].includes(status)) throw problem("Invalid watch status.");
   let after = null;
@@ -466,42 +621,53 @@ function getWatchSnapshot(db, { internal = false, limit = 40, status = "all", cu
     const definition = parse(row.definition);
     let health = !definition.enabled ? "disabled" : row.last_error ? "degraded" : row.success_at == null ? "warming" : now - row.success_at > definition.staleSeconds * 1000 ? "stale" : "healthy";
     const metadata = row.metadata ? parse(row.metadata) : null;
-    const sampleAt = definition.sampleStaleSeconds != null && metadata?.sourceUpdatedAt == null ? sql(db, "SELECT MAX(COALESCE(json_extract(e.observation,'$.publishedAt'),json_extract(e.observation,'$.occurredAt'))) AS at FROM watch_items h JOIN watch_evidence e ON e.id=h.evidence_id WHERE h.source_id=?").get(row.id).at : null;
+    const sampled = Boolean(sql(db, "SELECT 1 FROM watch_items h JOIN watch_evidence e ON e.id=h.evidence_id WHERE h.source_id=? AND json_extract(e.observation,'$.kind')!='report' LIMIT 1").get(row.id));
+    const sampleAt = sampled && definition.sampleStaleSeconds != null && metadata?.sourceUpdatedAt == null ? sql(db, "SELECT MAX(COALESCE(json_extract(e.observation,'$.publishedAt'),json_extract(e.observation,'$.occurredAt'))) AS at FROM watch_items h JOIN watch_evidence e ON e.id=h.evidence_id WHERE h.source_id=? AND json_extract(e.observation,'$.kind')!='report'").get(row.id).at : null;
     const upstreamAt = Date.parse(metadata?.sourceUpdatedAt ?? sampleAt ?? "");
-    if (health === "healthy" && definition.sampleStaleSeconds != null && (upstreamAt == null || !Number.isFinite(upstreamAt) || upstreamAt > now + 300000 || now - upstreamAt > definition.sampleStaleSeconds * 1000)) health = "stale";
+    if (health === "healthy" && (sampled || metadata?.sourceUpdatedAt != null) && definition.sampleStaleSeconds != null && (!Number.isFinite(upstreamAt) || upstreamAt > now + 300000 || now - upstreamAt > definition.sampleStaleSeconds * 1000)) health = "stale";
     if (health === "healthy" && metadata?.sourceGap === true) health = "degraded";
-    return { ...definition, health, lastCheckedAt: iso(row.checked_at), lastSuccessAt: iso(row.success_at), lastObservedAt: iso(row.observed_at), lastError: internal ? row.last_error : row.last_error ? "Source check failed; previous evidence retained." : null, observationCount: row.observation_count, baselineSince: iso(row.baseline_at), metadata };
+    return { ...definition, health, lastCheckedAt: iso(row.checked_at), lastSuccessAt: iso(row.success_at), lastObservedAt: iso(row.observed_at), lastError: internal ? row.last_error : row.last_error ? "Source check failed; previous evidence retained." : null, observationCount: row.observation_count, baselineSince: iso(row.baseline_at), metadata, recovery: { code: row.error_code, httpStatus: row.http_status, consecutiveFailures: row.consecutive_failures, nextCheckAt: iso(row.next_check_at) } };
   });
   const run = sql(db, "SELECT * FROM watch_run WHERE id=1").get();
   const handover = run.summary ? parse(run.summary) : {};
-  const config = handover.agent || {};
+  const config = agentConfiguration || handover.agent || {};
   const agent = { configured: config.configured === true, model: typeof config.model === "string" ? config.model : null, reason: typeof config.reason === "string" ? config.reason : handover.agent ? null : "No worker agent configuration has been recorded." };
-  const rows = sql(db, `SELECT * FROM watch_incidents WHERE (?='all' OR status=?)
+  const rows = sql(db, `SELECT * FROM watch_incidents WHERE (?='all' OR status=?) AND (? OR ${PUBLIC_VISIBLE})
     AND (? IS NULL OR status>? OR (status=? AND (last_at<? OR (last_at=? AND id>?))))
-    ORDER BY status,last_at DESC,id LIMIT ?`).all(status, status, after?.[2] ?? null, after?.[2] ?? null, after?.[2] ?? null, after?.[3] ?? null, after?.[3] ?? null, after?.[4] ?? null, limit + 1);
+    ORDER BY status,last_at DESC,id LIMIT ?`).all(status, status, Number(internal), after?.[2] ?? null, after?.[2] ?? null, after?.[2] ?? null, after?.[3] ?? null, after?.[3] ?? null, after?.[4] ?? null, limit + 1);
   const hasMore = rows.length > limit;
   if (hasMore) rows.pop();
   const last = rows.at(-1);
   const page = { nextCursor: hasMore ? Buffer.from(JSON.stringify([1, status, last.status, last.last_at, last.id])).toString("base64url") : null, status };
   const incidents = rows.map((row) => serializeIncident(db, row, { internal, now }));
-  const pending = sql(db, "SELECT count(*) AS n FROM watch_incidents WHERE status='open' AND investigation_status IN ('pending','running','failed')").get().n;
-  const openIncidents = sql(db, "SELECT count(*) AS n FROM watch_incidents WHERE status='open'").get().n;
+  const pending = sql(db, `SELECT count(*) AS n FROM watch_incidents WHERE status='open' AND investigation_status IN ('triage_pending','triage_running','pending','running','failed') AND (? OR ${PUBLIC_VISIBLE})`).get(Number(internal)).n;
+  const openIncidents = sql(db, `SELECT count(*) AS n FROM watch_incidents WHERE status='open' AND (? OR ${PUBLIC_VISIBLE})`).get(Number(internal)).n;
   const coverageGaps = sources.filter((source) => source.health !== "healthy").map((source) => `${source.name}: ${source.health}${source.enabled ? "" : ` (${source.accessStatus})`}`);
   const openQuestions = internal ? sql(db, "SELECT j.result FROM watch_jobs j JOIN watch_incidents i ON i.id=j.incident_id WHERE i.status='open' AND i.investigation_status='completed' AND j.generation=i.generation AND j.status='completed' AND j.id=(SELECT j2.id FROM watch_jobs j2 WHERE j2.incident_id=i.id AND j2.generation=i.generation AND j2.status='completed' ORDER BY j2.started_at DESC,j2.id DESC LIMIT 1) ORDER BY j.started_at DESC LIMIT 20").all().map((row) => parse(row.result).nextQuestion).filter(Boolean) : [];
-  const budget = getInvestigationBudget(db, Number.isInteger(handover.budget?.dailyLimit) ? handover.budget.dailyLimit : 12, now);
-  if (budget.remaining === 0) coverageGaps.push(`Investigation daily cap reached (${budget.used}/${budget.dailyLimit}); resumes ${budget.resetsAt}.`);
+  const budget = getInvestigationBudget(db, dailyBudgetNano ?? (Number.isSafeInteger(handover.budget?.limitNano) ? handover.budget.limitNano : DEFAULT_DAILY_BUDGET_NANO), now);
+  const work = sql(db, "SELECT COALESCE(sum(investigation_status IN ('triage_pending','triage_running')),0) AS pendingTriage,COALESCE(sum(investigation_status IN ('pending','running')),0) AS pendingInvestigation,COALESCE(sum(investigation_status='failed'),0) AS failed,min(CASE WHEN investigation_status IN ('triage_pending','pending','triage_running','running') THEN first_at END) AS oldest,min(CASE WHEN investigation_status IN ('triage_pending','pending') THEN next_attempt_at END) AS next,COALESCE(sum(investigation_status IN ('triage_running','running') AND lease_until>?),0) AS running FROM watch_incidents WHERE status='open'").get(now);
+  const progress = sql(db, "SELECT max(finished_at) AS at FROM (SELECT finished_at FROM watch_jobs WHERE status='completed' UNION ALL SELECT finished_at FROM watch_triage_batches WHERE status='completed')").get().at;
+  const urgentPending = sql(db, "SELECT 1 FROM watch_incidents WHERE status='open' AND investigation_status='pending' AND attention IN ('urgent','review') AND attempts<? LIMIT 1").get(MAX_ATTEMPTS);
+  const needed = work.pendingTriage && !urgentPending ? reservationNano("triage") : reservationNano("investigation");
+  const waiting = work.pendingTriage + work.pendingInvestigation;
+  const state = work.running ? "running" : !agent.configured ? "unavailable" : waiting && budget.remainingNano < needed ? "paused_budget" : waiting || work.failed ? "backlog" : "idle";
+  const processing = { state, pendingTriage: work.pendingTriage, pendingInvestigation: work.pendingInvestigation, failed: work.failed, oldestPendingAt: iso(work.oldest), lastCompletedAt: iso(progress), nextEligibleAt: state === "paused_budget" ? budget.resetsAt : work.next == null ? null : iso(Math.max(now, work.next)) };
+  if (state === "paused_budget") coverageGaps.push(`Watch inference budget exhausted; resumes ${budget.resetsAt}.`);
   if (!agent.configured) coverageGaps.push("Investigation provider is not configured; evidence collection does not establish safety.");
   if (internal && Array.isArray(handover.coverageGaps)) coverageGaps.push(...handover.coverageGaps.filter((gap) => typeof gap === "string").slice(0, 50));
-  return { generatedAt: iso(now), mode: "machine_watch", page, reviewPolicy: "Investigation priority is not a threat level. Machine drafts require human review; missing coverage is not evidence of safety.", run: { lastStartedAt: iso(run.started_at), lastFinishedAt: iso(run.finished_at), lastError: internal ? run.last_error : run.last_error ? "The last watch run reported an error." : null, running: Boolean(run.owner && run.lease_until > now) }, agent, counts: { sources: sources.length, enabled: sources.filter((source) => source.enabled).length, healthy: sources.filter((source) => source.health === "healthy").length, degraded: sources.filter((source) => source.enabled && source.health !== "healthy").length, pending, openIncidents }, sources, incidents, handover: { generatedAt: iso(run.finished_at), summary: internal && typeof handover.summary === "string" ? handover.summary : sources.length ? `${openIncidents} open factual incident threads; ${pending} investigations pending, running, or failed. Coverage and incident priority do not establish safety or danger.` : "Watch source registry has not been initialized.", openQuestions, coverageGaps: [...new Set(coverageGaps)] } };
+  return { generatedAt: iso(now), mode: "machine_watch", page, budget, processing, reviewPolicy: "Investigation priority is not a threat level. Machine drafts require human review; missing coverage is not evidence of safety.", run: { lastStartedAt: iso(run.started_at), lastFinishedAt: iso(run.finished_at), lastError: internal ? run.last_error : run.last_error ? "The last watch run reported an error." : null, running: Boolean(run.owner && run.lease_until > now) }, agent, counts: { sources: sources.length, enabled: sources.filter((source) => source.enabled).length, healthy: sources.filter((source) => source.health === "healthy").length, degraded: sources.filter((source) => source.enabled && source.health !== "healthy").length, pending, openIncidents }, sources, incidents, handover: { generatedAt: iso(run.finished_at), summary: internal && typeof handover.summary === "string" ? handover.summary : sources.length ? `${openIncidents} publicly reviewed open threads. Collection and machine work do not establish safety or danger.` : "Watch source registry has not been initialized.", openQuestions, coverageGaps: [...new Set(coverageGaps)] } };
 }
-function reviewIncident(db, id, { status, note }, now = Date.now()) {
+function reviewIncident(db, id, { status, note, publishEvidence = false, expectedGeneration }, now = Date.now()) {
   if (!["open", "resolved"].includes(status)) throw problem("Review status must be open or resolved.");
+  if (typeof publishEvidence !== "boolean") throw problem("Invalid evidence publication choice.");
   const cleanNote = text(note, "review note", 4000);
   return db.transaction(() => {
     const row = sql(db, "SELECT * FROM watch_incidents WHERE id=?").get(id);
     if (!row) throw problem("Unknown watch incident.", 404);
-    sql(db, "INSERT INTO watch_reviews(incident_id,status,note,reviewed_at) VALUES(?,?,?,?)").run(id, status, cleanNote, now);
-    sql(db, "UPDATE watch_incidents SET status=?,investigation_status=CASE WHEN ?='open' AND investigation_status!='running' THEN 'pending' ELSE investigation_status END,attempts=CASE WHEN ?='open' THEN 0 ELSE attempts END,next_attempt_at=0,updated_at=? WHERE id=?").run(status, status, status, now, id);
+    if ((expectedGeneration != null && expectedGeneration !== row.generation) || (publishEvidence && expectedGeneration !== row.generation)) throw problem("Incident evidence changed; review the current generation before publishing.", 409);
+    sql(db, "INSERT INTO watch_reviews(incident_id,status,note,reviewed_at,generation,publish_evidence) VALUES(?,?,?,?,?,?)").run(id, status, cleanNote, now, row.generation, Number(publishEvidence));
+    if (row.investigation_status === "triage_running") sql(db, "UPDATE watch_incidents SET owner=NULL,lease_until=NULL WHERE id=?").run(id);
+    sql(db, "UPDATE watch_incidents SET status=?,review_generation=generation,resolution_kind=?,resolution_reason=?,investigation_status=CASE WHEN ?='open' AND investigation_status!='running' THEN 'pending' WHEN ?='resolved' AND investigation_status='triage_running' THEN 'completed' ELSE investigation_status END,attempts=CASE WHEN ?='open' THEN 0 ELSE attempts END,next_attempt_at=0,updated_at=? WHERE id=?").run(status, status === "resolved" ? "human_review" : null, status === "resolved" ? cleanNote : null, status, status, status, now, id);
     return getIncident(db, id, { internal: true, now });
   }).immediate();
 }
@@ -513,4 +679,4 @@ function pruneWatch(db, now = Date.now()) {
     return { runs, evidence: evidenceCount };
   }).immediate();
 }
-module.exports = { openWatchDb, syncSources, listDueSources, claimRun, finishRun, recordSourceResult, recordSourceFailure, claimInvestigation, completeInvestigation, failInvestigation, getWatchSnapshot, getIncident, reviewIncident, pruneWatch, getInvestigationBudget };
+module.exports = { openWatchDb, syncSources, listDueSources, claimRun, finishRun, recordSourceResult, recordSourceFailure, claimInvestigation, completeInvestigation, failInvestigation, claimTriage, completeTriage, failTriage, getWatchSnapshot, getIncident, reviewIncident, pruneWatch, getInvestigationBudget };

@@ -79,8 +79,12 @@ const SOURCE_DEFINITIONS = [
   candidate('nga-maritime', 'NGA maritime warnings', 'hazard_declarations', 'maritime_notices', 'national-navarea-coordinators', 'https://msi.nga.mil/NavWarnings', 'R26: Public JavaScript app identified; stable automated feed/cancellation contract unresolved. May repeat national NAVAREA notices.'),
 ];
 
+function sourceError(code, message, details = {}) {
+  return Object.assign(new Error(message), { code, ...details });
+}
+
 function requireShape(condition, message) {
-  if (!condition) throw new Error(`Source data shape: ${message}`);
+  if (!condition) throw sourceError('invalid_source_response', `Source data shape: ${message}`);
 }
 function text(value, limit = 6000) {
   if (value && typeof value === 'object') value = value['#text'];
@@ -128,14 +132,27 @@ async function fetchBody(url, options) {
     const { Agent } = require('undici');
     sourceDispatcher = new Agent({ connectTimeout: SOURCE_TIMEOUT_MS });
   }
-  const response = await (options.fetchImpl || fetch)(url, { signal, dispatcher: options.fetchImpl ? undefined : sourceDispatcher, redirect: 'error', headers: { 'User-Agent': USER_AGENT, Accept: 'application/geo+json, application/json, application/xml, application/rss+xml, text/xml;q=0.9' } });
+  let response;
+  try {
+    response = await (options.fetchImpl || fetch)(url, { signal, dispatcher: options.fetchImpl ? undefined : sourceDispatcher, redirect: 'error', headers: { 'User-Agent': USER_AGENT, Accept: 'application/geo+json, application/json, application/xml, application/rss+xml, text/xml;q=0.9' } });
+  } catch (error) {
+    if (signal.aborted) throw sourceError('source_timeout', 'Source collection was interrupted or exceeded its deadline.');
+    throw sourceError('transport_error', `Source transport failed${['UND_ERR_CONNECT_TIMEOUT', 'ECONNRESET', 'ENOTFOUND', 'ECONNREFUSED'].includes(error?.cause?.code) ? ` (${error.cause.code})` : ''}.`);
+  }
   if (!response.ok) {
+    const retryAfter = response.headers.get('retry-after');
+    const now = options.now ?? Date.now();
+    const retryAfterMs = retryAfter == null ? null : /^\d+$/.test(retryAfter.trim())
+      ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - now;
     await response.body?.cancel();
-    throw new Error(`Source HTTP ${response.status}${[401, 403].includes(response.status) ? ' (access gated)' : ''}${response.status === 429 ? ' (rate limited; no retry claimed)' : ''}`);
+    throw sourceError(`http_${response.status}`, `Source HTTP ${response.status}${[401, 403].includes(response.status) ? ' (access gated)' : ''}${response.status === 429 ? ' (rate limited)' : ''}`, {
+      httpStatus: response.status,
+      ...(Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 0 ? { retryAfterMs } : {}),
+    });
   }
   if (Number(response.headers.get('content-length')) > MAX_BYTES) {
     await response.body?.cancel();
-    throw new Error('Source response exceeds 8 MiB cap');
+    throw sourceError('invalid_source_response', 'Source response exceeds 8 MiB cap');
   }
   requireShape(response.body && typeof response.body.getReader === 'function', 'missing readable response body');
   const reader = response.body.getReader();
@@ -147,14 +164,14 @@ async function fetchBody(url, options) {
       const { value, done } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
-      if (bytes > MAX_BYTES) throw new Error('Source response exceeds 8 MiB cap');
+      if (bytes > MAX_BYTES) throw sourceError('invalid_source_response', 'Source response exceeds 8 MiB cap');
       chunks.push(value);
     }
   } finally { await reader.cancel(); reader.releaseLock(); }
   return { body: Buffer.concat(chunks, bytes).toString('utf8'), bytes };
 }
 function parseJson(body) {
-  try { return JSON.parse(body); } catch { throw new Error('Source response is not valid JSON'); }
+  try { return JSON.parse(body); } catch { throw sourceError('invalid_source_response', 'Source response is not valid JSON'); }
 }
 function parseXml(body) {
   // Never expand custom entities or accept a DTD, including internal subsets.

@@ -116,32 +116,56 @@ reach every linked incident without turning candidate context into corroboration
 Source disappearance, expiry, or a normal environmental measurement does not
 establish an all-clear.
 
+Failed sources retain structured failure state and bounded exponential backoff.
+HTTP `Retry-After` is honored, including during forced passes. Successful recovery
+clears that state. Poll cadence starts at the attempted check, not its completion;
+stream progress and observation age remain distinct from collection success.
+
 Investigations use `POST https://api.scry.io/v1/scry/openrouter` with the existing
 funded Scry key. The production unit fixes `google/gemini-2.5-flash-lite` and a
-default limit of twelve attempts per UTC day. A failed attempt consumes the
-same daily slot. At most one attempt normally runs per pass: independent
-specialist and skeptical calls, followed by synthesis. Per attempt: 24 evidence
-records, 7,000 evidence bytes, three requests of at most 24 KiB, 1,600 output
-tokens per request, 45 seconds per call, and 100 seconds total. There are no
-model tools, arbitrary research URLs, automatic credential changes, or unbounded
-agent recursion. Responses must have the configured served model, a complete
-finish reason, bounded structured fields, and citations to supplied evidence.
-Provider usage is recorded, including returned partial usage on failure.
+$0.10 provider-usage allowance per UTC day. The ledger reserves worst-case cost
+before a claim, reconciles reported usage, and retains reservations for unknown
+usage after failures. Pricing is 100/400 nanodollars per input/output token;
+other models are unavailable until explicitly supported and priced.
+
+Each pass can screen up to sixteen report-only leads in one call, then run one
+full investigation. Explicit fiction, art, history, games, or opinion without
+a present-event claim can close machine work; uncertainty cannot. Official
+notices bypass screening, and review/urgent work keeps priority. Within priority,
+full investigations take the oldest waiting lead first. Full work consists of
+independent specialist and skeptical calls followed by synthesis. Bounds remain
+24 evidence records, 7,000 full-investigation evidence bytes, at most 24,000
+request bytes, 1,600 output tokens per call, 45 seconds per call, and 100 seconds
+total. Triage shares at most 24 evidence records and 18,500 evidence bytes across
+the batch, retaining attribution and unabridged validity controls.
+
+There are no model tools, arbitrary research URLs, automatic credential changes,
+or unbounded recursion. Responses must have the configured served model, complete
+finish reason, bounded fields, and exact own-item citations. Direct OpenRouter
+uses strict JSON Schema; Scry uses validated JSON because that endpoint does not
+offer the schema control. Invalid output fails visibly, never becomes a finding.
+Returned partial usage is retained. Completed assessments update work priority;
+machine-background/routine/correction outcomes close work, not the world.
 
 Keep `SCRY_API_KEY` in root-owned mode-0600 `/etc/apocalypse-ews-watch.env`;
 systemd reads it before dropping privileges to `xyra`. Do not copy it into the
-web-server environment, repository, browser, or logs. `EWS_WATCH_DAILY_INVESTIGATIONS`
-can lower the daily attempt limit; it is a work cap, not a currency-denominated
-billing cap. Missing funding, credentials, invalid responses, or timeouts leave
-investigations visibly unavailable/failed; collection continues. A direct
+web-server environment, repository, browser, or logs. `EWS_WATCH_DAILY_BUDGET_USD`
+can lower the $0.10 daily ceiling. This covers the fixed model's provider usage,
+not a promise about third-party billing or unrelated account activity. Missing
+funding, credentials, invalid responses, or timeouts leave investigations
+visibly unavailable/failed; collection continues. A direct
 `OPENROUTER_API_KEY` is supported only when explicitly configured without Scry,
 not as a runtime fallback.
 
-Public APIs expose source facts, queue state, and nonstrategic handovers, never
-machine assessments or operator notes. Authentication is required to inspect
-drafts, record a human review, or resolve/reopen a thread. Drafts cease to be
-current when underlying evidence changes. Resolving a thread closes review work;
-it is not a public safety declaration. There is no publish-to-subscribers action.
+Public APIs expose coverage, aggregate processing progress, and only source
+evidence deliberately published by an operator, never raw queued reports,
+machine assessments, or review notes. Private review does not publish evidence.
+Publishing requires approval of the exact current evidence generation; revisions
+and newly attached candidate context invalidate that approval. Public filtering
+happens before counts and pagination. Authentication is required to inspect
+drafts, review, publish evidence, or resolve/reopen a thread. Resolving closes
+review work; neither review nor publication establishes the claim or safety.
+There is no publish-to-subscribers action.
 The incident API accepts `status=open|resolved|all`, `limit`, and the opaque
 `cursor` returned as `page.nextCursor`; the UI follows this continuation.
 
@@ -160,6 +184,27 @@ case replay, broader source discovery/enrollment, a learned routine calendar,
 validated official-warning relay, and public strategic assessment remain open
 work. The current source registry and visible coverage gaps are the operational
 truth, not the wider planning roster.
+
+### Recovery verification — 5 September 2026
+
+The live audit found 82 open threads, 73 waiting, an exhausted twelve-attempt
+cap, unapplied completed priorities, and no publication boundary for raw leads.
+Fourteen temporary direct scenarios now pass, including the 234-record production
+copy's migration, conservative budget settlement, expired legacy leases,
+official-warning priority restoration, source recovery, and generation-safe
+triage/publication. No permanent tests were added.
+
+A real sixteen-report Scry batch and subsequent three-role investigation
+completed in four calls for $0.0014278 of provider usage. A separate real-source
+pair routed explicit television fiction to background and retained an unverified
+current-event claim. The actual worker with a zero allowance made no inference
+claims and preserved its 74 waiting leads.
+
+Desktop and 390-pixel browser exercises verified private review, explicit
+source-only publication without notes/drafts, and visible processing pause with
+resumption time; neither layout overflowed. Two independent read-only reviewers
+cleared the repaired lifecycle and inference/publication boundaries. GDELT's
+upstream 429 remains a coverage gap with bounded recovery, not a healthy feed.
 
 ### Implementation evidence — 5 September 2026
 

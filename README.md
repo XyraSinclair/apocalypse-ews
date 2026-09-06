@@ -68,10 +68,11 @@ require an authorized live global source and separately validated calibration.
 Node 22 or newer is required for the watch's built-in WebSocket client.
 Automatic investigations use an existing funded `SCRY_API_KEY`; keep it in a
 private environment file and set `EWS_WATCH_ENV_PATH` when running locally.
-The default model is `google/gemini-2.5-flash-lite`, with at most twelve
-investigation attempts per UTC day and three calls per attempt. Missing inference
-credentials do not stop source collection. Production uses the separate
-`/etc/apocalypse-ews-watch.env`, read only by the watch service.
+The supported model is `google/gemini-2.5-flash-lite`, with a $0.10 provider-usage
+allowance per UTC day. Reports enter bounded batch screening before full,
+three-role investigation; official notices bypass that admission stage.
+Missing inference credentials do not stop source collection. Production uses
+the separate `/etc/apocalypse-ews-watch.env`, read only by the watch service.
 
 The registry contains 39 definitions, including ten country-specific travel
 advisories: 21 enabled and 18 explicitly inactive or access-gated. These are

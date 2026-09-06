@@ -177,20 +177,21 @@ function watchReport() {
   const db = new Database(filename, { readonly: true, fileMustExist: true });
   try {
     const { getWatchSnapshot } = require('../server/watch-store');
-    const snapshot = getWatchSnapshot(db, { limit: 1 });
+    const snapshot = getWatchSnapshot(db, { internal: true, limit: 1 });
     const lastRunAgeMinutes = snapshot.run.lastFinishedAt
       ? Math.round((Date.now() - Date.parse(snapshot.run.lastFinishedAt)) / 60000) : null;
     const sourceProblems = snapshot.sources.filter((source) => source.enabled && source.health !== 'healthy')
-      .map((source) => ({ id: source.id, health: source.health, error: source.lastError }));
+      .map((source) => ({ id: source.id, health: source.health, error: source.lastError, recovery: source.recovery }));
     const services = process.platform === 'darwin' ? [] : [
       systemdState('apocalypse-ews-watch.timer'), systemdState('apocalypse-ews-watch.service'),
     ];
     return {
       available: true, ...snapshot.counts, run: snapshot.run, agent: snapshot.agent,
-      lastRunAgeMinutes, sourceProblems, services,
+      budget: snapshot.budget, processing: snapshot.processing, lastRunAgeMinutes, sourceProblems, services,
       healthy: lastRunAgeMinutes != null && lastRunAgeMinutes <= 6 && !snapshot.run.lastError
         && snapshot.agent.configured && sourceProblems.length === 0
-        && services.every((service) => service.loaded && service.lastState !== 'failed'),
+        && ['running', 'idle'].includes(snapshot.processing.state)
+        && services.every((service) => service.loaded && service.lastState !== 'failed' && (!service.agent.endsWith('.timer') || (service.running && service.enabled === 'enabled'))),
     };
   } catch (error) {
     return { available: false, healthy: false, error: `Watch status could not be read: ${error.message}` };

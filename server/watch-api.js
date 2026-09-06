@@ -58,8 +58,8 @@ function mountWatchRoutes(app, { getDb, requireInternalAuth, getAgentConfigurati
     const id = incidentId(request, response);
     if (!id) return;
     const body = request.body;
-    if (Object.keys(request.query).length || !body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((key) => !["status", "note"].includes(key)) || !["open", "resolved"].includes(body.status) || typeof body.note !== "string" || !body.note.trim() || body.note.length > 4000) return response.status(400).json({ error: "Review requires status open or resolved and a note of 1–4000 characters." });
-    return response.json(reviewIncident(db, id, body));
+    if (Object.keys(request.query).length || !body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((key) => !["status", "note", "publishEvidence", "expectedGeneration"].includes(key)) || !["open", "resolved"].includes(body.status) || typeof body.note !== "string" || !body.note.trim() || body.note.length > 4000 || (body.publishEvidence != null && typeof body.publishEvidence !== "boolean") || (body.expectedGeneration != null && (!Number.isSafeInteger(body.expectedGeneration) || body.expectedGeneration < 1)) || (body.publishEvidence === true && body.expectedGeneration == null)) return response.status(400).json({ error: "Review requires a status, a private note, and a matching expectedGeneration before publishing source evidence." });
+    return response.json(reviewIncident(db, id, { ...body, publishEvidence: body.publishEvidence === true }));
   }));
 }
 

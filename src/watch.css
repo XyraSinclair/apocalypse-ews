@@ -107,6 +107,8 @@
 .watch-review { display: grid; gap: 14px; border-top: 1px solid #dfd8e4; margin-top: 20px; padding-top: 16px; }
 .watch-review button { justify-self: start; }
 .watch-review label { font-size: 12px; }
+.watch-review .watch-publish { display: flex; align-items: start; gap: 10px; font-weight: 500; }
+.watch-publish input { margin-top: 4px; flex: none; }
 .watch-policy { font-size: 11px; color: var(--watch-muted); }
 .watch-policy span { display: block; margin-top: 6px; }
 .watch-operator { background: transparent; padding: 16px 20px; margin-top: 28px; }
