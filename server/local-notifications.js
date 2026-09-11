@@ -12,7 +12,11 @@ const {
 const ALERT_DISPATCH_LIMIT = 25;
 const EMAIL_CONCURRENCY = 8;
 const SMS_MIN_INTERVAL_MS = 250;
-const ALERTABLE_EVENT_KINDS = ['statistical_anomaly', 'takeoff_anomaly', 'takeoff_rate_anomaly'];
+const ALERTABLE_EVENT_KINDS = ['statistical_anomaly', 'takeoff_anomaly', 'takeoff_rate_anomaly',
+  // Course-behaviour clusters: these kinds only ever emit at elevated and
+  // above, so the kind itself is the gate. The per-aircraft `flight_turnaround`
+  // kind is deliberately absent — a single aircraft turning is operator-only.
+  'flight_turnaround_cluster', 'takeoff_origin_cluster'];
 // CBRN events share one cohort across both operator-only (`watch`) and public
 // severities, so kind alone cannot decide delivery: the severity condition is
 // what keeps thirty routine notices on the operator surface instead of in a

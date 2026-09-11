@@ -227,6 +227,27 @@ function detectAlertEvents() {
   ]);
 }
 
+// Course behaviour is a separate instrument from the volume detector: it asks
+// what tracked aircraft did in the air, not how many were up. It reads the
+// 30-minute per-aircraft fix series the same ingestion already stores, so it
+// adds no collection load. Run per cohort; a failure stays isolated so a
+// behaviour-detector fault cannot stop the calibrated volume instrument.
+function detectFlightBehaviour() {
+  for (const [dbPath, cohort] of [
+    [MAIN_DB, 'global_business_jet'],
+    [MILITARY_DB, 'global_military_aircraft'],
+  ]) {
+    run('node', [
+      'scripts/detect_flight_behaviour.js',
+      '--db',
+      dbPath,
+      '--events-db',
+      MAIN_DB,
+      '--cohort',
+      cohort,
+    ]);
+  }
+}
 // Alert channels are independent, cursored, and retry-safe: one channel
 // failing must not stop the others (or the feed exports downstream). Failed
 // stages are collected and the run still exits nonzero at the end so the
@@ -350,6 +371,7 @@ try {
   console.error(error);
 }
 // Even failed acquisition must not strand previously queued deliveries.
+runStage('flight-behaviour', detectFlightBehaviour);
 updateAlerts();
 runStage('operations-feed', exportOperationsFeed);
 runStage('event-signals-feed', exportEventSignalsFeed);
