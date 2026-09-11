@@ -71,7 +71,7 @@ function centroid(points) {
   return { lat: Math.atan2(z, Math.hypot(x, y)) * 180 / Math.PI, lon: Math.atan2(y, x) * 180 / Math.PI };
 }
 
-function components(points) {
+function components(points, radiusKm = 60) {
   const remaining = new Set(points.map((_, index) => index));
   const groups = [];
   while (remaining.size) {
@@ -80,7 +80,7 @@ function components(points) {
     const group = [points[first]];
     for (let index = 0; index < group.length; index += 1) {
       for (const candidate of remaining) {
-        if (distanceKm(group[index], points[candidate]) <= 60) {
+        if (distanceKm(group[index], points[candidate]) <= radiusKm) {
           group.push(points[candidate]);
           remaining.delete(candidate);
         }
@@ -250,17 +250,31 @@ function detect(db, options, eventsDb = null) {
     for (let time = Math.floor(from / HOUR) * HOUR; time < until; time += HOUR) {
       const key = iso(time);
       if (!hours.has(key)) break;
-      samples.push({ row: hours.get(key), points: origins.get(key) || [], spatialCovered: origins.has(key) || hours.get(key).departing_aircraft === 0, weight: (Math.min(until, time + HOUR) - Math.max(from, time)) / HOUR });
+      const points = origins.get(key) || [];
+      samples.push({ row: hours.get(key), points, spatialCovered: points.length === hours.get(key).departing_aircraft, weight: (Math.min(until, time + HOUR) - Math.max(from, time)) / HOUR });
     }
     const expected = Math.ceil(until / HOUR) - Math.floor(from / HOUR);
     if (samples.length === expected) historical.push(samples);
   }
   const currentTurns = uniqueAircraft(recent(turns, end));
   const turnBaseline = robustStats(historical.map((samples) => samples.reduce((sum, sample) => sum + sample.row.turnarounds * sample.weight, 0)));
+  // A cohort-wide count of turns is not a cluster. Three aircraft turning
+  // anywhere on earth in the same hour is weather, scheduling and ordinary
+  // flying; a cluster means turns in the same piece of sky, which is what a
+  // shared diversion, closure or instruction actually looks like. Military
+  // patrol and training patterns also turn far more often than business
+  // aviation (p90 bearing change 154 degrees against 19), so that cohort
+  // carries a higher floor.
+  const turnFloor = options.cohort === 'global_military_aircraft' ? 5 : 3;
+  const turnGroups = components(currentTurns.map((turn) => ({ lat: turn.midpoint.lat, lon: turn.midpoint.lon })), 200)
+    .map((group) => group.length)
+    .filter((count) => count >= turnFloor)
+    .sort((a, b) => b - a);
   if (turnBaseline.sampleCount < 10) summary.warming += 1;
-  else if (currentTurns.length >= 3 && currentTurns.length >= 3 * turnBaseline.median) {
-    const level = currentTurns.length >= 6 ? 4 : 3;
-    emit('flight_turnaround_cluster', level, `${iso(Math.floor(end / (60 * MINUTE)) * 60 * MINUTE)}`, end, `${currentTurns.length} aircraft turned around`, `${currentTurns.length} distinct aircraft turned around across ${options.cohort} in ${options.minutes} minutes, versus a same-hour median of ${turnBaseline.median} across ${turnBaseline.sampleCount} previous days. A cluster of turnarounds is consistent with many ordinary causes: weather systems, airspace closures, or a shared diversion instruction. It is the number and simultaneity that is unusual, not any single flight. Weather and airspace information and subsequent tracks would change this assessment.`, { count: currentTurns.length, baseline_median: turnBaseline.median, baseline_samples: turnBaseline.sampleCount, window_minutes: options.minutes, aircraft: currentTurns, midpoints: currentTurns.map((turn) => turn.midpoint) });
+  else if (turnGroups.length && turnGroups[0] >= 3 * turnBaseline.median) {
+    const count = turnGroups[0];
+    const level = count >= 2 * turnFloor ? 4 : 3;
+    emit('flight_turnaround_cluster', level, `${iso(Math.floor(end / (60 * MINUTE)) * 60 * MINUTE)}`, end, `${count} aircraft turned around`, `${count} distinct aircraft turned around within 200 km of each other in ${options.cohort} within ${options.minutes} minutes, versus a same-hour median of ${turnBaseline.median} across ${turnBaseline.sampleCount} previous days. A cluster of nearby turnarounds is consistent with many ordinary causes: weather systems, airspace closures, or a shared diversion instruction. It is the number, proximity and simultaneity that is unusual, not any single flight. Weather and airspace information and subsequent tracks would change this assessment.`, { count, baseline_median: turnBaseline.median, baseline_samples: turnBaseline.sampleCount, radius_km: 200, window_minutes: options.minutes, aircraft: currentTurns.slice(0, 20).map((turn) => ({ hex: turn.hex, registration: turn.registration, bearing_change: turn.bearing_change, midpoint: turn.midpoint })) });
   }
   const departureHistory = historical.filter((samples) => samples.every((sample) => sample.spatialCovered));
   if (departureHistory.length < 10) summary.warming += 1;
@@ -291,6 +305,7 @@ function main() {
   let eventsDb;
   try {
     eventsDb = new Database(options.eventsDb, { readonly: options.dryRun, fileMustExist: true });
+    if (!options.dryRun) eventsDb.exec(HOURS_DDL);
     const { events, summary } = detect(db, options, eventsDb);
     if (options.dryRun) {
       for (const event of events) console.log(JSON.stringify({ ...event, payload: JSON.parse(event.payloadJson), payloadJson: undefined }));
