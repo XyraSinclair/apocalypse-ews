@@ -1756,69 +1756,6 @@ function SignupPage() {
   );
 }
 
-function EventSignalsPage() {
-  const [records, setRecords] = useState<EventSignalRecord[]>([]);
-  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      setError(null);
-      try {
-        const payload = await fetchEventSignals();
-        if (cancelled) return;
-        setRecords(payload.records);
-        setGeneratedAt(payload.generatedAt);
-      } catch (loadError) {
-        if (!cancelled) setError(loadError instanceof Error ? loadError.message : 'Could not load event signals.');
-      }
-    }
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return (
-    <main className="app-shell signup-shell">
-      <div className="background-wallpaper" aria-hidden="true" />
-      <section className="panel hero-copy-panel">
-        <h1>Event Signal Review</h1>
-        <p>Live alert events and localized historical disaster-window research share one surface so operators can compare takeoff clusters, anomaly scores, and provenance.</p>
-        <p className="hero-link-row"><a href="/aviation">Back to Aviation</a> / <a href="/signup">Get alerts</a></p>
-      </section>
-      {error ? <div className="status-banner status-banner-error"><strong>Signal feed error:</strong> {error}</div> : null}
-      <section className="panel operations-panel">
-        <h2>Signals</h2>
-        {generatedAt ? <p className="panel-caption">Generated {formatDateTime(generatedAt)}</p> : null}
-        {!records.length && !error ? <p className="empty-copy">No event signals have been published yet.</p> : null}
-        <div className="event-signal-list">
-          {records.map((record) => (
-            <article className="event-signal-card" key={record.id}>
-              <div>
-                <h3>{record.event}</h3>
-                <p>{record.provenance || record.source}</p>
-              </div>
-              <dl>
-                <div><dt>Phase</dt><dd>{record.phase}</dd></div>
-                {record.severity ? <div><dt>Severity</dt><dd>{record.severity}</dd></div> : null}
-                <div><dt>Classification</dt><dd>{record.classificationLabel || record.label || 'n/a'}</dd></div>
-                <div><dt>Window</dt><dd>{formatDateTime(record.windowStart)}{record.windowEnd && record.windowEnd !== record.windowStart ? ` – ${formatDateTime(record.windowEnd)}` : ''}</dd></div>
-                <div><dt>Distance</dt><dd>{record.distanceMiles == null ? 'n/a' : `${formatNumber(record.distanceMiles, 0)} mi`}</dd></div>
-                <div><dt>Peak residual</dt><dd>{record.peakResidual == null ? 'n/a' : formatNumber(record.peakResidual, 1)}</dd></div>
-                <div><dt>Concurrent</dt><dd>{record.observedAircraft == null ? 'n/a' : record.expectedAircraft == null ? formatInteger(record.observedAircraft) : `${formatInteger(record.observedAircraft)} vs ${formatNumber(record.expectedAircraft, 0)} expected`}</dd></div>
-                <div><dt>Takeoffs</dt><dd>{(record.observedTakeoffs ?? record.takeoffEvents) == null ? 'n/a' : record.expectedTakeoffs == null ? formatInteger(record.observedTakeoffs ?? record.takeoffEvents ?? 0) : `${formatInteger(record.observedTakeoffs ?? record.takeoffEvents ?? 0)} vs ${formatNumber(record.expectedTakeoffs, 1)} expected`}</dd></div>
-                {record.sampleCount == null ? null : <div><dt>Samples</dt><dd>{formatInteger(record.sampleCount)}</dd></div>}
-                {record.sampleAircraft?.length ? <div><dt>Aircraft</dt><dd>{record.sampleAircraft.join(', ')}</dd></div> : null}
-              </dl>
-            </article>
-          ))}
-        </div>
-      </section>
-    </main>
-  );
-}
 
 function ManagePage() {
   const [subscriber, setSubscriber] = useState<ManagedSubscriber | null>(null);
