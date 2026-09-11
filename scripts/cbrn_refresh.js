@@ -49,10 +49,25 @@ const STAGES = [
   ['fusion', 'fuse_cbrn_signals.js', () => ['--events-db', MAIN_DB, '--cbrn-db', CBRN_DB]],
 ];
 
-function saveState(state) {
+// The run state is a single module-level object; saveState() takes no argument
+// deliberately, because an earlier version shadowed it with an unused parameter
+// and silently wrote the literal string "undefined" — which then crashed the
+// next run's JSON.parse and took the whole timer down with it.
+function saveState() {
   const temporary = `${STATE_PATH}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`);
   fs.renameSync(temporary, STATE_PATH);
+}
+
+// A state file is a record, not an input we trust: a truncated or corrupt file
+// must degrade to "no previous run" rather than stop the instrument.
+function loadState() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function run(commandArgs, timeoutMs) {
@@ -120,7 +135,7 @@ if (!args.has('--lock-held')) {
   acquireLock();
 }
 
-const state = fs.existsSync(STATE_PATH) ? JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')) : {};
+const state = loadState();
 const stages = [];
 
 for (const [name, script, argvTail] of STAGES) {
