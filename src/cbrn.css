@@ -1,0 +1,44 @@
+.cbrn-page {
+  --cbrn-ink: #23313e;
+  --cbrn-muted: #5d6872;
+  --cbrn-line: #d8dcdf;
+  color: var(--cbrn-ink);
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 48px 32px 104px;
+  font-size: 15px;
+  line-height: 1.6;
+}
+.cbrn-page h1 { font-size: clamp(30px, 4vw, 44px); font-weight: 650; letter-spacing: -.04em; line-height: 1.14; margin-bottom: 14px; }
+.cbrn-page h2 { font-size: 20px; font-weight: 650; letter-spacing: -.02em; margin: 40px 0 12px; }
+.cbrn-page p { margin-bottom: 12px; }
+.cbrn-page a { color: #254e77; }
+.cbrn-lede { color: var(--cbrn-muted); font-size: 16px; max-width: 68ch; }
+.cbrn-card { border: 1px solid var(--cbrn-line); border-radius: 8px; padding: 20px 22px; margin-bottom: 18px; }
+.cbrn-card.severity-critical { border-color: #9b2c2c; background: #fdf5f5; }
+.cbrn-card.severity-high { border-color: #b25a12; background: #fdf8f2; }
+.cbrn-card.severity-elevated { border-color: #8a7a12; background: #fdfbf2; }
+.cbrn-card-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; justify-content: space-between; }
+.cbrn-severity { font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+.cbrn-severity.critical { color: #9b2c2c; }
+.cbrn-severity.high { color: #b25a12; }
+.cbrn-severity.elevated { color: #7a6c10; }
+.cbrn-when { color: var(--cbrn-muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.cbrn-body { margin-top: 10px; white-space: pre-wrap; }
+.cbrn-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+.cbrn-table th, .cbrn-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--cbrn-line); vertical-align: top; }
+.cbrn-table th { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--cbrn-muted); font-weight: 650; }
+.cbrn-table td { font-variant-numeric: tabular-nums; }
+.cbrn-state { font-weight: 650; }
+.cbrn-state.reporting { color: #1f6b3a; }
+.cbrn-state.stale { color: #b25a12; }
+.cbrn-state.unavailable { color: #9b2c2c; }
+.cbrn-actions { padding-left: 20px; }
+.cbrn-actions li { margin-bottom: 8px; }
+.cbrn-muted { color: var(--cbrn-muted); }
+.cbrn-error { border: 1px solid #9b2c2c; background: #fdf5f5; border-radius: 8px; padding: 14px 18px; }
+.cbrn-empty { color: var(--cbrn-muted); }
+@media (max-width: 640px) {
+  .cbrn-page { padding: 28px 18px 72px; }
+  .cbrn-table th:nth-child(3), .cbrn-table td:nth-child(3) { display: none; }
+}

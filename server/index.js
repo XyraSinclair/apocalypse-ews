@@ -40,6 +40,7 @@ loadEnvFile();
 const { openWatchDb, syncSources } = require("./watch-store");
 const { SOURCE_DEFINITIONS } = require("./watch-sources");
 const { mountWatchRoutes } = require("./watch-api");
+const { mountCbrnRoutes } = require("./cbrn-api");
 const watchDb = openWatchDb();
 syncSources(watchDb, SOURCE_DEFINITIONS);
 
@@ -409,6 +410,7 @@ app.get("/api/event-signals", (_request, response) => {
 });
 
 mountWatchRoutes(app, { getDb: () => watchDb, requireInternalAuth });
+mountCbrnRoutes(app, { getDbPath: () => DB_PATH });
 
 // In-process fixed-window rate limiter for the public write endpoints. The
 // server sits behind the Cloudflare tunnel, so the socket address is always

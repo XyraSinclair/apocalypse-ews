@@ -138,6 +138,8 @@ function serviceStates() {
     systemdState('apocalypse-ews-canary.service'),
     systemdState('apocalypse-ews-selftest.timer'),
     systemdState('apocalypse-ews-selftest.service'),
+    systemdState('apocalypse-ews-cbrn.timer'),
+    systemdState('apocalypse-ews-cbrn.service'),
   ];
 }
 
@@ -200,6 +202,88 @@ function watchReport() {
   }
 }
 
+function cbrnReport() {
+  const state = safe(() => JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'cbrn-refresh-state.json'), 'utf8')), null);
+  const runAgeMinutes = state?.lastSuccessAt
+    ? Math.round((Date.now() - Date.parse(state.lastSuccessAt)) / 60000) : null;
+  const failedStages = state?.failedStages ?? [];
+  const dbPath = process.env.EWS_CBRN_DB_PATH || path.join(DATA_DIR, 'ews-cbrn.sqlite');
+  if (!fs.existsSync(dbPath)) {
+    return { available: false, healthy: false, runAgeMinutes, failedStages, error: 'CBRN database has not been initialized.' };
+  }
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  db.pragma('busy_timeout = 5000');
+  try {
+    const readings = safe(() => db.prepare(
+      'SELECT source, COUNT(DISTINCT station_id) AS stations, MAX(observed_at) AS newestReading FROM cbrn_readings GROUP BY source ORDER BY source',
+    ).all(), []);
+    const ingest = safe(() => db.prepare(
+      'SELECT source, last_success_at AS lastSuccessAt, last_error AS lastError, consecutive_failures AS consecutiveFailures FROM cbrn_ingest_runs ORDER BY source',
+    ).all(), []);
+    const ingestBySource = new Map(ingest.map((row) => [row.source, row]));
+    const networks = readings.map((row) => ({ ...row, ...(ingestBySource.get(row.source) ?? {}) }));
+    // A source that reports health but no readings (or readings but no health)
+    // is itself a wiring defect, so surface both sets rather than intersecting.
+    for (const row of ingest) {
+      if (!readings.some((reading) => reading.source === row.source)) {
+        networks.push({ source: row.source, stations: 0, newestReading: null, ...row });
+      }
+    }
+    const aircraft = safe(() => db.prepare(
+      'SELECT COUNT(DISTINCT region) AS regions, MAX(sampled_at) AS newestSample FROM cbrn_aircraft_slots',
+    ).get(), {});
+    const lexical = safe(() => db.prepare(
+      'SELECT COUNT(*) AS buckets, MAX(bucket_start) AS newestBucket FROM cbrn_lexical_buckets',
+    ).get(), {});
+    const alerts24h = safe(() => {
+      const mainPath = process.env.EWS_DB_PATH || path.join(DATA_DIR, 'ews-main.sqlite');
+      if (!fs.existsSync(mainPath)) return null;
+      const main = new Database(mainPath, { readonly: true, fileMustExist: true });
+      try {
+        return main.prepare(
+          "SELECT severity, COUNT(*) AS count FROM alert_events WHERE cohort = 'cbrn' AND created_at >= datetime('now', '-1 day') GROUP BY severity",
+        ).all();
+      } finally {
+        main.close();
+      }
+    }, null);
+    const newestReadingAgeMinutes = (value) => (value ? Math.round((Date.now() - Date.parse(value)) / 60000) : null);
+    const radiation = networks.map((network) => ({
+      source: network.source,
+      stations: network.stations ?? 0,
+      newestReading: network.newestReading ?? null,
+      readingAgeMinutes: newestReadingAgeMinutes(network.newestReading),
+      consecutiveFailures: network.consecutiveFailures ?? 0,
+      lastError: network.lastError ?? null,
+    }));
+    const reporting = radiation.filter((network) => network.stations > 0
+      && network.readingAgeMinutes != null && network.readingAgeMinutes <= 240);
+    return {
+      available: true,
+      runAgeMinutes,
+      failedStages,
+      lastError: state?.lastError ?? null,
+      networks: radiation,
+      reportingNetworks: reporting.length,
+      aircraft: {
+        regions: aircraft?.regions ?? 0,
+        newestSample: aircraft?.newestSample ?? null,
+        sampleAgeMinutes: newestReadingAgeMinutes(aircraft?.newestSample),
+      },
+      lexical: { buckets: lexical?.buckets ?? 0, newestBucket: lexical?.newestBucket ?? null },
+      alerts24h,
+      healthy: runAgeMinutes != null && runAgeMinutes <= 15
+        && failedStages.length === 0
+        && reporting.length > 0
+        && radiation.every((network) => network.consecutiveFailures < 6),
+    };
+  } catch (error) {
+    return { available: false, healthy: false, runAgeMinutes, failedStages, error: `CBRN status could not be read: ${error.message}` };
+  } finally {
+    db.close();
+  }
+}
+
 const report = {
   polling: safe(() => {
     const state = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'refresh-state.json'), 'utf8'));
@@ -223,6 +307,7 @@ const report = {
   }, 'unreachable'),
   alerts: alertsReport(),
   watch: watchReport(),
+  cbrn: cbrnReport(),
   backups: process.platform === 'darwin' ? null : backupsReport(),
   verdict: null,
 };
@@ -278,9 +363,31 @@ for (const service of report.services) {
   else if (service.lastState === 'failed') problems.push(`${service.agent}: failed — check journalctl -u ${service.agent}`);
 }
 if (report.serverHttp !== 'ok') problems.push('dashboard server unreachable on :3030');
+if (report.cbrn) {
+  // The CBRN instrument is not allowed to fail quietly: a stopped radiation
+  // network is an observation gap, and an observation gap is a problem.
+  if (!report.cbrn.available) {
+    problems.push(`cbrn: ${report.cbrn.error ?? 'status unavailable'}`);
+  } else {
+    if (report.cbrn.runAgeMinutes == null || report.cbrn.runAgeMinutes > 15) {
+      problems.push(`cbrn: refresh stale (${report.cbrn.runAgeMinutes}m > 15m bound) — check apocalypse-ews-cbrn.timer`);
+    }
+    for (const stage of report.cbrn.failedStages ?? []) {
+      problems.push(`cbrn stage ${stage.stage}: ${stage.error}`);
+    }
+    if (!report.cbrn.reportingNetworks) {
+      problems.push('cbrn: no gamma network reported within 4h — the radiological instrument is blind');
+    }
+    for (const network of report.cbrn.networks ?? []) {
+      if (network.consecutiveFailures >= 6) {
+        problems.push(`cbrn network ${network.source}: ${network.consecutiveFailures} consecutive collection failures (${network.lastError ?? 'no detail'})`);
+      }
+    }
+  }
+}
 if (report.backups) {
   if (!report.backups.dayCount) problems.push('no sqlite backups yet — run npm run backup');
-  else if (report.backups.latestFiles < 4) problems.push(`latest backup day ${report.backups.latestDay} has ${report.backups.latestFiles}/4 databases`);
+  else if (report.backups.latestFiles < 5) problems.push(`latest backup day ${report.backups.latestDay} has ${report.backups.latestFiles}/5 databases`);
   else if (report.backups.ageHours > 50) problems.push(`sqlite backups stale (${report.backups.ageHours}h) — check apocalypse-ews-backup.timer`);
 }
 report.verdict = problems.length ? { healthy: false, problems } : { healthy: true };

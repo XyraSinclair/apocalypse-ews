@@ -52,10 +52,11 @@ token).
 | `apocalypse-ews.service` | `server/index.js` Express server on 127.0.0.1:3030 | always on |
 | `apocalypse-ews-refresh.timer` | incremental pass (check archive → ingest new slot → snapshots/detection once per sample → retry delivery → feeds) | every 2 min, single active pass |
 | `apocalypse-ews-watch.timer` | `run_watch.js` — collect due sources, preserve revisions, investigate queued changes, write handover | every minute, one leased pass |
+| `apocalypse-ews-cbrn.timer` | `cbrn_refresh.js` — collect the CBRN instruments (gamma telemetry, sampled air traffic), run the four directional detectors and the fusion pass; writes alert events only, never deliveries | every 5 min, one flocked pass |
 | `apocalypse-ews-refresh-imports.timer` | same plus aircraft-metadata reimport | daily 00:29 |
 | `apocalypse-ews-repair.timer` | `repair_history_gaps.js` — self-heals trailing gaps AND interior holes across all three cohorts, bounded to 30 days | every 6 h |
 | `apocalypse-ews-watchdog.timer` | `ops_alert.js` — status verdict → ops ntfy topic (deduped, 6 h re-alert, recovery note) | every 2 min |
-| `apocalypse-ews-backup.timer` | `backup_databases.js` — `VACUUM INTO data/backups/<day>/` for all four DBs (three aviation cohorts plus `ews-watch.sqlite`), integrity-checked, 14 days kept; staleness feeds the existing status verdict. Restore requires stopping all relevant writers first. Off-box: manual sha256-verified copies land at `xyra-sanctuary:/srv/sanctuary/backups/apocalypse-ews/<day>/` (automation pending a box→sanctuary credential) | daily 02:10 |
+| `apocalypse-ews-backup.timer` | `backup_databases.js` — `VACUUM INTO data/backups/<day>/` for all five DBs (three aviation cohorts, `ews-watch.sqlite`, `ews-cbrn.sqlite`), integrity-checked, 14 days kept; staleness feeds the existing status verdict. Restore requires stopping all relevant writers first. Off-box: manual sha256-verified copies land at `xyra-sanctuary:/srv/sanctuary/backups/apocalypse-ews/<day>/` (automation pending a box→sanctuary credential) | daily 02:10 |
 | `cloudflared.service` | Cloudflare tunnel `apocalypse-ews` (id `d27a04ac-5b8a-4d84-a4c9-ccf61978694d`) — serves <https://warning.watch> from loopback:3030 and <https://ntfy.warning.watch> from loopback:2586 with no open inbound ports. Installed via `cloudflared service install <token>`; ingress config lives in the CF dashboard/API (`config_src: cloudflare`), not on disk | always on |
 | `ntfy.service` | self-hosted ntfy 2.27.0 (`/etc/ntfy/server.yml`): loopback:2586, `auth-default-access: read-only`, user `publisher` has rw on both topics, `upstream-base-url: ntfy.sh` for iOS instant delivery. Auth DB `/var/lib/ntfy/user.db`. Box-side publishers use `EWS_NTFY_SERVER=http://127.0.0.1:2586` (loopback survives a tunnel outage; subscribers reconnect and receive cached messages) | always on |
 | `apocalypse-ews-canary.timer` | `canary_delivery.js` — synthetic end-to-end proof through the **public** path: site health, RSS, and an ops-topic ntfy publish polled back as a subscriber would. Deliberately the opposite path from the watchdog (loopback), so each pages when the other's path dies. Failure leaves the unit `failed`, which the status verdict flags | weekly Mon 17:00 UTC |
@@ -190,6 +191,71 @@ case replay, broader source discovery/enrollment, a learned routine calendar,
 validated official-warning relay, and public strategic assessment remain open
 work. The current source registry and visible coverage gaps are the operational
 truth, not the wider planning roster.
+
+## CBRN watch
+
+The CBRN instruments are a separate, deterministic layer: no model sits between a
+measurement and the alert. Alarm rules and every threshold are in
+[CBRN-WATCH.md](CBRN-WATCH.md); this section is the operational contract.
+
+`apocalypse-ews-cbrn.timer` runs `scripts/cbrn_refresh.js` every five minutes.
+One pass: ingests gamma telemetry (self-limited to one poll per network per 30
+minutes), ingests the live aircraft sample, then runs the radiation, airspace,
+notice and vocabulary detectors and the cross-family fusion pass. Stages are
+failure-isolated and each outcome is recorded in `data/cbrn-refresh-state.json`;
+a missing stage script is a hard failure, never a silent skip. The pass is
+guarded by `tmp/cbrn-refresh.flock` and a 240-second deadline.
+
+**It never delivers.** Every CBRN event is a row in `alert_events`
+(`cohort='cbrn'`) in `data/ews-main.sqlite`, and the existing two-minute refresh
+pipeline's delivery stages carry it out — ntfy (elevated and above), RSS,
+Telegram (level 5), subscriber email/SMS/web push, and the outbound webhook.
+Expected end-to-end latency is therefore under two minutes, and there is exactly
+one delivery path in the system.
+
+State lives in `data/ews-cbrn.sqlite`: `cbrn_stations`, `cbrn_readings` (hourly
+per-station dose rate), `cbrn_aircraft_slots` (per-region counts per 5-minute
+sample), `cbrn_lexical_buckets` (counts and matched surface forms only — no post
+bodies), `cbrn_regions` (the operator-controlled sampling roster),
+`cbrn_alarm_state` (detector state and fusion windows), `cbrn_ingest_runs`
+(collection health).
+
+Fresh-box warm-up is real and must not be mistaken for a fault: the radiological
+detector needs 48 hourly samples per station before a station can alert, and the
+aircraft detector needs 10 same-hour samples over 21 days per region. Until then
+both report `warming` and emit nothing. Only a severe, spatially coherent
+departure can reach a public severity from the start, because the absolute
+physical gate does not depend on the baseline.
+
+Health is in `npm run status` under `cbrn`: run age (bound 15 minutes), failed
+stages, per-network station counts and reading ages, whether any network
+reported inside four hours, and consecutive collection failures (bound 6). The
+verdict treats "no gamma network reported within four hours" as a problem — a
+blind radiological instrument must never read as calm. The public picture is at
+<https://warning.watch/cbrn>, backed by `/api/cbrn` (no auth, `no-store`,
+public severities only).
+
+Coverage limits are operational facts, not caveats: gamma telemetry is the
+European reporting networks republished by the German BfS service (the JRC's own
+EURDEP value service was stale and partly unavailable when this was built — its
+station catalogue timestamps were sixteen months behind — so the BfS mirror is
+the live path and needs watching for lag drift); aircraft sampling is a fixed
+roster of 16 public geographies, not a global picture; vocabulary counts come
+from one post stream and one news index. A normal reading asserts nothing
+outside the monitored area.
+
+### Verifying the CBRN layer by hand
+
+```sh
+npm run cbrn:refresh                      # full pass; prints per-stage JSON
+node scripts/detect_cbrn_radiation.js --db data/ews-cbrn.sqlite --events-db data/ews-main.sqlite --dry-run
+node scripts/detect_cbrn_airspace.js  --db data/ews-cbrn.sqlite --events-db data/ews-main.sqlite --dry-run
+node scripts/detect_cbrn_notices.js   --watch-db data/ews-watch.sqlite --events-db data/ews-main.sqlite --cbrn-db data/ews-cbrn.sqlite --dry-run
+node scripts/detect_cbrn_lexical.js   --watch-db data/ews-watch.sqlite --cbrn-db data/ews-cbrn.sqlite --events-db data/ews-main.sqlite --dry-run
+node scripts/fuse_cbrn_signals.js     --events-db data/ews-main.sqlite --cbrn-db data/ews-cbrn.sqlite --dry-run
+```
+
+Each detector prints what it would write and writes nothing under `--dry-run`.
 
 ### Recovery verification — 5 September 2026
 

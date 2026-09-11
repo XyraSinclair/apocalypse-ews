@@ -55,6 +55,7 @@ export function WatchNavigation() {
   const path = window.location.pathname;
   return <header className="watch-navigation"><a className="watch-wordmark" href="/">warning<span>.watch</span></a><nav aria-label="Primary">
     <a href="/watch" aria-current={path === '/' || path === '/watch' ? 'page' : undefined}>Watch</a>
+    <a href="/cbrn" aria-current={path.startsWith('/cbrn') ? 'page' : undefined}>CBRN</a>
     <a href="/plan" aria-current={path === '/plan' ? 'page' : undefined}>Your alert plan</a>
     <a href="/aviation" aria-current={path === '/aviation' ? 'page' : undefined}>Aviation</a>
     <a href="/event-signals" aria-current={path.startsWith('/event-signals') ? 'page' : undefined}>Event signals</a>

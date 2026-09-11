@@ -52,7 +52,11 @@ async function publish(server, topic, event, dryRun) {
   const headers = {
     Title: title,
     Priority: PRIORITY_BY_SEVERITY[event.severity] || 'default',
-    Tags: 'rotating_light,airplane',
+    // The tag is the first thing a subscriber sees on a lock screen, so it
+    // must not tell a radiation alert that it is about aeroplanes.
+    Tags: event.cohort === 'cbrn'
+      ? (event.kind === 'cbrn_radiation_anomaly' ? 'radioactive,warning' : 'warning,skull')
+      : 'rotating_light,airplane',
   };
   const token = String(process.env.EWS_NTFY_TOKEN || '').trim();
   if (token) headers.Authorization = `Bearer ${token}`;

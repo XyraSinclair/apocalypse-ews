@@ -1,5 +1,6 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import WatchPage, { WatchNavigation } from './WatchPage';
+import CbrnPage from './CbrnPage';
 import AlertPlan from './AlertPlan';
 
 const DASHBOARD_URLS = {
@@ -476,7 +477,8 @@ function App() {
     : path.startsWith('/manage') ? <ManagePage />
     : path.startsWith('/event-signals') ? <EventSignalsPage />
     : path === '/plan' ? <AlertPlan />
-    : path === '/aviation' ? <DashboardPage /> : <WatchPage />;
+    : path === '/aviation' ? <DashboardPage />
+    : path.startsWith('/cbrn') ? <CbrnPage /> : <WatchPage />;
   return <><WatchNavigation />{page}{path !== '/plan' && <FeedbackWidget />}</>;
 }
 

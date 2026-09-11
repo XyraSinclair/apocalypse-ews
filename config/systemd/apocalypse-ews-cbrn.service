@@ -1,0 +1,17 @@
+[Unit]
+Description=Refresh CBRN instruments and detectors
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=xyra
+WorkingDirectory=/opt/dev/apocalypse-ews
+EnvironmentFile=/etc/apocalypse-ews.env
+Environment=NODE_ENV=production
+Environment=PATH=/opt/dev/apocalypse-ews/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/node scripts/cbrn_refresh.js
+TimeoutStartSec=290
+TimeoutStopSec=5
+KillMode=control-group
+NoNewPrivileges=true

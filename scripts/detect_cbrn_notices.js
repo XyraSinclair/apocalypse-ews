@@ -1,0 +1,153 @@
+#!/usr/bin/env node
+
+const path = require('node:path');
+const Database = require('better-sqlite3');
+const { loadEnvFile } = require('../server/env');
+loadEnvFile();
+if (process.env.EWS_WATCH_ENV_PATH) loadEnvFile(process.env.EWS_WATCH_ENV_PATH);
+const { KIND, openCbrnDb, haversineKm, writeAlarmState, buildCbrnEvent, insertCbrnEvent } = require('./cbrn_lib');
+const { regions } = require('../config/cbrn-regions.json');
+const lexicon = require('../config/cbrn-lexicon.json');
+const SOURCES = ['nws-civil-alerts', 'nrc-events', 'nrc-reactor-status', 'faa-tfr', 'who-outbreaks', 'ecdc-threats', 'healthmap-alerts', 'iaea-news'];
+const RANK = { watch: 1, elevated: 3, high: 4, critical: 5 };
+
+function options(argv, minutes = 1440) {
+  const result = { watchDb: process.env.EWS_WATCH_DB_PATH || path.resolve(__dirname, '../data/ews-watch.sqlite'), eventsDb: process.env.EWS_DB_PATH || path.resolve(__dirname, '../data/ews-main.sqlite'), cbrnDb: process.env.EWS_CBRN_DB_PATH, minutes, dryRun: false };
+  const names = { '--watch-db': 'watchDb', '--events-db': 'eventsDb', '--cbrn-db': 'cbrnDb', '--minutes': 'minutes' };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--dry-run') result.dryRun = true;
+    else if (names[arg] && argv[index + 1] && !argv[index + 1].startsWith('--')) result[names[arg]] = argv[++index];
+    else throw new Error(`Unknown or incomplete argument: ${arg}`);
+  }
+  result.minutes = Number(result.minutes);
+  if (!Number.isSafeInteger(result.minutes) || result.minutes < 1 || result.minutes > 20160) throw new Error('--minutes must be an integer from 1 to 20160.');
+  return result;
+}
+
+// Unicode boundaries prevent short agents such as VX from matching inside words.
+function matcher(term) {
+  const escaped = term.normalize('NFKC').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(term);
+  return new RegExp(cjk ? escaped : `(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu');
+}
+const agents = lexicon.agents.map((term) => [term, matcher(term)]);
+
+function detect(watch, settings, now = Date.now()) {
+  const summary = { detector: 'cbrn_notices', dry_run: settings.dryRun, heads: {}, scanned: {}, matched: {}, events_written: 0, events_escalated: 0, invalid: 0, unavailable: [], regions: regions.map((region) => region.id) };
+  const events = [];
+  const states = [];
+  const trips = [];
+  const since = now - settings.minutes * 60000;
+  const prior = watch.prepare('SELECT observation, observed_at FROM watch_evidence WHERE source_id = ? AND external_id = ? AND observed_at <= ? ORDER BY observed_at DESC, id DESC LIMIT 1');
+  const emit = (row, observation, level, title, message, classification, keys = [row.external_id], action) => {
+    summary.matched[row.source_id] += 1;
+    events.push(buildCbrnEvent({ kind: KIND.OFFICIAL_NOTICE, level, occurredAt: new Date(row.observed_at).toISOString(), title, message, action, source: row.source_id, publicUrl: observation.url, keyParts: [row.source_id, ...keys].map(encodeURIComponent), payload: { source_id: row.source_id, external_id: row.external_id, source_url: observation.url ?? null, ...classification } }));
+  };
+  for (const source of SOURCES) {
+    summary.heads[source] = watch.prepare('SELECT count(*) AS n FROM watch_items WHERE source_id = ?').get(source).n;
+    summary.scanned[source] = 0;
+    summary.matched[source] = 0;
+    if (!summary.heads[source]) summary.unavailable.push(source);
+    const rows = watch.prepare('SELECT e.* FROM watch_items i JOIN watch_evidence e ON e.id = i.evidence_id WHERE i.source_id = ? AND e.observed_at >= ? AND e.observed_at <= ? ORDER BY e.observed_at, e.id').all(source, since, now);
+    for (const row of rows) {
+      summary.scanned[source] += 1;
+      let o;
+      try { o = JSON.parse(row.observation); } catch { summary.invalid += 1; continue; }
+      if (!o || typeof o !== 'object') { summary.invalid += 1; continue; }
+      if (o.status === 'cancelled') continue;
+      const d = o.data || {};
+      const context = 'This notice alone does not establish a deliberate release. Updated authority notices and independent measurements would change the assessment.';
+      if (source === 'nws-civil-alerts') {
+        if (!['Nuclear Power Plant Warning', 'Radiological Hazard Warning', 'Hazardous Materials Warning'].includes(d.event) || d.actual !== true || d.test === true) continue;
+        if (d.expiresAt != null && !(Date.parse(d.expiresAt) > now)) continue;
+        if (!d.messageId || !d.messageType) { summary.invalid += 1; continue; }
+        const instruction = typeof d.instruction === 'string' && d.instruction.trim() ? d.instruction : d.description || o.summary || '';
+        emit(row, o, 5, o.title || d.event, `Official CBRN protective instruction. The issuing authority's text follows verbatim.\nHeadline: ${d.headline ?? o.title ?? 'Not supplied'}\nIssuing authority: ${d.senderName ?? 'Not supplied'}\nAffected area: ${d.area ?? 'Not supplied'}\nUTC expiry: ${d.expiresAt == null ? 'Not supplied' : new Date(d.expiresAt).toISOString()}\nAuthority instruction / description:\n${instruction}\n\nA subsequent update or cancellation by this authority changes this instruction.`, { event: d.event, actual: d.actual, test: d.test ?? null, messageId: d.messageId, messageType: d.messageType, headline: d.headline ?? o.title, senderName: d.senderName ?? null, area: d.area ?? null, expiresAt: d.expiresAt ?? null, instruction, description: d.description ?? null }, [d.messageId, d.messageType], instruction || 'Consult the issuing authority immediately; no instruction text was supplied.');
+      } else if (source === 'nrc-events') {
+        const emergencyClass = d.emergencyClass ?? null;
+        const level = /^(alert|site area emergency|general emergency)$/i.test(String(emergencyClass ?? '').trim()) ? 4 : 1;
+        emit(row, o, level, o.title || 'NRC event notification', `NRC event notification for ${d.facility ?? 'facility not supplied'}, ${d.state ?? 'state not supplied'}. Classification (verbatim): ${emergencyClass ?? 'not supplied'}. NRC event notifications are licensee-reported and US-only; a Non-Emergency classification is routine. ${context}`, { emergencyClass, facility: d.facility ?? null, state: d.state ?? null, eventNumber: row.external_id }, [row.external_id]);
+      } else if (source === 'nrc-reactor-status') {
+        if (typeof d.unit !== 'string' || typeof d.powerPercent !== 'number' || d.powerPercent < 0 || d.powerPercent > 5) continue;
+        const previous = prior.get(source, row.external_id, row.observed_at - 1800000);
+        if (!previous) continue;
+        let p;
+        try { p = JSON.parse(previous.observation); } catch { summary.invalid += 1; continue; }
+        if (p?.status === 'cancelled' || typeof p?.data?.powerPercent !== 'number' || p.data.powerPercent < 50 || p.data.powerPercent > 100) continue;
+        const site = d.unit.replace(/\s*(?:unit\s*)?[-#]?\s*\d+\s*$/i, '').trim();
+        trips.push({ row, o, d, site, previous: p.data.powerPercent });
+      } else if (source === 'faa-tfr') {
+        if (!Number.isFinite(d.centroidLat) || !Number.isFinite(d.centroidLon) || Math.abs(d.centroidLat) > 90 || Math.abs(d.centroidLon) > 180) continue;
+        if (watch.prepare('SELECT 1 FROM watch_evidence WHERE source_id = ? AND external_id = ? AND observed_at < ? LIMIT 1').get(source, row.external_id, row.observed_at)) continue;
+        for (const region of regions.filter((r) => r.enabled && r.role === 'target')) {
+          const distance = haversineKm(region.lat, region.lon, d.centroidLat, d.centroidLon);
+          if (distance > 80) continue;
+          emit(row, o, 1, `New airspace restriction near ${region.name}`, `First observed FAA TFR within 80 km of ${region.name}.\nFAA title (verbatim): ${d.title ?? o.title ?? 'Not supplied'}\nState (verbatim): ${d.state ?? 'Not supplied'}\nModification time (verbatim; timezone not inferred): ${d.lastModified ?? 'Not supplied'}\nMost TFRs are routine — firefighting, launches, security, military training. This observation alone does not establish a hazard. NOTAM details, independent measurements and official protective instructions would change the assessment.`, { title: d.title ?? o.title ?? null, state: d.state ?? null, lastModified: d.lastModified ?? null, region: region.id, centroidLat: d.centroidLat, centroidLon: d.centroidLon, distance_km: distance }, [row.external_id, region.id]);
+          states.push({ series: `fusion:${region.id}`, method: 'window', state: { region: region.id, timestamp: new Date(row.observed_at).toISOString(), occurred_at: new Date(row.observed_at).toISOString(), kind: KIND.OFFICIAL_NOTICE, level: 1, source_id: source, lat: d.centroidLat, lon: d.centroidLon } });
+        }
+      } else if (source === 'who-outbreaks' || source === 'ecdc-threats') {
+        const matched = agents.filter(([, re]) => re.test(String(o.title || '').normalize('NFKC'))).map(([term]) => term);
+        if (!matched.length) continue;
+        const published = Date.parse(o.publishedAt);
+        const level = published <= now && published >= now - 7 * 86400000 ? 3 : 1;
+        const authority = source === 'who-outbreaks' ? 'the World Health Organization' : 'the European Centre for Disease Prevention and Control';
+        emit(row, o, level, o.title || 'CBRN-relevant outbreak report', `${authority} reports an outbreak whose title names a CBRN-relevant agent: ${matched.join(', ')}. Most such outbreaks are natural, and this report does not establish a deliberate release. The report carries the authority's own risk assessment and advice; ours adds nothing to it. Updated outbreak investigations, agent confirmation and local public-health guidance would change this assessment.`, { agents: matched, publishedAt: o.publishedAt ?? null, authority }, undefined, 'Read the authority\u2019s own advice in the linked report \u2014 it supersedes anything here. This is a public-health report, not an instruction to act. Follow your local public-health authority.');
+      } else {
+        // Aggregate and agency feeds are collected for context, but emitting an
+        // event for every item would flood the operator surface with routine
+        // news. Only a title that names a consequential incident qualifies, and
+        // even then this never leaves the operator surface on its own.
+        const text = String(o.title || '').normalize('NFKC');
+        const incident = /\b(incident|emergency|release|leak|spill|fire|explosion|attack|strike|shelling|shelled|damage|evacuat\w*|alert|contamination|radiation levels?|power (?:loss|cut)|shutdown|scram|safeguards)\b/iu.test(text);
+        const agentHit = agents.filter(([, re]) => re.test(text)).map(([term]) => term);
+        if (!incident && !agentHit.length) continue;
+        emit(row, o, 1, o.title || source, `${source === 'healthmap-alerts' ? 'HealthMap is an aggregate disease-reporting source, not a confirmed incident assessment.' : 'IAEA news is agency communication, not necessarily an emergency notice.'} ${o.title || 'Untitled item'}. Operator watch only. ${context}`, { observation_kind: o.kind ?? null, agents: agentHit });
+      }
+    }
+  }
+  for (const trip of trips) {
+    const nearby = trips.filter((other) => other.site === trip.site && Math.abs(other.row.observed_at - trip.row.observed_at) <= 3600000);
+    // A rolling one-hour interval, not a two-hour radius, must contain all units.
+    const grouped = nearby.some((start) => new Set(nearby.filter((other) => other.row.observed_at >= start.row.observed_at && other.row.observed_at <= start.row.observed_at + 3600000).map((other) => other.d.unit)).size >= 3);
+    emit(trip.row, trip.o, grouped ? 3 : 1, `Reactor power drop: ${trip.d.unit}`, `NRC reports ${trip.d.unit} at ${trip.d.powerPercent}% power, down from ${trip.previous}% in the most recent available observation at least 30 minutes earlier.${grouped ? ' At least three units at this site dropped within one hour.' : ''} This is a unit-trip signal, not proof of a radiological release; planned shutdowns can look the same. NRC event notices and subsequent power readings would clarify the cause.`, { unit: trip.d.unit, site: trip.site, powerPercent: trip.d.powerPercent, previousPowerPercent: trip.previous, multiple_units: grouped });
+  }
+  summary.events = events.length;
+  return { summary, events, states };
+}
+
+function saveEvents(db, result) {
+  db.transaction(() => {
+    const lookup = db.prepare('SELECT severity FROM alert_events WHERE event_key = ?');
+    for (const event of result.events) {
+      const existing = lookup.get(event.eventKey);
+      if (existing && RANK[existing.severity] > RANK[event.severity]) continue;
+      const saved = insertCbrnEvent(db, event);
+      if (saved.inserted) result.summary.events_written += 1;
+      if (saved.escalated) result.summary.events_escalated += 1;
+    }
+  })();
+}
+
+function main() {
+  const settings = options(process.argv.slice(2));
+  const watch = new Database(settings.watchDb, { readonly: true, fileMustExist: true });
+  let db;
+  let eventsDb;
+  try {
+    const result = detect(watch, settings);
+    if (settings.dryRun) {
+      for (const event of result.events) console.log(JSON.stringify(event));
+    } else {
+      db = openCbrnDb({ dbPath: settings.cbrnDb });
+      eventsDb = new Database(settings.eventsDb, { fileMustExist: true });
+      saveEvents(eventsDb, result);
+      db.transaction(() => { for (const entry of result.states) writeAlarmState(db, entry.series, entry.method, entry.state); })();
+    }
+    console.log(JSON.stringify(result.summary));
+  } finally { watch.close(); db?.close(); eventsDb?.close(); }
+}
+if (require.main === module) {
+  try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
+}
+module.exports = { options, matcher, detect, saveEvents };

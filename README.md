@@ -1,52 +1,69 @@
 # Apocalypse EWS
 
-A continuous public-source watch with persistent evidence, incident threads,
-and bounded machine investigations. The watch combines existing aggregate
-aviation observations with official advisories, airspace status, civil warnings,
-public reporting, and environmental measurements.
+A continuous public-source watch built to alert people to **CBRN risk** —
+chemical, biological, radiological and nuclear. Its instruments are open gamma
+dose-rate telemetry, sampled civil air traffic over CBRN-relevant places,
+out-of-distribution bursts in public vocabulary, and authoritative CBRN
+notices. Machine investigations and a private operator review sit behind those
+measurements.
 
 The watch reports what changed and what remains unverified. It does not estimate
 the probability of nuclear use, infer intent from aircraft activity, or treat
-quiet sources as evidence of safety. Machine assessments remain operator-only;
-existing aviation notification channels keep their existing policy.
+quiet sources as evidence of safety. Alerts carry the measurement, its
+uncertainty, the strongest alternative explanation, and what a person should do.
+See [CBRN-WATCH.md](CBRN-WATCH.md) for every alarm rule and its thresholds.
+
+Earthquakes, storms and other natural disasters are deliberately **not** the
+product. Seismic catalogues are retained only as explosion verification, and
+weather-service alerts are relayed only when they are CBRN events.
 
 ## How it works
 
 ```
-21 enabled source definitions → immutable observations and source health
-                                      │ semantic changes
-                                      ▼
-                               persistent incident threads
-                                      │ bounded investigations
-                                      ▼
-                         specialist + skeptic → synthesis
-                                      │
-                                      ▼
-                      private operator review + next questions
+21 public-source definitions ──► observations, revisions, source health
+        +                        │ semantic changes
+  7 CBRN authority feeds         ▼
+                          persistent incident threads
+                                 │ bounded investigations
+                                 ▼
+                        specialist + skeptic → synthesis
+                                 │
+                                 ▼
+                     private operator review + next questions
+
+CBRN instruments ──► deterministic detectors ──► alert_events ──► subscribers
+ gamma telemetry       baselines + CUSUM            │        ntfy · RSS · Telegram
+ air traffic           absolute physics gates       │        email · SMS · web push
+ vocabulary bursts     spatial coherence            └── fusion escalates agreement
+ official notices      (no baseline → no alert)
 ```
 
-The public watch at `/` shows source facts, open threads, coverage gaps, and
-handover state. `/aviation` retains the existing instrument:
-
-```
-ADS-B Exchange public heatmaps (30-min source slots, checked every 2 min)
-        │  ingest
-        ▼
-SQLite per cohort (business jets ~31k airframes · military · non-ICAO)
-        │  detect
-        ▼
-concurrent-airborne anomaly (levels 1–5) + takeoff-batch rate z-score
-        │  fan out
-        ▼
-RSS · ntfy push · Telegram · web dashboard · email/SMS/web-push (optional stack)
-```
-
-- **Detection is evidence-bound**: no baseline → no statistical alert. Missing
-  or stale data means the instrument is unavailable, never that the world is safe.
+- **Two gates on every public alert**: a statistical departure *and* a physical
+  magnitude. A four-sigma drift on a quiet probe stays operator-only.
+- **Detection is evidence-bound**: no baseline → no alert. Missing or stale data
+  means the instrument is unavailable, never that the world is safe.
 - **Keyed, cursored fanout**: repeated samples do not create new statistical
   evidence. External delivery can remain uncertain after a lost acknowledgment.
-- The full pipeline is one command (`npm run refresh:all`), designed to run
-  from any scheduler (systemd timer, launchd, cron) on one cheap box.
+- The aviation instrument lives at `/aviation` and keeps its own calibration:
+  ADS-B Exchange public heatmaps (30-minute source slots, checked every 2
+  minutes) scored against seasonal baselines for three cohorts.
+- The full pipelines are two commands (`npm run refresh:all`, `npm run
+  cbrn:refresh`), designed to run from any scheduler on one cheap box.
+
+## The CBRN instruments
+
+| Instrument | Measurement | Coverage | Cadence |
+|---|---|---|---|
+| Radiological telemetry | Gamma dose rate per station | 1,676 German probes + a live EURDEP mirror of 17,384 stations in 44 countries (BfS/IMIS OGC service) | hourly |
+| Civil air traffic | Aircraft counts, emergency indications, special-mission type presence | 14 public CBRN-relevant geographies + 2 health controls | 5 min |
+| Public vocabulary | CBRN event-word counts by place | one public post stream + one news index | hourly |
+| Official notices | CBRN alerts and instructions | NWS CAP, NRC events and reactor status, FAA TFRs, WHO, ECDC, IAEA, HealthMap | 10 min – 1 h |
+
+Public CBRN alerts are published at `/cbrn` and pushed through the same
+channels as the aviation instrument. The highest-value alert in the system is
+not ours at all: an actual *Nuclear Power Plant Warning*, *Radiological Hazard
+Warning* or *Hazardous Materials Warning* CAP message is relayed at critical
+severity with the issuing authority's own instruction text verbatim.
 
 ## Quickstart
 
@@ -54,9 +71,16 @@ RSS · ntfy push · Telegram · web dashboard · email/SMS/web-push (optional st
 npm ci
 cp .env.example .env          # defaults work for local use
 npm run refresh:all           # ingest latest slot, detect, export feeds
+npm run cbrn:refresh          # collect CBRN instruments, run detectors, fuse
 npm run watch:run -- --collect-only  # collect enabled public sources without inference
-npm run build && npm start    # watch, aviation, and RSS at http://127.0.0.1:3030/
+npm run build && npm start    # CBRN, watch, aviation and RSS at http://127.0.0.1:3030/
 ```
+
+`npm run cbrn:refresh` needs no credentials: every CBRN instrument is a public
+endpoint. The radiological instrument needs 48 hourly samples per station before
+it can alert, so it reports `warming` for the first two days; the aircraft
+instrument needs 10 same-hour samples over 21 days. Until then those detectors
+emit nothing, by construction.
 
 Python 3 with `numpy` and `Pillow` is needed for ingestion
 (`pip install -r requirements.txt`). Baselines need ~7 days of history before
@@ -74,11 +98,11 @@ three-role investigation; official notices bypass that admission stage.
 Missing inference credentials do not stop source collection. Production uses
 the separate `/etc/apocalypse-ews-watch.env`, read only by the watch service.
 
-The registry contains 39 definitions, including ten country-specific travel
-advisories: 21 enabled and 18 explicitly inactive or access-gated. These are
-not 39 independent instruments or all 64 candidate observables in the planning
-register. Predictive validation, broader source enrollment, and new warning
-delivery channels remain outside the implemented watch.
+The registry contains 46 definitions, including ten country-specific travel
+advisories: 28 enabled and 18 explicitly inactive or access-gated. These are
+not 46 independent instruments or all 64 candidate observables in the planning
+register. Predictive validation remains outside the implemented watch: what is
+implemented is measurement, baseline and disclosure, not foresight.
 
 ## Subscribing (for a running deployment)
 
@@ -92,17 +116,22 @@ delivery channels remain outside the implemented watch.
 ## Operations
 
 See [OPERATIONS.md](OPERATIONS.md) for deployment, resource bounds, access, and
-recovery. [NUCLEAR-WARNING-STRATEGY.md](NUCLEAR-WARNING-STRATEGY.md) and
-[DIGITAL-SIGNAL-REGISTER.md](DIGITAL-SIGNAL-REGISTER.md) retain the wider design
-and candidate-source register. [ROADMAP.md](ROADMAP.md) records the aviation
-instrument's calibration work, not validated nuclear-warning capability.
+recovery. [CBRN-WATCH.md](CBRN-WATCH.md) defines the CBRN instrument rules and
+every alarm threshold. [NUCLEAR-WARNING-STRATEGY.md](NUCLEAR-WARNING-STRATEGY.md)
+and [DIGITAL-SIGNAL-REGISTER.md](DIGITAL-SIGNAL-REGISTER.md) retain the wider
+design and candidate-source register. [ROADMAP.md](ROADMAP.md) records the
+aviation instrument's calibration work, not validated nuclear-warning
+capability.
 
 ## Provenance
 
 This is an independent recreation, with a self-hostable backend, inspired by
 [Kyle McDonald's Apocalypse Early Warning System](https://ews.kylemcdonald.net/).
 It is not affiliated with or endorsed by the original. Aircraft data comes from
-ADS-B Exchange's public interfaces.
+ADS-B Exchange's public interfaces; live point queries in the CBRN aircraft
+instrument use [adsb.lol](https://adsb.lol) under the ODbL. Gamma telemetry is
+republished by the German Federal Office for Radiation Protection (BfS) through
+its public OGC service.
 
 ## License
 

@@ -77,6 +77,20 @@ const SOURCE_DEFINITIONS = [
   candidate('polymarket', 'Polymarket public market context', 'attention_pricing', 'prediction_market', 'polymarket-public-news-attention', 'https://docs.polymarket.com/', 'R24: Public reads documented; enroll specific contract resolution/liquidity rules before observation. No trading; price is not a calibrated nuclear probability.'),
   candidate('google-trends', 'Google Trends attention research', 'attention_pricing', 'search_interest', 'google-search-sampling', 'https://developers.google.com/search/blog/2025/07/trends-api', 'R25: Limited alpha entitlement not audited; documented daily-or-coarser delayed data, not an immediate precursor stream.', 'needs_access'),
   candidate('nga-maritime', 'NGA maritime warnings', 'hazard_declarations', 'maritime_notices', 'national-navarea-coordinators', 'https://msi.nga.mil/NavWarnings', 'R26: Public JavaScript app identified; stable automated feed/cancellation contract unresolved. May repeat national NAVAREA notices.'),
+  definition('faa-tfr', 'FAA temporary flight restrictions', 'warning_emissions', 'airspace_restriction', 'faa-tfr-geoserver', 'https://tfr.faa.gov/geoserver/TFR/ows?service=WFS&version=1.1.0&request=GetFeature&typeName=TFR:V_TFR_LOC&maxFeatures=300&outputFormat=application/json&srsname=EPSG:3857', 600, 3600,
+    'R27: GeoServer WFS is the stable TFR contract; legacy /tfr2/* and /save_pages/* return 404, NOTAM Search returns 403 to non-US egress. Active snapshot; absence is not cancellation. EPSG:3857 geometry is metres, not degrees.', { adapter: 'tfr' }),
+  definition('nrc-events', 'US NRC event notifications', 'radiation_geophysics', 'official_public_alert', 'us-nrc', 'https://www.nrc.gov/public-involve/rss?feed=event', 1800, 10800,
+    'R28: Public RSS plus today/yesterday daily event reports; non-browser User-Agent required. Empty RSS channel title is legitimate. Missing daily pages leave emergency class unknown; historical monthly text is stale and unused. The edge 403s occasional bursts regardless of User-Agent (observed 2026-09-11), so this source is polled at half cadence and relies on the registry backoff for recovery.', { adapter: 'nrc_events' }),
+  definition('nrc-reactor-status', 'US NRC reactor power status', 'radiation_geophysics', 'reactor_power_measurement', 'us-nrc', 'https://www.nrc.gov/public-involve/rss?feed=plant-status', 3600, 86400,
+    'R29: Public daily unit power RSS; non-browser User-Agent required. Reported power is not a radiation measurement or evidence of an emergency.', { adapter: 'nrc_reactor' }),
+  definition('iaea-news', 'IAEA news', 'public_reporting', 'official_news', 'iaea', 'https://www.iaea.org/feeds/news', 900, 7200,
+    'R30: Public news RSS, including statements and press releases; authority reporting is not itself a verified local hazard.', { adapter: 'rss_feed' }),
+  definition('who-outbreaks', 'WHO Disease Outbreak News', 'warning_emissions', 'official_public_alert', 'who', 'https://www.who.int/api/news/diseaseoutbreaknews?$top=25&$orderby=PublicationDateAndTime%20desc', 1800, 14400,
+    'R31: Public OData JSON; no WHO DON RSS exists. Latest 25 published reports, not exhaustive surveillance or inferred outbreak onset.', { adapter: 'who_don' }),
+  definition('ecdc-threats', 'ECDC Communicable Disease Threats Report', 'public_reporting', 'official_news', 'ecdc', 'https://www.ecdc.europa.eu/en/taxonomy/term/1505/feed', 3600, 604800,
+    'R32: Public weekly CDTR RSS; HTTP 429 observed. Real research User-Agent and hourly polling; provider retry delays remain authoritative.', { adapter: 'rss_feed' }),
+  definition('healthmap-alerts', 'HealthMap aggregate alerts', 'public_reporting', 'outbreak_aggregate', 'healthmap', 'https://www.healthmap.org/getAlerts.php', 1800, 7200,
+    'R33: Public JSON body despite text/html Content-Type. Endpoint publishes no terms of service or rate limit; courtesy cadence no faster than 30 minutes. Aggregate markers are unverified underlying reports, without per-item timestamps.', { adapter: 'healthmap' }),
 ];
 
 function sourceError(code, message, details = {}) {
@@ -563,6 +577,228 @@ async function bluesky(def, options) {
   });
 }
 
+function cbrnText(value, limit = 6000) {
+  if (value && typeof value === 'object') value = value['#text'];
+  return text(typeof value === 'string' ? value.replace(/<[^<>]{0,4096}>/gu, ' ') : '', limit);
+}
+
+async function cbrnRss(def, options) {
+  const response = await fetchBody(def.url, { ...options, maxBytes: MAX_BYTES });
+  const channel = parseXml(response.body).rss?.channel;
+  requireShape(channel && typeof channel === 'object' && !Array.isArray(channel), 'CBRN RSS channel missing');
+  const items = list(channel.item);
+  requireShape(items.length > 0 && items.every(item => item && typeof item === 'object' && !Array.isArray(item)), 'CBRN RSS items missing or malformed');
+  return { channel, items, bytes: response.bytes };
+}
+
+function deduplicateObservations(observations, timestamps = []) {
+  const groups = new Map();
+  let droppedCount = 0;
+  for (const [index, item] of observations.entries()) {
+    const timestamp = Number.isFinite(timestamps[index]) ? timestamps[index] : -Infinity;
+    const signature = JSON.stringify([item.title, item.summary, item.url, item.region, item.data]);
+    const group = groups.get(item.externalId);
+    if (!group) {
+      groups.set(item.externalId, { item, timestamp, signature, conflictingCount: 0 });
+      continue;
+    }
+    droppedCount++;
+    if (signature !== group.signature) group.conflictingCount++;
+    if (timestamp > group.timestamp) {
+      group.item = item;
+      group.timestamp = timestamp;
+    }
+  }
+  return {
+    observations: [...groups.values()].map(group => {
+      if (group.conflictingCount) group.item.data.conflictingCount = group.conflictingCount;
+      return group.item;
+    }),
+    droppedCount,
+  };
+}
+
+async function rssFeed(def, options) {
+  const { channel, items, bytes } = await cbrnRss(def, options);
+  const feedTitle = text(channel.title, 500);
+  requireShape(feedTitle, 'authority RSS title missing');
+  const observations = items.slice(0, MAX_ITEMS).map(item => {
+    const title = text(item.title, 500);
+    const description = cbrnText(item.description);
+    const externalId = text(item.guid, 2000) || text(item.link, 2000);
+    requireShape(title && externalId, 'authority RSS item title/identity missing');
+    const labels = attribution(`${title} ${description}`);
+    return observation({ externalId, title, summary: `${feedTitle}: ${description || 'Description not supplied.'}`, url: safeUrl(text(item.link, 2000)), publishedAt: iso(item.pubDate), region: labels.region, topics: ['cbrn_official', ...labels.topics], kind: 'report' });
+  });
+  const deduplicated = deduplicateObservations(observations, items.slice(0, MAX_ITEMS).map(item => Date.parse(item.pubDate)));
+  return result(deduplicated.observations, { bytes, scannedCount: items.length, duplicateItemsDropped: deduplicated.droppedCount, sourceUpdatedAt: iso(channel.lastBuildDate) || iso(channel.pubDate), truncated: items.length > MAX_ITEMS, coverage: `Authority RSS listings; publication times only when supplied with timezone, not hazard onset. Providers may republish items under a stable guid; ${deduplicated.droppedCount} duplicate items dropped, keeping the newest parseable pubDate (first seen on ties or missing dates). Conflicting content is counted in payload conflictingCount.` });
+}
+
+async function nrcReactor(def, options) {
+  const { channel, items, bytes } = await cbrnRss(def, options);
+  const observations = items.slice(0, MAX_ITEMS).map(item => {
+    const title = text(item.title, 500);
+    const match = /^(.+?)\s+-\s+(\d+(?:\.\d+)?)%\s+power$/iu.exec(title);
+    requireShape(match && Number.isFinite(Number(match[2])), 'NRC unit/power title malformed');
+    const unit = match[1].trim();
+    const powerPercent = Number(match[2]);
+    return observation({ externalId: unit, title, summary: `${def.name}: ${title}. Power status alone does not establish an emergency.`, url: safeUrl(text(item.link, 2000)), publishedAt: iso(item.pubDate), region: 'United States', topics: ['nuclear_facility', 'radiological_event'], kind: 'measurement', data: { unit, powerPercent } });
+  });
+  return result(observations, { bytes, scannedCount: items.length, sourceUpdatedAt: iso(channel.lastBuildDate) || iso(channel.pubDate), truncated: items.length > MAX_ITEMS, coverage: 'Reported reactor power per stable unit name; no inferred measurement time or emergency classification.' });
+}
+
+function nrcDaily(body, url) {
+  const markers = [...body.matchAll(/\bEvent Number:\s*(\d{4,8})\b/gu)];
+  requireShape(markers.length > 0 && markers.length <= MAX_ITEMS, 'NRC daily event blocks missing or excessive');
+  return markers.map((marker, index) => {
+    const block = body.slice(marker.index, Math.min(markers[index + 1]?.index ?? body.length, marker.index + 16000));
+    const fields = new Map();
+    for (const match of block.matchAll(/<b>\s*([^<>]{1,80}):\s*<\/b>([^<]{0,1000})/giu)) {
+      const key = text(match[1], 80);
+      if (!fields.has(key)) fields.set(key, text(match[2].replace(/&nbsp;/gu, ' '), 1000) || null);
+    }
+    const emergencyClass = fields.get('Emergency Class') || null;
+    return { externalId: marker[1], facility: fields.get('Facility') || fields.get('Site') || fields.get('Licensee') || fields.get('Rep Org') || null, state: fields.get('State') || null, emergencyClass, emergencyClassSource: emergencyClass ? url : null, eventDateText: fields.get('Event Date') || null, eventTimeText: fields.get('Event Time') || null, dailyReportUrl: url };
+  });
+}
+
+async function nrcEvents(def, options) {
+  const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(SOURCE_TIMEOUT_MS)]) : AbortSignal.timeout(SOURCE_TIMEOUT_MS);
+  const { channel, items, bytes: rssBytes } = await cbrnRss(def, { ...options, signal });
+  let bytes = rssBytes;
+  const observations = new Map();
+  for (const item of items.slice(0, MAX_ITEMS)) {
+    const title = text(item.title, 500);
+    const match = /^(\d{4,8})\s*-\s*(.+)$/u.exec(title);
+    requireShape(match, 'NRC event number/licensee missing');
+    observations.set(match[1], observation({ externalId: match[1], title, summary: `${def.name}: ${cbrnText(item.description) || 'Description not supplied.'}`, url: safeUrl(text(item.link, 2000)), publishedAt: iso(item.pubDate), region: 'United States / state unspecified', topics: ['cbrn_official', 'nuclear_facility'], kind: 'official_alert', data: { facility: match[2], state: null, emergencyClass: null, emergencyClassSource: null, eventDateText: null, eventTimeText: null } }));
+  }
+  const dailyGaps = [];
+  const enriched = new Set();
+  let scannedCount = items.length;
+  for (let offset = 0; offset < 2; offset++) {
+    const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(options.now - offset * 86400000)).replaceAll('-', '');
+    const url = `https://www.nrc.gov/reading-rm/doc-collections/event-status/event/${day.slice(0, 4)}/${day}en`;
+    try {
+      requireShape(!signal.aborted && bytes < MAX_BYTES, 'NRC shared deadline or byte cap reached');
+      let httpStatus;
+      const response = await fetchBody(url, { ...options, signal, maxBytes: MAX_BYTES - bytes, fetchImpl: async (request, init) => {
+        const fetched = await (options.fetchImpl || fetch)(request, { ...init, dispatcher: options.fetchImpl ? undefined : sourceDispatcher });
+        httpStatus = fetched.status;
+        return fetched;
+      } });
+      bytes += response.bytes;
+      requireShape(httpStatus === 200, 'NRC daily report requires HTTP 200');
+      const entries = nrcDaily(response.body, url);
+      scannedCount += entries.length;
+      for (const entry of entries) {
+        if (enriched.has(entry.externalId)) continue; // Today's report supersedes yesterday's copy.
+        enriched.add(entry.externalId);
+        const previous = observations.get(entry.externalId);
+        observations.set(entry.externalId, observation({ ...previous, externalId: entry.externalId, title: previous?.title || `${entry.externalId} - ${entry.facility || 'Facility not supplied'}`, summary: `${def.name}: emergency class ${entry.emergencyClass || 'not supplied'}. Event date: ${entry.eventDateText || 'not supplied'}; time: ${entry.eventTimeText || 'not supplied'}.`, url: previous?.url || url, region: entry.state ? `United States: ${entry.state}` : 'United States / state unspecified', topics: ['cbrn_official', 'nuclear_facility'], kind: 'official_alert', data: { ...entry, facility: entry.facility || previous?.data.facility || null } }));
+      }
+    } catch (error) {
+      bytes += Number.isFinite(error.bytes) ? error.bytes : 0;
+      dailyGaps.push({ url, code: error.code || 'invalid_source_response', message: text(error.message, 500), retryAfterMs: error.retryAfterMs ?? null });
+      if (error.httpStatus === 403 || error.httpStatus === 429 || error.retryAfterMs > 0 || signal.aborted || bytes >= MAX_BYTES) {
+        if (offset === 0) dailyGaps.push({ code: 'daily_request_not_attempted', message: 'Yesterday report skipped after provider refusal/delay or shared collection bound.' });
+        break;
+      }
+    }
+  }
+  return result([...observations.values()].slice(0, MAX_ITEMS), { bytes, scannedCount, sourceUpdatedAt: iso(channel.lastBuildDate) || iso(channel.pubDate), sourceGap: dailyGaps.length > 0, dailyGaps, truncated: items.length > MAX_ITEMS || observations.size > MAX_ITEMS, coverage: 'NRC RSS plus today/yesterday daily reports using US Eastern calendar dates. Direct canonical https://www.nrc.gov/reading-rm/doc-collections/event-status/event/{YYYY}/{YYYYMMDD}en (without .html); redirects are rejected and recorded as daily-page failures. Unknown emergency class stays null. Event date/time remains verbatim, not inferred UTC. Snapshot absence is not cancellation.' });
+}
+
+async function tfr(def, options) {
+  const response = await fetchBody(def.url, { ...options, maxBytes: MAX_BYTES });
+  const doc = parseJson(response.body);
+  requireShape(doc?.type === 'FeatureCollection' && Array.isArray(doc.features), 'TFR FeatureCollection missing');
+  let geometryTruncations = 0;
+  const groups = new Map();
+  let duplicatePolygonsMerged = 0;
+  for (const feature of doc.features.slice(0, MAX_ITEMS)) {
+    const p = feature?.properties;
+    const geometry = feature?.geometry;
+    requireShape(p && typeof p.NOTAM_KEY === 'string' && p.NOTAM_KEY.trim() && typeof p.TITLE === 'string' && p.TITLE.trim(), 'TFR NOTAM key/title missing');
+    requireShape(geometry && ['Polygon', 'MultiPolygon'].includes(geometry.type), 'TFR polygon missing');
+    const ring = geometry.type === 'Polygon' ? geometry.coordinates?.[0] : geometry.coordinates?.[0]?.[0];
+    requireShape(Array.isArray(ring) && ring.length >= 3, 'TFR first polygon ring malformed');
+    const vertices = ring.slice(0, 2000);
+    if (ring.length > 2000 || (geometry.type === 'MultiPolygon' && geometry.coordinates.length > 1)) geometryTruncations++;
+    let centroidLat = 0;
+    let centroidLon = 0;
+    for (const coordinate of vertices) {
+      requireShape(Array.isArray(coordinate) && finite(coordinate[0]) !== null && finite(coordinate[1]) !== null && Math.abs(coordinate[0]) <= Math.PI * 6378137 && Math.abs(coordinate[1]) <= Math.PI * 6378137, 'TFR Mercator coordinate malformed');
+      centroidLon += coordinate[0] / 6378137 * 180 / Math.PI;
+      centroidLat += (2 * Math.atan(Math.exp(coordinate[1] / 6378137)) - Math.PI / 2) * 180 / Math.PI;
+    }
+    centroidLat /= vertices.length;
+    centroidLon /= vertices.length;
+    const title = text(p.TITLE, 1000);
+    const reason = /\b(HAZARD|SECURITY|SPACE OPERATION|AIR SHOW|FIRE|VIP|LAUNCH)\b/iu.exec(title)?.[1].toUpperCase() || null;
+    const lastModified = text(p.LAST_MODIFICATION_DATETIME, 100) || null;
+    const state = text(p.STATE, 100) || null;
+    const externalId = p.NOTAM_KEY;
+    const centroid = [Number(centroidLat.toFixed(4)), Number(centroidLon.toFixed(4))];
+    const group = groups.get(externalId);
+    if (group) {
+      duplicatePolygonsMerged++;
+      const data = group.data;
+      if (title !== data.title || state !== data.state || lastModified !== data.lastModified || reason !== data.reason) data.conflictingCount++;
+      data.polygonCount++;
+      data.centroidLat += centroidLat;
+      data.centroidLon += centroidLon;
+      if (data.centroids.length < 12) data.centroids.push(centroid);
+    } else {
+      groups.set(externalId, observation({ externalId, title, summary: `FAA active TFR: ${title}. Snapshot absence is not cancellation.`, url: def.url, region: state || 'United States / state unspecified', topics: ['airspace_restriction', 'cbrn_official'], kind: reason ? 'official_alert' : 'context', data: { notamKey: externalId, title, state, centroidLat, centroidLon, lastModified, reason, polygonCount: 1, centroids: [centroid], conflictingCount: 0 } }));
+    }
+  }
+  const observations = [...groups.values()];
+  for (const { data } of observations) {
+    data.centroidLat /= data.polygonCount;
+    data.centroidLon /= data.polygonCount;
+  }
+  return result(observations, { bytes: response.bytes, scannedCount: doc.features.length, duplicatePolygonsMerged, sourceUpdatedAt: null, truncated: doc.features.length >= 300 || geometryTruncations > 0, geometryTruncations, coverage: `Active WFS snapshot, requested cap 300. ${duplicatePolygonsMerged} duplicate polygon rows merged by NOTAM key, averaging per-feature centroids; first title/state/modification/reason retained and disagreements counted in payload conflictingCount. Approximate vertex-average centroid of first exterior ring, at most 2000 vertices; not full area centroid. Audit centroids rounded to 4 decimals and capped at 12 per key. Modification time preserved without guessing timezone. Absence is not cancellation.` });
+}
+
+async function whoDon(def, options) {
+  const response = await fetchBody(def.url, { ...options, maxBytes: MAX_BYTES });
+  const doc = parseJson(response.body);
+  requireShape(doc && Array.isArray(doc.value) && doc.value.length > 0, 'WHO DON value array missing/empty');
+  const observations = doc.value.slice(0, MAX_ITEMS).map(item => {
+    requireShape(item && (typeof item.DonId === 'string' || Number.isSafeInteger(item.DonId)) && String(item.DonId).trim() && text(item.Title) && typeof item.ItemDefaultUrl === 'string', 'WHO DON identity/title/slug missing');
+    const slug = item.ItemDefaultUrl.split('/').filter(Boolean).at(-1);
+    requireShape(slug && /^[A-Za-z0-9._~-]+$/u.test(slug) && slug !== '.' && slug !== '..', 'WHO DON slug malformed');
+    const data = { contentTruncated: false };
+    for (const field of ['Overview', 'Assessment', 'Advice']) {
+      requireShape(item[field] == null || typeof item[field] === 'string', `WHO ${field} malformed`);
+      data[field.toLowerCase()] = item[field] == null ? null : cbrnText(item[field], 12000);
+      data.contentTruncated ||= typeof item[field] === 'string' && cbrnText(item[field], 12001).length > 12000;
+    }
+    return observation({ externalId: String(item.DonId), title: text(item.Title, 500), summary: cbrnText(item.Summary) || 'Summary not supplied.', url: safeUrl(`https://www.who.int/emergencies/disease-outbreak-news/item/${slug}`), publishedAt: iso(item.PublicationDateAndTime), region: attribution(`${item.Title} ${cbrnText(item.Summary)}`).region, topics: ['biological_outbreak', 'cbrn_official'], kind: 'official_alert', data });
+  });
+  return result(observations, { bytes: response.bytes, scannedCount: doc.value.length, sourceUpdatedAt: observations.map(item => item.publishedAt).filter(Boolean).sort().at(-1) || null, truncated: doc.value.length >= 25 || Boolean(doc['@odata.nextLink']) || observations.some(item => item.data.contentTruncated), coverage: 'Latest 25 WHO DON publications; no exhaustive outbreak coverage or inferred event onset. Overview/assessment/advice individually capped at 12000 characters.' });
+}
+
+async function healthmap(def, options) {
+  const response = await fetchBody(def.url, { ...options, maxBytes: MAX_BYTES });
+  const doc = parseJson(response.body);
+  requireShape(doc && Array.isArray(doc.markers) && doc.markers.length > 0, 'HealthMap marker array missing/empty');
+  const observations = doc.markers.slice(0, 100).map(marker => {
+    requireShape(marker && Array.isArray(marker.alertids) && marker.alertids.length > 0, 'HealthMap alert identifiers missing');
+    const alertIds = marker.alertids.slice(0, 20).map(id => {
+      requireShape((typeof id === 'string' && id.trim()) || Number.isSafeInteger(id), 'HealthMap alert identifier malformed');
+      return String(id);
+    });
+    const placeName = cbrnText(marker.place_name, 500) || null;
+    const label = cbrnText(marker.label, 500);
+    requireShape(label || placeName, 'HealthMap marker label/place missing');
+    return observation({ externalId: alertIds[0], title: label || placeName, summary: `${label || 'Label not supplied'}; ${placeName || 'Place not supplied'}. Aggregate marker; underlying report not verified.`, url: def.url, region: placeName || 'Place not supplied', occurredAt: null, topics: ['biological_outbreak', 'public_reporting'], kind: 'report', data: { lat: finite(marker.lat), lon: finite(marker.lon), placeName, alertIds, alertIdsTruncated: marker.alertids.length > 20, sourceNote: 'aggregate marker; underlying report not verified' } });
+  });
+  const deduplicated = deduplicateObservations(observations);
+  return result(deduplicated.observations, { bytes: response.bytes, scannedCount: doc.markers.length, duplicateMarkersDropped: deduplicated.droppedCount, sourceUpdatedAt: null, truncated: doc.markers.length > 100 || observations.some(item => item.data.alertIdsTruncated), coverage: `First 100 aggregate markers, at most 20 alert IDs each. ${deduplicated.droppedCount} duplicate markers dropped by alert ID, keeping the first in provider order without merging places; disagreements counted in payload conflictingCount. Aggregate carries no per-item timestamp; underlying reports not verified. Courtesy polling at least 30 minutes apart.` });
+}
+
 async function collectSource(definitionValue, options = {}) {
   // The registry, not callers or model text, selects network/file destinations.
   const def = SOURCE_DEFINITIONS.find(source => source.id === definitionValue?.id);
@@ -575,6 +811,12 @@ async function collectSource(definitionValue, options = {}) {
   if (def.adapter === 'nws') return nws(def, settings);
   if (def.adapter === 'gdelt') return gdelt(def, settings);
   if (def.adapter === 'bluesky') return bluesky(def, settings);
+  if (def.adapter === 'rss_feed') return rssFeed(def, settings);
+  if (def.adapter === 'nrc_events') return nrcEvents(def, settings);
+  if (def.adapter === 'nrc_reactor') return nrcReactor(def, settings);
+  if (def.adapter === 'tfr') return tfr(def, settings);
+  if (def.adapter === 'who_don') return whoDon(def, settings);
+  if (def.adapter === 'healthmap') return healthmap(def, settings);
   const response = await fetchBody(def.url, settings);
   const xml = ['easa', 'faa'].includes(def.adapter);
   const doc = xml ? parseXml(response.body) : parseJson(response.body);
