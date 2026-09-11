@@ -195,6 +195,8 @@ export default function DetectorPage() {
             An NRC event notification at emergency class Alert, Site Area Emergency or General Emergency reports as
             high; anything else as operator-only. An actual CAP warning of type Nuclear Power Plant, Radiological
             Hazard or Hazardous Materials reports as critical, carrying the issuing authority's own text verbatim.
+            Agency reporting — outbreak bulletins, IAEA news, aggregate disease feeds — is collected and stays on the
+            operator surface. A published report is not one of our detections.
           </dd>
           <dt>Vocabulary</dt>
           <dd>

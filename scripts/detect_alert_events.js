@@ -165,10 +165,83 @@ function formatDecimal(value, digits = 1) {
   });
 }
 
-function takeoffSeverityForZScore(zScore) {
-  if (zScore >= 6) return 'critical';
-  if (zScore >= 4.5) return 'high';
+function takeoffSeverityForZScore(zScore, ladder = { elevated: 5, high: 6.5, critical: 8 }) {
+  if (!ladder.calibrated) {
+    if (zScore >= ladder.critical) return 'critical';
+    if (zScore >= ladder.high) return 'high';
+    if (zScore >= ladder.elevated) return 'elevated';
+    return 'watch';
+  }
+  if (!(zScore > ladder.elevated)) return 'watch';
+  if (ladder.high > ladder.elevated && zScore > ladder.high) {
+    if (ladder.critical > ladder.high && zScore > ladder.critical) return 'critical';
+    return 'high';
+  }
   return 'elevated';
+}
+
+function getTakeoffLadder(db, cohort, observedAt) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS slot_scores (
+      cohort TEXT NOT NULL,
+      sampled_at TEXT NOT NULL,
+      takeoff_rate_z REAL,
+      count INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (cohort, sampled_at)
+    )
+  `);
+  // Exclude the evaluated slot (including reruns) and future replay rows.
+  const parameters = {
+    cohort,
+    start: isoOffset(observedAt, -365 * DAY_MS),
+    end: parseIso(observedAt, 'observedAt').toISOString(),
+  };
+  const record = db.prepare(`
+    SELECT COUNT(*) AS samples,
+      (MAX(unixepoch(sampled_at)) - MIN(unixepoch(sampled_at))) / 1800.0 AS span_slots,
+      MAX(takeoff_rate_z) AS maximum
+    FROM slot_scores
+    WHERE cohort = @cohort AND sampled_at >= @start AND sampled_at < @end
+      AND takeoff_rate_z IS NOT NULL
+  `).get(parameters);
+  const samples = record.samples;
+  const spanSlots = record.span_slots || 0;
+  const k = Object.fromEntries(
+    [['elevated', 12], ['high', 4], ['critical', 1]].map(([severity, rate]) =>
+      [severity, Math.max(1, Math.ceil(rate * spanSlots / (365 * 48)))]),
+  );
+  const ladder = {
+    calibrated: samples >= 500,
+    samples,
+    window_days: spanSlots / 48,
+    span_slots: spanSlots,
+    k,
+    elevated: 5,
+    high: 6.5,
+    critical: 8,
+  };
+  if (ladder.calibrated) {
+    // A strict exceedance of the (k+1)-th largest admits at most k past slots,
+    // including when scores tie at the boundary.
+    const quantile = db.prepare(`
+      SELECT takeoff_rate_z AS threshold
+      FROM slot_scores
+      WHERE cohort = @cohort AND sampled_at >= @start AND sampled_at < @end
+        AND takeoff_rate_z IS NOT NULL
+      ORDER BY takeoff_rate_z DESC
+      LIMIT 1 OFFSET @offset
+    `);
+    for (const severity of ['elevated', 'high', 'critical']) {
+      ladder[severity] = quantile.get({
+        ...parameters,
+        offset: Math.min(samples - 1, k[severity]),
+      }).threshold;
+    }
+    ladder.critical = record.maximum;
+  }
+  ladder.tiers_distinct = ladder.elevated < ladder.high && ladder.high < ladder.critical;
+  return ladder;
 }
 
 function getTakeoffWindow(observedAt, windowMinutes) {
@@ -682,6 +755,16 @@ function buildEvents({
     takeoffLiveSource,
   });
   const takeoffRateZ = (takeoffs.length - takeoffRateStats.expectedTakeoffCount) / takeoffRateStats.effectiveTakeoffStdDev;
+  const ladder = getTakeoffLadder(db, cohort, occurredAt);
+  if (takeoffScoringActive) {
+    db.prepare(`
+      INSERT INTO slot_scores (cohort, sampled_at, takeoff_rate_z, count)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(cohort, sampled_at) DO UPDATE SET
+        takeoff_rate_z = excluded.takeoff_rate_z,
+        count = excluded.count
+    `).run(cohort, parseIso(occurredAt, 'occurredAt').toISOString(), takeoffRateZ, takeoffs.length);
+  }
   const aircraft = compactAircraftList(takeoffs);
   const events = [];
 
@@ -733,17 +816,16 @@ function buildEvents({
   if (
     takeoffScoringActive &&
     takeoffRateStats.modelReady &&
-    takeoffs.length >= takeoffRateMinCount &&
     takeoffRateZ >= takeoffRateZScore
   ) {
     events.push({
       kind: 'takeoff_rate_anomaly',
-      severity: takeoffSeverityForZScore(takeoffRateZ),
+      severity: takeoffs.length < takeoffRateMinCount ? 'watch' : takeoffSeverityForZScore(takeoffRateZ, ladder),
       cohort,
       eventKey: `takeoff_rate_anomaly:${cohort}:${takeoffWindow.windowStart}:${takeoffWindow.windowEnd}`,
       occurredAt,
       title: `${takeoffs.length} takeoffs vs ${formatDecimal(takeoffRateStats.expectedTakeoffCount)} expected`,
-      message: `${cohort} produced ${takeoffs.length} takeoffs within ${takeoffWindow.windowMinutes} minutes, ${formatDecimal(takeoffRateZ)}σ above its recent takeoff-rate baseline.`,
+      message: `${cohort} produced ${takeoffs.length} takeoffs within ${takeoffWindow.windowMinutes} minutes, ${formatDecimal(takeoffRateZ)}σ above its recent takeoff-rate baseline. Ladder (365-day record, ${ladder.samples} slots): elevated ${ladder.calibrated ? '>' : '>='} ${ladder.elevated}, high ${ladder.calibrated ? '>' : '>='} ${ladder.high}, critical ${ladder.calibrated ? '>' : '>='} ${ladder.critical}.`,
       payloadJson: JSON.stringify({
         signalFamily: 'takeoff_rate',
         model: takeoffRateStats.model,
@@ -763,6 +845,7 @@ function buildEvents({
         takeoffRateZScore: takeoffRateZ,
         takeoffRateZScoreThreshold: takeoffRateZScore,
         takeoffRateMinCount,
+        ladder,
         sampleCount: takeoffRateStats.sampleCount,
         sampleDayCount: takeoffRateStats.sampleDayCount,
         requiredSampleCount: takeoffRateStats.requiredSampleCount,

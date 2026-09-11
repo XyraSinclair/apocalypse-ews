@@ -88,10 +88,13 @@ function detect(watch, settings, now = Date.now()) {
       } else if (source === 'who-outbreaks' || source === 'ecdc-threats') {
         const matched = agents.filter(([, re]) => re.test(String(o.title || '').normalize('NFKC'))).map(([term]) => term);
         if (!matched.length) continue;
-        const published = Date.parse(o.publishedAt);
-        const level = published <= now && published >= now - 7 * 86400000 ? 3 : 1;
         const authority = source === 'who-outbreaks' ? 'the World Health Organization' : 'the European Centre for Disease Prevention and Control';
-        emit(row, o, level, o.title || 'CBRN-relevant outbreak report', `${authority} outbreak report; title matches: ${matched.join(', ')}.`, { agents: matched, publishedAt: o.publishedAt ?? null, authority });
+        // A published outbreak report is a report, not one of our detections.
+        // The public tier is reserved for measurements that leave their own
+        // distribution and for authorities' own protective instructions; an
+        // authority's report stays on the operator surface, where its arrival
+        // is useful context and its push is not.
+        emit(row, o, 1, o.title || 'CBRN-relevant outbreak report', `${authority} outbreak report; title matches: ${matched.join(', ')}.`, { agents: matched, publishedAt: o.publishedAt ?? null, authority });
       } else {
         // Aggregate and agency feeds are collected for context, but emitting an
         // event for every item would flood the operator surface with routine
