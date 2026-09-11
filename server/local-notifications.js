@@ -13,6 +13,14 @@ const ALERT_DISPATCH_LIMIT = 25;
 const EMAIL_CONCURRENCY = 8;
 const SMS_MIN_INTERVAL_MS = 250;
 const ALERTABLE_EVENT_KINDS = ['statistical_anomaly', 'takeoff_anomaly', 'takeoff_rate_anomaly'];
+// CBRN events share one cohort across both operator-only (`watch`) and public
+// severities, so kind alone cannot decide delivery: the severity condition is
+// what keeps thirty routine notices on the operator surface instead of in a
+// subscriber's inbox. Aviation kinds keep their existing unconditional
+// behaviour, and `watch` never leaves the operator surface for any cohort.
+const CBRN_ALERTABLE_KINDS = ['cbrn_radiation_anomaly', 'cbrn_airspace_void', 'cbrn_aircraft_emergency', 'cbrn_special_aircraft', 'cbrn_lexical_burst', 'cbrn_official_notice', 'cbrn_fused'];
+const DELIVERABLE_KINDS = [...ALERTABLE_EVENT_KINDS, ...CBRN_ALERTABLE_KINDS];
+const DELIVERABLE_CONDITION = `(kind IN (${ALERTABLE_EVENT_KINDS.map(() => '?').join(', ')}) OR (kind IN (${CBRN_ALERTABLE_KINDS.map(() => '?').join(', ')}) AND severity <> 'watch'))`;
 
 
 class HttpError extends Error {
@@ -959,13 +967,12 @@ async function dispatchOne(db, env, alert, subscriber, channel, pacer = null, re
 }
 
 async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISPATCH_LIMIT } = {}) {
-  const alertableKindPlaceholders = ALERTABLE_EVENT_KINDS.map(() => '?').join(', ');
   db.prepare(`
     UPDATE alert_events
     SET status = 'observed'
     WHERE status IN ('pending', 'failed', 'partial')
-      AND kind NOT IN (${alertableKindPlaceholders})
-  `).run(...ALERTABLE_EVENT_KINDS);
+      AND NOT ${DELIVERABLE_CONDITION}
+  `).run(...DELIVERABLE_KINDS);
 
   const maxAlerts = Math.min(Math.max(Number(limit) || ALERT_DISPATCH_LIMIT, 1), 100);
   const staleProcessingMs = Math.max(Number(env.ALERT_PROCESSING_STALE_MS || 30 * 60 * 1000), 60 * 1000);
@@ -982,17 +989,17 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
             AND CAST(COALESCE(strftime('%s', dispatched_at), '0') AS INTEGER) <= ?
           )
         )
-        AND kind IN (${alertableKindPlaceholders})
+        AND ${DELIVERABLE_CONDITION}
       ORDER BY occurred_at ASC, id ASC
       LIMIT ?
     `)
-    .all(staleProcessingBeforeEpoch, ...ALERTABLE_EVENT_KINDS, maxAlerts);
+    .all(staleProcessingBeforeEpoch, ...DELIVERABLE_KINDS, maxAlerts);
   const claimAlert = db.prepare(`
     UPDATE alert_events
     SET status = 'processing',
         dispatched_at = ?
     WHERE id = ?
-      AND kind IN (${alertableKindPlaceholders})
+      AND ${DELIVERABLE_CONDITION}
       AND (
         status IN ('pending', 'failed', 'partial')
         OR (
@@ -1004,7 +1011,7 @@ async function dispatchPendingAlerts(db, env = process.env, { limit = ALERT_DISP
   const alerts = [];
   for (const candidate of candidates) {
     const processingLeaseStamp = new Date().toISOString();
-    const claim = claimAlert.run(processingLeaseStamp, candidate.id, ...ALERTABLE_EVENT_KINDS, staleProcessingBeforeEpoch);
+    const claim = claimAlert.run(processingLeaseStamp, candidate.id, ...DELIVERABLE_KINDS, staleProcessingBeforeEpoch);
     if (claim.changes === 1) {
       alerts.push({ ...candidate, status: 'processing', processingLeaseStamp });
     }
