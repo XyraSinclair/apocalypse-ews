@@ -848,7 +848,7 @@ function buildEvents({
         eventKey: `sustained_shift:${cohort}:${severity}:${occurredAt}`,
         occurredAt,
         title: 'Sustained above-baseline aircraft activity',
-        message: `${cohort} concurrent activity has stayed persistently above its baseline: cumulative deviation ${formatDecimal(cusum.state.s)} crossed ${formatDecimal(threshold)} (drift allowance ${formatDecimal(cusumK, 2)}σ per slot). A slow, sustained shift like this will not spike the instantaneous gauge.`,
+        message: `${cohort} concurrent activity: cumulative deviation ${formatDecimal(cusum.state.s)} >= ${formatDecimal(threshold)} threshold (drift allowance ${formatDecimal(cusumK, 2)}σ per slot).`,
         payloadJson: JSON.stringify({
           signalFamily: 'sustained_shift',
           cohort,

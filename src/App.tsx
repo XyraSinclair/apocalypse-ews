@@ -1,7 +1,5 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
-import WatchPage, { WatchNavigation } from './WatchPage';
-import CbrnPage from './CbrnPage';
-import AlertPlan from './AlertPlan';
+import DetectorPage from './DetectorPage';
 
 const DASHBOARD_URLS = {
   business: import.meta.env.VITE_DASHBOARD_URL || '/dashboard.json',
@@ -473,13 +471,12 @@ async function saveManagedSubscriber(payload: Record<string, unknown>): Promise<
 
 function App() {
   const path = window.location.pathname;
+  // One public page. Subscription plumbing keeps its own routes because those
+  // links arrive by email; nothing else is a destination.
   const page = path.startsWith('/signup') ? <SignupPage />
     : path.startsWith('/manage') ? <ManagePage />
-    : path.startsWith('/event-signals') ? <EventSignalsPage />
-    : path === '/plan' ? <AlertPlan />
-    : path === '/aviation' ? <DashboardPage />
-    : path.startsWith('/cbrn') ? <CbrnPage /> : <WatchPage />;
-  return <><WatchNavigation />{page}{path !== '/plan' && <FeedbackWidget />}</>;
+    : <DetectorPage />;
+  return <main>{page}{path === '/' && <FeedbackWidget />}</main>;
 }
 
 const FEEDBACK_API = 'https://api.scry.io/v1/feedback';

@@ -107,8 +107,7 @@ function detect(db, settings, now = Date.now()) {
       const sameHour = baselineRows.filter((prior) => new Date(prior.sampled_at).getUTCHours() === new Date(at).getUTCHours());
       const emit = (kind, level, suffix, message, payload, keyParts) => {
         const event = buildCbrnEvent({ kind, level, occurredAt: row.sampled_at, title: `${suffix}: ${region.name}`, message,
-          payload: { region: region.id, control_healthy: true, ...payload }, keyParts, source: 'adsb.lol',
-          action: 'Check official local airspace and emergency notices. This aircraft observation alone is not evidence of a CBRN release; follow local authorities if protective instructions are issued.' });
+          payload: { region: region.id, control_healthy: true, ...payload }, keyParts, source: 'adsb.lol' });
         const previous = events.get(event.eventKey);
         if (!previous || SEVERITY_RANK[event.severity] >= SEVERITY_RANK[previous.severity]) events.set(event.eventKey, event);
       };
@@ -127,7 +126,7 @@ function detect(db, settings, now = Date.now()) {
         if (isVoid && s > 0) {
           const level = consecutive >= 3 && row.aircraft_count <= 0.1 * stats.median ? 3 : 1;
           const facts = { lat: region.lat, lon: region.lon, count: row.aircraft_count, baseline_median: stats.median, baseline_samples: sameHour.length, z, cusum: s, consecutive, absolute_floor: { baseline_median: 15, public_max_ratio: 0.1 }, fusion_eligible: level === 3 };
-          emit(KIND.AIRSPACE_VOID, level, 'Air traffic drop', `Air traffic over ${region.name} fell to ${row.aircraft_count} aircraft against a typical ${stats.median} at this hour (baseline 21 days, ${sameHour.length} samples). Avoidance of this scale also happens for ordinary weather, maintenance and airspace notices; we cannot yet distinguish those causes. Continued observations and independent local reports would change this assessment.`, facts, [region.id, 'void', hour]);
+          emit(KIND.AIRSPACE_VOID, level, 'Air traffic drop', `Air traffic over ${region.name}: ${row.aircraft_count} aircraft vs a same-hour median of ${stats.median} (21 days, ${sameHour.length} samples); robust z ${z.toFixed(2)}, ${consecutive} consecutive low samples, CUSUM ${s.toFixed(2)}. Threshold: count <= 0.25x median or z <= -5, CUSUM > 0.`, facts, [region.id, 'void', hour]);
           if (level === 3) setState(`fusion:${region.id}`, 'window', { region: region.id, timestamp: row.sampled_at, occurred_at: row.sampled_at, kind: KIND.AIRSPACE_VOID, level, control_healthy: true, ...facts });
         }
       }
@@ -141,7 +140,7 @@ function detect(db, settings, now = Date.now()) {
         if (row.emergency_count >= 1 && z > 0) {
           const floor = stats.median === 0 ? 4 : 3;
           const level = row.emergency_count >= floor && row.emergency_count >= 3 * stats.median ? 3 : 1;
-          emit(KIND.AIRCRAFT_EMERGENCY, level, 'Aircraft emergency indications', `${row.emergency_count} aircraft over ${region.name} reported emergency indications in one sample, against a seven-day median of ${stats.median} (${recent.length} samples). These indications include radio failure and other unrelated aviation emergencies; they do not identify a CBRN event. Official aviation reports and subsequent samples would clarify whether the indications are related.`, { count: row.emergency_count, baseline_median: stats.median, baseline_samples: recent.length, z, absolute_floor: floor, watch_floor: 1 }, [region.id, 'emergency', row.sampled_at]);
+          emit(KIND.AIRCRAFT_EMERGENCY, level, 'Aircraft emergency indications', `${row.emergency_count} aircraft over ${region.name} reported emergency indications in 1 sample vs a 7-day median of ${stats.median} (${recent.length} samples); robust z ${z.toFixed(2)}. Threshold: count >= 1 and z > 0.`, { count: row.emergency_count, baseline_median: stats.median, baseline_samples: recent.length, z, absolute_floor: floor, watch_floor: 1 }, [region.id, 'emergency', row.sampled_at]);
         }
       }
       const previousSpecial = getState(`aircraft:${region.id}`, 'special');
@@ -158,7 +157,7 @@ function detect(db, settings, now = Date.now()) {
             const z = robustZ(count, stats, 1);
             if (count < 1 || !(previousMetadata.types[type] >= 1) || z <= 0 || emittedClasses.has(label)) continue;
             emittedClasses.add(label);
-            emit(KIND.SPECIAL_AIRCRAFT, 1, 'Special-mission aircraft observation', `A ${label} class was observed over ${region.name} in two consecutive samples, above its recent baseline. Routine training and special-mission flights look like this too; the observation does not establish a hazard or mission intent. Further samples and official notices would clarify the context.`, { class_label: label, count, baseline_median: stats.median, baseline_samples: recent.length, z, absolute_floor: 1, consecutive_samples: 2 }, [region.id, 'special', label, hour]);
+            emit(KIND.SPECIAL_AIRCRAFT, 1, 'Special-mission aircraft observation', `${count} ${label} aircraft over ${region.name}; present in 2 consecutive samples vs a 7-day median of ${stats.median} (${recent.length} samples), robust z ${z.toFixed(2)}. Threshold: count >= 1 in each sample and z > 0.`, { class_label: label, count, baseline_median: stats.median, baseline_samples: recent.length, z, absolute_floor: 1, consecutive_samples: 2 }, [region.id, 'special', label, hour]);
           }
         }
         setState(`aircraft:${region.id}`, 'special', { sampled_at: row.sampled_at });

@@ -40,9 +40,9 @@ function detect(watch, settings, now = Date.now()) {
   const trips = [];
   const since = now - settings.minutes * 60000;
   const prior = watch.prepare('SELECT observation, observed_at FROM watch_evidence WHERE source_id = ? AND external_id = ? AND observed_at <= ? ORDER BY observed_at DESC, id DESC LIMIT 1');
-  const emit = (row, observation, level, title, message, classification, keys = [row.external_id], action) => {
+  const emit = (row, observation, level, title, message, classification, keys = [row.external_id]) => {
     summary.matched[row.source_id] += 1;
-    events.push(buildCbrnEvent({ kind: KIND.OFFICIAL_NOTICE, level, occurredAt: new Date(row.observed_at).toISOString(), title, message, action, source: row.source_id, publicUrl: observation.url, keyParts: [row.source_id, ...keys].map(encodeURIComponent), payload: { source_id: row.source_id, external_id: row.external_id, source_url: observation.url ?? null, ...classification } }));
+    events.push(buildCbrnEvent({ kind: KIND.OFFICIAL_NOTICE, level, occurredAt: new Date(row.observed_at).toISOString(), title, message, source: row.source_id, publicUrl: observation.url, keyParts: [row.source_id, ...keys].map(encodeURIComponent), payload: { source_id: row.source_id, external_id: row.external_id, source_url: observation.url ?? null, ...classification } }));
   };
   for (const source of SOURCES) {
     summary.heads[source] = watch.prepare('SELECT count(*) AS n FROM watch_items WHERE source_id = ?').get(source).n;
@@ -57,17 +57,16 @@ function detect(watch, settings, now = Date.now()) {
       if (!o || typeof o !== 'object') { summary.invalid += 1; continue; }
       if (o.status === 'cancelled') continue;
       const d = o.data || {};
-      const context = 'This notice alone does not establish a deliberate release. Updated authority notices and independent measurements would change the assessment.';
       if (source === 'nws-civil-alerts') {
         if (!['Nuclear Power Plant Warning', 'Radiological Hazard Warning', 'Hazardous Materials Warning'].includes(d.event) || d.actual !== true || d.test === true) continue;
         if (d.expiresAt != null && !(Date.parse(d.expiresAt) > now)) continue;
         if (!d.messageId || !d.messageType) { summary.invalid += 1; continue; }
         const instruction = typeof d.instruction === 'string' && d.instruction.trim() ? d.instruction : d.description || o.summary || '';
-        emit(row, o, 5, o.title || d.event, `Official CBRN protective instruction. The issuing authority's text follows verbatim.\nHeadline: ${d.headline ?? o.title ?? 'Not supplied'}\nIssuing authority: ${d.senderName ?? 'Not supplied'}\nAffected area: ${d.area ?? 'Not supplied'}\nUTC expiry: ${d.expiresAt == null ? 'Not supplied' : new Date(d.expiresAt).toISOString()}\nAuthority instruction / description:\n${instruction}\n\nA subsequent update or cancellation by this authority changes this instruction.`, { event: d.event, actual: d.actual, test: d.test ?? null, messageId: d.messageId, messageType: d.messageType, headline: d.headline ?? o.title, senderName: d.senderName ?? null, area: d.area ?? null, expiresAt: d.expiresAt ?? null, instruction, description: d.description ?? null }, [d.messageId, d.messageType], instruction || 'Consult the issuing authority immediately; no instruction text was supplied.');
+        emit(row, o, 5, o.title || d.event, `Headline: ${d.headline ?? o.title ?? 'Not supplied'}\nIssuing authority: ${d.senderName ?? 'Not supplied'}\nAffected area: ${d.area ?? 'Not supplied'}\nUTC expiry: ${d.expiresAt == null ? 'Not supplied' : new Date(d.expiresAt).toISOString()}\nAuthority instruction / description:\n${instruction}`, { event: d.event, actual: d.actual, test: d.test ?? null, messageId: d.messageId, messageType: d.messageType, headline: d.headline ?? o.title, senderName: d.senderName ?? null, area: d.area ?? null, expiresAt: d.expiresAt ?? null, instruction, description: d.description ?? null }, [d.messageId, d.messageType]);
       } else if (source === 'nrc-events') {
         const emergencyClass = d.emergencyClass ?? null;
         const level = /^(alert|site area emergency|general emergency)$/i.test(String(emergencyClass ?? '').trim()) ? 4 : 1;
-        emit(row, o, level, o.title || 'NRC event notification', `NRC event notification for ${d.facility ?? 'facility not supplied'}, ${d.state ?? 'state not supplied'}. Classification (verbatim): ${emergencyClass ?? 'not supplied'}. NRC event notifications are licensee-reported and US-only; a Non-Emergency classification is routine. ${context}`, { emergencyClass, facility: d.facility ?? null, state: d.state ?? null, eventNumber: row.external_id }, [row.external_id]);
+        emit(row, o, level, o.title || 'NRC event notification', `NRC event notification for ${d.facility ?? 'facility not supplied'}, ${d.state ?? 'state not supplied'}. Classification (verbatim): ${emergencyClass ?? 'not supplied'}. Source: nrc-events, licensee reports, US-only.`, { emergencyClass, facility: d.facility ?? null, state: d.state ?? null, eventNumber: row.external_id }, [row.external_id]);
       } else if (source === 'nrc-reactor-status') {
         if (typeof d.unit !== 'string' || typeof d.powerPercent !== 'number' || d.powerPercent < 0 || d.powerPercent > 5) continue;
         const previous = prior.get(source, row.external_id, row.observed_at - 1800000);
@@ -83,7 +82,7 @@ function detect(watch, settings, now = Date.now()) {
         for (const region of regions.filter((r) => r.enabled && r.role === 'target')) {
           const distance = haversineKm(region.lat, region.lon, d.centroidLat, d.centroidLon);
           if (distance > 80) continue;
-          emit(row, o, 1, `New airspace restriction near ${region.name}`, `First observed FAA TFR within 80 km of ${region.name}.\nFAA title (verbatim): ${d.title ?? o.title ?? 'Not supplied'}\nState (verbatim): ${d.state ?? 'Not supplied'}\nModification time (verbatim; timezone not inferred): ${d.lastModified ?? 'Not supplied'}\nMost TFRs are routine — firefighting, launches, security, military training. This observation alone does not establish a hazard. NOTAM details, independent measurements and official protective instructions would change the assessment.`, { title: d.title ?? o.title ?? null, state: d.state ?? null, lastModified: d.lastModified ?? null, region: region.id, centroidLat: d.centroidLat, centroidLon: d.centroidLon, distance_km: distance }, [row.external_id, region.id]);
+          emit(row, o, 1, `New airspace restriction near ${region.name}`, `First observed FAA TFR ${distance.toFixed(1)} km from ${region.name}; threshold: distance <= 80 km.\nFAA title (verbatim): ${d.title ?? o.title ?? 'Not supplied'}\nState (verbatim): ${d.state ?? 'Not supplied'}\nModification time (verbatim; source timezone): ${d.lastModified ?? 'Not supplied'}`, { title: d.title ?? o.title ?? null, state: d.state ?? null, lastModified: d.lastModified ?? null, region: region.id, centroidLat: d.centroidLat, centroidLon: d.centroidLon, distance_km: distance }, [row.external_id, region.id]);
           states.push({ series: `fusion:${region.id}`, method: 'window', state: { region: region.id, timestamp: new Date(row.observed_at).toISOString(), occurred_at: new Date(row.observed_at).toISOString(), kind: KIND.OFFICIAL_NOTICE, level: 1, source_id: source, lat: d.centroidLat, lon: d.centroidLon } });
         }
       } else if (source === 'who-outbreaks' || source === 'ecdc-threats') {
@@ -92,7 +91,7 @@ function detect(watch, settings, now = Date.now()) {
         const published = Date.parse(o.publishedAt);
         const level = published <= now && published >= now - 7 * 86400000 ? 3 : 1;
         const authority = source === 'who-outbreaks' ? 'the World Health Organization' : 'the European Centre for Disease Prevention and Control';
-        emit(row, o, level, o.title || 'CBRN-relevant outbreak report', `${authority} reports an outbreak whose title names a CBRN-relevant agent: ${matched.join(', ')}. Most such outbreaks are natural, and this report does not establish a deliberate release. The report carries the authority's own risk assessment and advice; ours adds nothing to it. Updated outbreak investigations, agent confirmation and local public-health guidance would change this assessment.`, { agents: matched, publishedAt: o.publishedAt ?? null, authority }, undefined, 'Read the authority\u2019s own advice in the linked report \u2014 it supersedes anything here. This is a public-health report, not an instruction to act. Follow your local public-health authority.');
+        emit(row, o, level, o.title || 'CBRN-relevant outbreak report', `${authority} outbreak report; title matches: ${matched.join(', ')}.`, { agents: matched, publishedAt: o.publishedAt ?? null, authority });
       } else {
         // Aggregate and agency feeds are collected for context, but emitting an
         // event for every item would flood the operator surface with routine
@@ -102,7 +101,7 @@ function detect(watch, settings, now = Date.now()) {
         const incident = /\b(incident|emergency|release|leak|spill|fire|explosion|attack|strike|shelling|shelled|damage|evacuat\w*|alert|contamination|radiation levels?|power (?:loss|cut)|shutdown|scram|safeguards)\b/iu.test(text);
         const agentHit = agents.filter(([, re]) => re.test(text)).map(([term]) => term);
         if (!incident && !agentHit.length) continue;
-        emit(row, o, 1, o.title || source, `${source === 'healthmap-alerts' ? 'HealthMap is an aggregate disease-reporting source, not a confirmed incident assessment.' : 'IAEA news is agency communication, not necessarily an emergency notice.'} ${o.title || 'Untitled item'}. Operator watch only. ${context}`, { observation_kind: o.kind ?? null, agents: agentHit });
+        emit(row, o, 1, o.title || source, `${o.title || 'Untitled item'}. Source: ${source}, ${source === 'healthmap-alerts' ? 'aggregate disease reports' : 'agency news'}.`, { observation_kind: o.kind ?? null, agents: agentHit });
       }
     }
   }
@@ -110,7 +109,7 @@ function detect(watch, settings, now = Date.now()) {
     const nearby = trips.filter((other) => other.site === trip.site && Math.abs(other.row.observed_at - trip.row.observed_at) <= 3600000);
     // A rolling one-hour interval, not a two-hour radius, must contain all units.
     const grouped = nearby.some((start) => new Set(nearby.filter((other) => other.row.observed_at >= start.row.observed_at && other.row.observed_at <= start.row.observed_at + 3600000).map((other) => other.d.unit)).size >= 3);
-    emit(trip.row, trip.o, grouped ? 3 : 1, `Reactor power drop: ${trip.d.unit}`, `NRC reports ${trip.d.unit} at ${trip.d.powerPercent}% power, down from ${trip.previous}% in the most recent available observation at least 30 minutes earlier.${grouped ? ' At least three units at this site dropped within one hour.' : ''} This is a unit-trip signal, not proof of a radiological release; planned shutdowns can look the same. NRC event notices and subsequent power readings would clarify the cause.`, { unit: trip.d.unit, site: trip.site, powerPercent: trip.d.powerPercent, previousPowerPercent: trip.previous, multiple_units: grouped });
+    emit(trip.row, trip.o, grouped ? 3 : 1, `Reactor power drop: ${trip.d.unit}`, `NRC reports ${trip.d.unit}: ${trip.previous}% -> ${trip.d.powerPercent}% power; previous observation >= 30 minutes earlier.${grouped ? ' >= 3 units at this site dropped within 1 hour.' : ''} Threshold: previous power >= 50%, current power <= 5%.`, { unit: trip.d.unit, site: trip.site, powerPercent: trip.d.powerPercent, previousPowerPercent: trip.previous, multiple_units: grouped });
   }
   summary.events = events.length;
   return { summary, events, states };

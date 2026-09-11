@@ -24,10 +24,8 @@
 //      Severity keeps its existing meaning: watch (operator-only) <
 //      elevated < high < critical.
 //
-// Alert text is the product. Every emitted event carries what was measured,
-// where, how uncertain we are, what would change the reading, and what a
-// person should actually do. Never a probability of war, never a claim the
-// measurement does not support.
+// Alert text reports measured values, thresholds, locations and source
+// provenance. Authority instruction text is relayed verbatim by its detector.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -58,35 +56,6 @@ const KIND = {
   // Cross-family agreement (written only by the fusion pass).
   FUSED: 'cbrn_fused',
 };
-
-// The protective line is part of the alert, not an afterthought. These are
-// the generic, official-guidance-shaped actions for the hazard class; the
-// authoritative local instruction always outranks them.
-const ACTION_BY_KIND = {
-  [KIND.RADIATION_ANOMALY]:
-    'If you are in the area: go inside, stay inside, close windows and vents, and follow your local official channels. Do not take potassium iodide unless officials instruct it.',
-  [KIND.RADIATION_NETWORK]:
-    'No action. This reports that a monitoring network stopped answering, so our picture of that area is worse than it looks.',
-  [KIND.AIRSPACE_VOID]:
-    'If you are in the area: follow local official instructions and expect transport disruption. Nothing here establishes a hazard on the ground.',
-  [KIND.AIRCRAFT_EMERGENCY]:
-    'No action for the public. This reports aircraft declaring an in-flight emergency in one region.',
-  [KIND.SPECIAL_AIRCRAFT]:
-    'No action. Routine training and special-mission flights look like this too.',
-  [KIND.LEXICAL_BURST]:
-    'If you are in the area and people nearby report smoke, smells, or breathing trouble: get inside, close windows, and follow official channels.',
-  [KIND.OFFICIAL_NOTICE]:
-    'Follow the issuing authority\u2019s instruction in the original wording. It outranks anything this site says.',
-  [KIND.FUSED]:
-    'Follow your local official channels. If a release is later confirmed near you: go inside, close windows and vents, and wait for official instruction.',
-};
-
-function actionLineFor(kind, override) {
-  if (override) {
-    return override;
-  }
-  return ACTION_BY_KIND[kind] || ACTION_BY_KIND[KIND.FUSED];
-}
 
 function cbrnDbPath() {
   return process.env.EWS_CBRN_DB_PATH || DEFAULT_CBRN_DB;
@@ -282,9 +251,7 @@ function recordIngestRun(db, { source, ok, error = null, detail = null }) {
 
 // ------------------------------------------------------------- event writing
 
-// Compose one alert_events row. `message` states what was measured and how
-// uncertain it is; the protective line and the source/observed footer are
-// appended here so no detector has to remember them.
+// Compose one alert_events row and append observation/source provenance.
 function buildCbrnEvent({
   kind,
   level,
@@ -293,12 +260,10 @@ function buildCbrnEvent({
   message,
   payload = {},
   keyParts = [],
-  action,
   source,
   publicUrl,
 }) {
   const severity = severityForLevel(level);
-  const actionLine = actionLineFor(kind, action);
   const footer = [
     `Observed ${occurredAt}`,
     source ? `source ${source}` : null,
@@ -313,8 +278,8 @@ function buildCbrnEvent({
     eventKey: [kind, ...keyParts].join(':'),
     occurredAt,
     title,
-    message: `${message}\n\n${actionLine}\n\n${footer}`,
-    payloadJson: JSON.stringify({ ...payload, kind, severity, actionLine }),
+    message: `${message}\n\n${footer}`,
+    payloadJson: JSON.stringify({ ...payload, kind, severity }),
     status: 'pending',
   };
 }
@@ -355,8 +320,6 @@ function insertCbrnEvent(db, event) {
 module.exports = {
   CBRN_COHORT,
   KIND,
-  ACTION_BY_KIND,
-  actionLineFor,
   cbrnDbPath,
   openCbrnDb,
   ensureCbrnSchema,
