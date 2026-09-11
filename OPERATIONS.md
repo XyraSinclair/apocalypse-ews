@@ -3,7 +3,7 @@
 The public surface combines a browser-local household alert plan, a separate
 official-source notice display, and a continuous digital watch of observations,
 immutable revisions, incident threads, bounded investigations, and handovers.
-The existing aviation instrument remains at `/aviation`, with three aggregate
+The existing aviation instrument publishes dashboard JSON only, with three aggregate
 cohorts: `global_business_jet`, `global_military_aircraft`, and
 `non_icao_untracked`. None establishes attack intent, safety, or successful
 warning delivery to a resident.
@@ -67,13 +67,20 @@ nameservers at Cloudflare (zones on the Xyrasinclair@gmail.com account);
 `EWS_PUBLIC_URL=https://warning.watch` in `/etc/apocalypse-ews.env` makes
 confirmation and management links absolute.
 
+The public surface is **one page** at <https://warning.watch/>: current
+instruments, the alert feed, the detection thresholds, and which baselines are
+still warming. `/signup` and `/manage` remain routable because those links
+arrive by email; every other former page (watch, cbrn, aviation, plan,
+event-signals) is unrouted, and its component source is retained in the
+repository but is no longer served or bundled.
+
 Endpoints (public via the tunnel, or loopback via `ssh -L 3030:127.0.0.1:3030
 xyra-dev-hetzner`):
 
-- Watch: <https://warning.watch/> and `/watch`; public `/api/watch` and `/api/watch/incidents/:id`
-- Household planner: <https://warning.watch/plan>; private browser storage, offline HTML and print, blank-plan sharing only
+- Public page: <https://warning.watch/>; status data at `/api/status`
+- Watch data: public `/api/watch` and `/api/watch/incidents/:id`
 - Official-source notices: `/api/watch/official`, optionally `?state=CA`; independent of the private incident publication gate
-- Aviation: <https://warning.watch/aviation>; `/dashboard.json`, `/military-dashboard.json`, `/untracked-dashboard.json`
+- Aviation data: `/dashboard.json`, `/military-dashboard.json`, `/untracked-dashboard.json`
 - Operator watch: the on-page operator control uses the existing `INTERNAL_ALERT_TOKEN` for `/api/admin/watch`, incident detail, and review. The token is held only in page memory; refresh clears it.
 - **RSS feed**: <https://warning.watch/rss.xml> — fires on emergency-level changes and alert events
 - Ops/event feeds: `data/published/operations.json`, `event-signals.json`
@@ -232,7 +239,7 @@ stages, per-network station counts and reading ages, whether any network
 reported inside four hours, and consecutive collection failures (bound 6). The
 verdict treats "no gamma network reported within four hours" as a problem — a
 blind radiological instrument must never read as calm. The public picture is at
-<https://warning.watch/cbrn>, backed by `/api/cbrn` (no auth, `no-store`,
+<https://warning.watch/cbrn>, backed by `/api/status` (no auth, `no-store`,
 public severities only).
 
 Coverage limits are operational facts, not caveats: gamma telemetry is the
@@ -330,6 +337,13 @@ quoted source material, not verified events or machine findings.
 
 ## Civilian reliance contract
 
+**Status: not served.** The household plan and its guidance surface are
+unrouted as of 11 September 2026 — the public site is one page of measurements
+and alerts. The analysis below is retained because it still describes how the
+plan's properties fail; the component source remains in the repository, and
+`/signup` and `/manage` still route for subscription links that arrive by
+email.
+
 The resident product is a plan for receiving and acting on an official warning
 while continuing ordinary city life. Its useful unit is a household decision,
 not a dramatic signal, a queue item, or a predicted attack probability. Preparation,
@@ -361,7 +375,7 @@ The following taxonomy ties product properties to concrete ways they can fail.
 | Community trust and maintenance | Share the blank planner; identify source/review/export dates and practical assumptions needing review; do not invent staffed monitoring | A forwarded plan leaks personal details, or an old shelter/access assumption is treated as a maintained community guarantee |
 | Evidence proportionate to reliance | Release claims follow direct behavior, independent review and live verification; compilation alone proves neither timely delivery nor useful action | Correct code and attractive screens are used to claim unobserved locked-device delivery or survival outcomes |
 
-The current resident surface is [https://warning.watch/plan](https://warning.watch/plan).
+The former resident surface was `/plan`, which is no longer routed.
 Its entries are local to that browser, not an encrypted household account or a
 community coordination service. The static export is a separate private copy;
 deleting browser data does not erase copies already downloaded or printed.

@@ -44,7 +44,9 @@ CBRN instruments ──► deterministic detectors ──► alert_events ──
   means the instrument is unavailable, never that the world is safe.
 - **Keyed, cursored fanout**: repeated samples do not create new statistical
   evidence. External delivery can remain uncertain after a lost acknowledgment.
-- The aviation instrument lives at `/aviation` and keeps its own calibration:
+- The aviation instrument keeps its own calibration and publishes dashboard
+  JSON at `/dashboard.json`, `/military-dashboard.json` and
+  `/untracked-dashboard.json`:
   ADS-B Exchange public heatmaps (30-minute source slots, checked every 2
   minutes) scored against seasonal baselines for three cohorts.
 - The full pipelines are two commands (`npm run refresh:all`, `npm run
@@ -59,7 +61,7 @@ CBRN instruments ──► deterministic detectors ──► alert_events ──
 | Public vocabulary | CBRN event-word counts by place | one public post stream + one news index | hourly |
 | Official notices | CBRN alerts and instructions | NWS CAP, NRC events and reactor status, FAA TFRs, WHO, ECDC, IAEA, HealthMap | 10 min – 1 h |
 
-Public CBRN alerts are published at `/cbrn` and pushed through the same
+Public alerts appear on the single page at `/` and are pushed through the same
 channels as the aviation instrument. The highest-value alert in the system is
 not ours at all: an actual *Nuclear Power Plant Warning*, *Radiological Hazard
 Warning* or *Hazardous Materials Warning* CAP message is relayed at critical
