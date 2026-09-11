@@ -35,10 +35,14 @@ function readAlerts(db) {
   if (!db) return [];
   try {
     const placeholders = PUBLIC_SEVERITIES.map(() => "?").join(", ");
+    // A retracted alert was raised under a threshold the instrument has since
+    // recalibrated. It stays in the record with its delivery state intact, and
+    // leaves the public feed.
     return db.prepare(
       `SELECT kind, severity, cohort, occurred_at AS occurredAt, title, message
          FROM alert_events
         WHERE severity IN (${placeholders})
+          AND json_extract(payload_json, '$.retracted') IS NULL
         ORDER BY occurred_at DESC, id DESC LIMIT ?`,
     ).all(...PUBLIC_SEVERITIES, MAX_ALERTS);
   } catch {
