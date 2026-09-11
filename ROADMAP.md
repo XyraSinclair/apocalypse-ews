@@ -12,6 +12,36 @@ The initial continuous watch is implemented separately from the aviation
 calibration roadmap. Its enabled sources, bounds, operator-only assessments,
 and remaining coverage limits are documented in [OPERATIONS.md](OPERATIONS.md).
 
+## CBRN alarm layer (implemented 10 September 2026)
+
+The system's product focus is CBRN risk, and the instrument that carries it is
+the deterministic alarm layer documented in [CBRN-WATCH.md](CBRN-WATCH.md):
+open gamma telemetry, sampled civil air traffic over CBRN-relevant geographies,
+public vocabulary bursts, and authority notices, all gated by a statistical
+departure *and* an absolute physical magnitude, and all delivered through the
+existing subscriber fan-out. Operations and verification commands are in
+[OPERATIONS.md](OPERATIONS.md) § CBRN watch.
+
+What this layer deliberately does **not** claim: prediction, global coverage,
+or that a quiet instrument means safety. Its open work:
+
+- **Warm-up is the current state.** The radiological detector arms per station
+  after 48 hourly samples (two days) and the aircraft detector after ten
+  same-hour samples over 21 days. Until then both report `warming`.
+- **Radiation coverage is European** because no open global network exists.
+  EPA RadNet publishes laboratory data rather than near-real-time telemetry;
+  CTBTO's IMS network is treaty-restricted; ProMED moved behind a subscription.
+- **The BfS EURDEP mirror needs lag monitoring.** It is a national regulator's
+  republication of a European feed whose authoritative JRC service was stale.
+- **Vocabulary coverage is one post stream and one news index**, and its
+  latency advantage over official reporting remains a hypothesis to measure,
+  not an established fact.
+- **Alarm calibration is unproven until it has seen a real event.** The
+  thresholds are defended by measurement and physics, not by a record of
+  correct alerts. The first year of firing history is the evidence that will
+  matter, and it should be published.
+- **The fusion pass has had no live multi-family agreement yet.**
+
 ## 0. The contract (the whole system in one sentence)
 
 > **One Hetzner box checks public ADS-B archives every two minutes, scores each

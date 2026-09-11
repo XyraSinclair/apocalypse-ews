@@ -18,6 +18,11 @@ const THEATERS = [
   ['Israel/regional escalation', /israel|iran|iraq|lebanon|jordan|gulf|gaza|syria|yemen|ישראל|איראן|إيران|اسرائيل/iu],
 ];
 const POST_RELEVANCE = /nuclear (?:war|weapon|threat|attack|strike|test|detonation|explosion)|atomic bomb|radiation (?:leak|emergency)|radioactive (?:plume|release)|radiological (?:hazard|emergency)|missile (?:launch|attack|warning)|embassy.{0,40}evacuat|shelter.in.place|ядерн|核武|核战|核戰|核攻|核実験|핵무기|핵실험|핵공격|גרעיני|نووي|परमाणु/iu;
+// CBRN event vocabulary. POST_RELEVANCE selects nuclear-strategy reporting; this
+// selects a release in progress, which is what the CBRN vocabulary instrument
+// counts. Deliberately excludes bare "evacuation" and "shelter in place": those
+// are ordinary and would swamp both the incident queue and the burst baseline.
+const CBRN_EVENT_RELEVANCE = /radiation (?:leak|level|spike|alarm|cloud)|radioactive (?:cloud|plume|release|contamination)|chemical (?:leak|cloud|release|spill|attack)|toxic (?:cloud|gas|release)|gas cloud|chlorine (?:leak|cloud|gas)|iodine (?:tablet|pill)|geiger counter|cesium-137|iodine-131|polonium|sarin|novichok|anthrax|smallpox|радиац|радіац|химическ\w* (?:оруж|атак)|токсичн|放射能|放射性|有毒气体|방사능|화학 물질|تسرب إشعاعي|تسرب كيميائي|गैस रिसाव/iu;
 const CIVIL_EVENTS = ['Civil Emergency Message', 'Civil Danger Warning', 'Evacuation Immediate', 'Hazardous Materials Warning', 'Nuclear Power Plant Warning', 'Radiological Hazard Warning', 'Shelter In Place Warning', 'Tsunami Warning'];
 
 function definition(id, name, family, mechanism, dependenceGroup, url, pollSeconds, staleSeconds, notes, extra = {}) {
@@ -467,7 +472,7 @@ function noaa(def, doc) {
 }
 async function gdelt(def, options) {
   const url = new URL(def.url);
-  const query = '("nuclear weapon" OR "nuclear war" OR "nuclear threat" OR "nuclear test" OR "missile attack" OR "embassy evacuation")';
+  const query = '("nuclear weapon" OR "nuclear war" OR "nuclear threat" OR "nuclear test" OR "missile attack" OR "embassy evacuation" OR "radiation leak" OR "chemical leak" OR "chemical cloud" OR "toxic cloud" OR "gas cloud" OR "iodine tablets" OR "Geiger counter")';
   for (const [key, value] of Object.entries({ query, mode: 'artlist', format: 'json', maxrecords: '100', timespan: '24h', sort: 'datedesc' })) url.searchParams.set(key, value);
   const response = await fetchBody(url.href, options);
   const doc = parseJson(response.body);
@@ -556,7 +561,7 @@ async function bluesky(def, options) {
         const previous = tracked.get(uri);
         if (e.operation !== 'delete') requireShape(e.record && typeof e.record.text === 'string', 'Jetstream post text missing');
         const body = e.record?.text || '';
-        const matched = POST_RELEVANCE.test(body);
+        const matched = POST_RELEVANCE.test(body) || CBRN_EVENT_RELEVANCE.test(body);
         if (matched || previous) {
           const labels = matched ? attribution(body) : previous;
           const title = matched ? text(body, 200) : previous.title;
