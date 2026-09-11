@@ -248,6 +248,12 @@ function detectFlightBehaviour() {
     ]);
   }
 }
+// Runs after every signal producer and before any delivery: an uncorroborated
+// top-tier claim is reported one step lower, in the same pass, so it never
+// reaches a subscriber as a critical.
+function enforceSignalCorroboration() {
+  run('node', ['scripts/enforce_signal_corroboration.js', '--db', MAIN_DB]);
+}
 // Alert channels are independent, cursored, and retry-safe: one channel
 // failing must not stop the others (or the feed exports downstream). Failed
 // stages are collected and the run still exits nonzero at the end so the
@@ -372,6 +378,7 @@ try {
 }
 // Even failed acquisition must not strand previously queued deliveries.
 runStage('flight-behaviour', detectFlightBehaviour);
+runStage('signal-corroboration', enforceSignalCorroboration);
 updateAlerts();
 runStage('operations-feed', exportOperationsFeed);
 runStage('event-signals-feed', exportEventSignalsFeed);
