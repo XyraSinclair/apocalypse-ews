@@ -14,6 +14,20 @@ and remaining coverage limits are documented in [OPERATIONS.md](OPERATIONS.md).
 
 ## CBRN alarm layer (implemented 10 September 2026)
 
+**Calibration correction, 11 September 2026.** The severity ladder was firing
+about seven times more often than this document specifies — one public alert
+every two days against a target of roughly monthly. The cause was treating
+count series as if their tails were Gaussian: a 3.5-sigma departure on thirty
+seconds of thought is not, on real takeoff data, a rare event. Every evaluated
+slot's score is now recorded, severity thresholds are empirical quantiles of
+that record with the allowed exceedance count annualised from the span actually
+covered, a tier fires only on a strict exceedance of the (k+1)-th largest
+score, and no tier is reported unless its threshold is strictly separated from
+the one below. Until five hundred slots exist the ladder falls back to
+5.0 / 6.5 / 8.0 and each event carries the ladder it was judged against. The
+public tier also now excludes agency reports: a published outbreak bulletin is
+a report, not one of our detections, and stays on the operator surface.
+
 The system's product focus is CBRN risk, and the instrument that carries it is
 the deterministic alarm layer documented in [CBRN-WATCH.md](CBRN-WATCH.md):
 open gamma telemetry, sampled civil air traffic over CBRN-relevant geographies,
